@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="192" height="192">
+  <defs>
+    <linearGradient id="bgGrad192" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="50%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#0d9488" />
+    </linearGradient>
+    <linearGradient id="accentGrad192" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad192)" />
+  <g>
+    <path d="M 120 250 L 256 130 L 392 250 L 364 250 L 364 370 C 364 382 354 392 342 392 L 170 392 C 158 392 148 382 148 370 L 148 250 Z" fill="#ffffff" />
+    <path d="M 226 392 L 226 312 C 226 295 240 282 256 282 C 272 282 286 295 286 312 L 286 392 Z" fill="#047857" />
+    <circle cx="340" cy="340" r="54" fill="url(#accentGrad192)" stroke="#ffffff" stroke-width="6" />
+    <path d="M 318 326 L 326 326 L 333 348 L 354 348 L 359 334 L 328 334" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="334" cy="355" r="3.5" fill="#ffffff" />
+    <circle cx="351" cy="355" r="3.5" fill="#ffffff" />
+  </g>
+</svg>

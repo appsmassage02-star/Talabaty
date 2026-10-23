@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="50%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#0d9488" />
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- Background Rounded Canvas -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+
+  <!-- Background Subtle Grid Pattern -->
+  <circle cx="256" cy="256" r="190" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.15" />
+  <circle cx="256" cy="256" r="230" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.1" />
+
+  <!-- Main House Vector (Centered) -->
+  <g filter="url(#dropShadow)">
+    <!-- Roof -->
+    <path d="M 120 250 L 256 130 L 392 250 L 364 250 L 364 370 C 364 382 354 392 342 392 L 170 392 C 158 392 148 382 148 370 L 148 250 Z" fill="#ffffff" />
+    
+    <!-- Chimney -->
+    <path d="M 320 186 L 350 212 L 350 156 L 320 156 Z" fill="#ffffff" fill-opacity="0.9" />
+
+    <!-- House Door Arch -->
+    <path d="M 226 392 L 226 312 C 226 295 240 282 256 282 C 272 282 286 295 286 312 L 286 392 Z" fill="#047857" />
+
+    <!-- Smart Grocery Shopping Cart / Sparkle Badge -->
+    <circle cx="340" cy="340" r="54" fill="url(#accentGrad)" stroke="#ffffff" stroke-width="6" />
+    
+    <!-- Cart Icon inside badge -->
+    <path d="M 318 326 L 326 326 L 333 348 L 354 348 L 359 334 L 328 334" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="334" cy="355" r="3.5" fill="#ffffff" />
+    <circle cx="351" cy="355" r="3.5" fill="#ffffff" />
+  </g>
+
+  <!-- Sparkles for AI / Smart features -->
+  <path d="M 160 170 L 164 182 L 176 186 L 164 190 L 160 202 L 156 190 L 144 186 L 156 182 Z" fill="#fef08a" />
+  <path d="M 370 110 L 373 120 L 383 123 L 373 126 L 370 136 L 367 126 L 357 123 L 367 120 Z" fill="#fef08a" />
+</svg>

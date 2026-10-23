@@ -1,0 +1,6 @@
+{
+  "name": "طلباتي",
+  "description": "تطبيق إدارة طلبات ونواقص وميزانية المنزل بنظام الصلاحيات (المسؤول / هاتف المنزل) مع الذكاء الاصطناعي Gemini والربط عبر QR Code",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

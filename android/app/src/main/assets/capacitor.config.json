@@ -1,0 +1,9 @@
+{
+	"appId": "com.talabat.albayt",
+	"appName": "طلبات البيت",
+	"webDir": "dist",
+	"bundledWebRuntime": false,
+	"server": {
+		"androidScheme": "https"
+	}
+}
