@@ -9,6 +9,8 @@ import {
   FoodCustomerAddress,
   FoodOrderStatus,
   FoodDeliveryStatus,
+  RestaurantSectionSettings,
+  RestaurantCategory,
 } from '../types/foodTypes';
 import { foodService, RestaurantFilterParams } from '../services/foodService';
 
@@ -98,6 +100,11 @@ interface FoodContextType {
   toggleFavoriteMenuItem: (id: string) => void;
   isRestaurantFavorite: (id: string) => boolean;
   isMenuItemFavorite: (id: string) => boolean;
+
+  // Supabase Section Settings & Categories
+  sectionSettings: RestaurantSectionSettings | null;
+  isSectionDisabled: boolean;
+  dbCategories: RestaurantCategory[];
 }
 
 const FoodContext = createContext<FoodContextType | null>(null);
@@ -131,9 +138,32 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Addresses state
   const [addresses, setAddresses] = useState<FoodCustomerAddress[]>([]);
 
-  // Favorites state (in memory for clean reactivity)
-  const [favoriteRestaurantIds, setFavoriteRestaurantIds] = useState<string[]>(['rest-1', 'rest-3']);
-  const [favoriteMenuItemIds, setFavoriteMenuItemIds] = useState<string[]>(['item-101', 'item-301']);
+  // Supabase Section Settings & Categories
+  const [sectionSettings, setSectionSettings] = useState<RestaurantSectionSettings | null>(null);
+  const [isSectionDisabled, setIsSectionDisabled] = useState<boolean>(false);
+  const [dbCategories, setDbCategories] = useState<RestaurantCategory[]>([]);
+
+  // Favorites state (loaded from Supabase restaurant_favorites)
+  const [favoriteRestaurantIds, setFavoriteRestaurantIds] = useState<string[]>([]);
+  const [favoriteMenuItemIds, setFavoriteMenuItemIds] = useState<string[]>([]);
+
+  // Fetch Section Settings, Categories, and Customer Favorites from Supabase
+  useEffect(() => {
+    foodService.getSectionSettings().then((settings) => {
+      setSectionSettings(settings);
+      if (settings && settings.section_enabled === false) {
+        setIsSectionDisabled(true);
+      }
+    });
+
+    foodService.listCategories().then((cats) => {
+      setDbCategories(cats);
+    });
+
+    foodService.listCustomerFavorites().then((favs) => {
+      setFavoriteRestaurantIds(favs);
+    });
+  }, []);
 
   // Load restaurants
   const refreshRestaurants = useCallback(async () => {
@@ -458,6 +488,9 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
         toggleFavoriteMenuItem,
         isRestaurantFavorite,
         isMenuItemFavorite,
+        sectionSettings,
+        isSectionDisabled,
+        dbCategories,
       }}
     >
       {children}

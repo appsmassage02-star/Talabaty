@@ -180,3 +180,104 @@ export type FoodSectionView =
   | 'orders'
   | 'favorites'
   | 'offers';
+
+// Supabase Schema Interfaces for Read-Only integration
+export interface RestaurantSectionSettings {
+  id: string;
+  section_enabled: boolean;
+  global_max_delivery_radius_km: number;
+  no_driver_timeout_minutes: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RestaurantCategory {
+  id: string;
+  name: string;
+  image_url: string | null;
+  sort_order: number;
+  is_active: boolean;
+  created_at?: string;
+}
+
+export interface RestaurantCategoryLink {
+  restaurant_id: string;
+  category_id: string;
+}
+
+export interface RestaurantMenuCategory {
+  id: string;
+  restaurant_id: string;
+  name: string;
+  sort_order: number;
+  is_active: boolean;
+  created_at?: string;
+}
+
+export interface RawDbRestaurant {
+  id: string;
+  owner_user_id: string | null;
+  name: string;
+  description: string | null;
+  phone: string | null;
+  address: string | null;
+  latitude: number;
+  longitude: number;
+  image_url: string | null;
+  is_active: boolean;
+  is_open: boolean;
+  max_delivery_radius_km: number | null;
+  commission_percent: number | null;
+  delivery_fee: number | null;
+  food_money_settlement_mode: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RawDbMenuItem {
+  id: string;
+  restaurant_id: string;
+  category_id: string | null;
+  name: string;
+  description: string | null;
+  image_url: string | null;
+  price: number;
+  is_available: boolean;
+  sort_order: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RawDbItemOption {
+  id: string;
+  restaurant_id: string;
+  menu_item_id: string;
+  name: string;
+  required: boolean;
+  min_select: number;
+  max_select: number;
+  sort_order: number;
+}
+
+export interface RawDbItemOptionValue {
+  id: string;
+  option_id: string;
+  name: string;
+  extra_price: number;
+  is_available: boolean;
+  sort_order: number;
+}
+
+export interface RawDbOffer {
+  id: string;
+  restaurant_id: string;
+  title: string;
+  description: string | null;
+  discount_type: 'percentage' | 'fixed_amount';
+  discount_value: number;
+  starts_at: string | null;
+  ends_at: string | null;
+  is_active: boolean;
+  created_at?: string;
+}
+

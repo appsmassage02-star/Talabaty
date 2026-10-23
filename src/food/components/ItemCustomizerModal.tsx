@@ -42,8 +42,6 @@ export const ItemCustomizerModal: React.FC<Props> = ({ item, onClose }) => {
     }
   }, [item]);
 
-  if (!item) return null;
-
   // Toggle selection for an option
   const handleToggleOption = (groupId: string, optionId: string, group: NonNullable<MenuItem['optionGroups']>[number]) => {
     setValidationError(null);
@@ -81,7 +79,7 @@ export const ItemCustomizerModal: React.FC<Props> = ({ item, onClose }) => {
 
   // Convert map to flat array of selected options
   const flatSelectedOptions: FoodCartSelectedOption[] = useMemo(() => {
-    if (!item.optionGroups) return [];
+    if (!item || !item.optionGroups) return [];
     const list: FoodCartSelectedOption[] = [];
 
     item.optionGroups.forEach((group) => {
@@ -105,12 +103,12 @@ export const ItemCustomizerModal: React.FC<Props> = ({ item, onClose }) => {
 
   // Pricing calculations
   const addOnsTotal = flatSelectedOptions.reduce((sum, o) => sum + o.price, 0);
-  const unitPrice = item.price + addOnsTotal;
+  const unitPrice = (item?.price || 0) + addOnsTotal;
   const totalPrice = unitPrice * quantity;
 
   // Validate mandatory option groups
   const validateSelections = (): boolean => {
-    if (!item.optionGroups) return true;
+    if (!item || !item.optionGroups) return true;
 
     for (const group of item.optionGroups) {
       const selected = selectedOptionsMap[group.id] || [];
@@ -123,6 +121,7 @@ export const ItemCustomizerModal: React.FC<Props> = ({ item, onClose }) => {
   };
 
   const handleAddToCart = () => {
+    if (!item) return;
     if (!validateSelections()) return;
 
     addToCart(item, quantity, flatSelectedOptions, notes);
@@ -130,6 +129,8 @@ export const ItemCustomizerModal: React.FC<Props> = ({ item, onClose }) => {
     // Open cart drawer for delightful instant feedback
     setIsCartDrawerOpen(true);
   };
+
+  if (!item) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/70 backdrop-blur-xs animate-in fade-in duration-200">

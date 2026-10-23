@@ -19,6 +19,7 @@ import {
   Store,
   Tag,
   Bike,
+  AlertCircle,
 } from 'lucide-react';
 
 interface FoodSectionProps {
@@ -39,6 +40,7 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
     selectedOrderForDetail,
     setSelectedOrderForDetail,
     navigateBackToFoodHome,
+    isSectionDisabled,
   } = useFood();
 
   const activeOrdersCount = orders.filter(
@@ -52,7 +54,16 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
 
   return (
     <div className="space-y-4 text-right">
-      
+      {/* Section Disabled Alert Banner */}
+      {isSectionDisabled && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded-2xl flex items-center space-x-2.5 space-x-reverse text-xs font-bold animate-in fade-in shadow-xs">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>
+            قسم الأكلات الجاهزة والمطاعم معطل حالياً بقرار من الإدارة لأعمال الصيانة والتحديث. تصفح القوائم متاح للمعاينة فقط.
+          </span>
+        </div>
+      )}
+
       {/* Top Application Bar with Return to Household & Food Nav */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <button
