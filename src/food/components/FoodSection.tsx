@@ -41,6 +41,7 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
     setSelectedOrderForDetail,
     navigateBackToFoodHome,
     isSectionDisabled,
+    sectionSettings,
   } = useFood();
 
   const activeOrdersCount = orders.filter(
@@ -59,7 +60,8 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
         <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded-2xl flex items-center space-x-2.5 space-x-reverse text-xs font-bold animate-in fade-in shadow-xs">
           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
           <span>
-            قسم الأكلات الجاهزة والمطاعم معطل حالياً بقرار من الإدارة لأعمال الصيانة والتحديث. تصفح القوائم متاح للمعاينة فقط.
+            {sectionSettings?.status_message ||
+              'قسم الأكلات الجاهزة والمطاعم معطل حالياً بقرار من الإدارة لأعمال الصيانة والتحديث. تصفح القوائم متاح للمعاينة فقط.'}
           </span>
         </div>
       )}

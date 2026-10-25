@@ -189,6 +189,7 @@ export interface RestaurantSectionSettings {
   no_driver_timeout_minutes: number;
   created_at?: string;
   updated_at?: string;
+  status_message?: string;
 }
 
 export interface RestaurantCategory {

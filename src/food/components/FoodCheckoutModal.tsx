@@ -24,6 +24,8 @@ export const FoodCheckoutModal: React.FC = () => {
     addresses,
     submitRestaurantOrder,
     addNewAddress,
+    sectionSettings,
+    isSectionDisabled,
   } = useFood();
 
   const { household, supabaseProfile, supabaseUser } = useApp();
@@ -124,6 +126,14 @@ export const FoodCheckoutModal: React.FC = () => {
 
     setErrorMessage(null);
 
+    if (!sectionSettings || !sectionSettings.section_enabled || isSectionDisabled) {
+      setErrorMessage(
+        sectionSettings?.status_message ||
+          'قسم المطاعم غير متاح حالياً؛ لم يتم ضبط أو تفعيل إعدادات القسم في قاعدة البيانات (restaurant_section_settings).'
+      );
+      return;
+    }
+
     if (!household?.id) {
       setErrorMessage('لم يتم العثور على منزل مسجل لحسابك. يرجى الانضمام إلى منزل أو إنشاء منزل أولاً لإتمام الطلب.');
       return;
@@ -191,11 +201,28 @@ export const FoodCheckoutModal: React.FC = () => {
         {/* Scrollable Checkout Content */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 text-right">
           
+          {/* Section Disabled / Settings Warning */}
+          {(!sectionSettings || !sectionSettings.section_enabled || isSectionDisabled) && (
+            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-2xl text-xs text-amber-950 flex items-start space-x-2.5 space-x-reverse animate-in fade-in shadow-2xs">
+              <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-1 leading-relaxed">
+                <p className="font-black text-amber-900">إنشاء طلبات المطاعم متوقف حالياً:</p>
+                <p className="font-medium text-amber-800">
+                  {sectionSettings?.status_message ||
+                    'قسم المطاعم غير متاح حالياً أو لم يتم ضبط سجل الإعدادات في جدول restaurant_section_settings.'}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Error Message */}
           {errorMessage && (
-            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs font-bold flex items-center space-x-2 space-x-reverse animate-in fade-in">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>{errorMessage}</span>
+            <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-2xl text-xs text-rose-950 flex items-start space-x-2.5 space-x-reverse animate-in fade-in shadow-2xs">
+              <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+              <div className="space-y-1 leading-relaxed">
+                <p className="font-black text-rose-900">تعذر إتمام طلب المطعم:</p>
+                <p className="font-medium text-rose-800 whitespace-pre-line">{errorMessage}</p>
+              </div>
             </div>
           )}
 
@@ -480,7 +507,7 @@ export const FoodCheckoutModal: React.FC = () => {
           <button
             type="button"
             onClick={handleConfirmOrder}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !sectionSettings || !sectionSettings.section_enabled || isSectionDisabled}
             className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl text-xs sm:text-sm font-black flex items-center justify-center space-x-2 space-x-reverse shadow-lg shadow-emerald-600/25 transition-all"
           >
             {isSubmitting ? (
@@ -488,6 +515,8 @@ export const FoodCheckoutModal: React.FC = () => {
                 <RefreshCw className="w-4 h-4 animate-spin ml-1" />
                 <span>جاري تسجيل الطلب...</span>
               </>
+            ) : !sectionSettings || !sectionSettings.section_enabled || isSectionDisabled ? (
+              <span>الطلب متوقف (إعدادات القسم غير مفعلة)</span>
             ) : (
               <>
                 <Check className="w-4 h-4 ml-1" />

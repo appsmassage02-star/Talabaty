@@ -11,6 +11,7 @@ import {
   Sparkles,
   Lock,
   AlertTriangle,
+  AlertCircle,
   Info,
   Store,
 } from 'lucide-react';
@@ -25,6 +26,8 @@ export const FoodCartDrawer: React.FC = () => {
     removeCartItem,
     clearRestaurantCart,
     startCheckoutForRestaurant,
+    isSectionDisabled,
+    sectionSettings,
   } = useFood();
 
   // Price change simulation confirmation state
@@ -72,6 +75,16 @@ export const FoodCartDrawer: React.FC = () => {
 
           {/* Drawer Content */}
           <div className="flex-1 overflow-y-auto p-4 space-y-5">
+            {isSectionDisabled && (
+              <div className="p-3 bg-amber-50 border border-amber-300 rounded-2xl text-xs text-amber-950 flex items-start space-x-2 space-x-reverse">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <span className="font-medium">
+                  {sectionSettings?.status_message ||
+                    'قسم المطاعم متوقف حالياً؛ تصفح الأصناف متاح للمعاينة فقط.'}
+                </span>
+              </div>
+            )}
+
             {cartRestaurantGroups.length === 0 ? (
               <div className="py-20 text-center space-y-3">
                 <div className="w-16 h-16 rounded-3xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
@@ -238,9 +251,9 @@ export const FoodCartDrawer: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => startCheckoutForRestaurant(group.restaurantId)}
-                          disabled={!isRestaurantOpen}
+                          disabled={!isRestaurantOpen || isSectionDisabled}
                           className={`w-full py-2.5 px-4 rounded-2xl text-xs font-black flex items-center justify-between transition-all shadow-md ${
-                            isRestaurantOpen
+                            isRestaurantOpen && !isSectionDisabled
                               ? 'bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white shadow-emerald-600/20'
                               : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
                           }`}
@@ -248,7 +261,9 @@ export const FoodCartDrawer: React.FC = () => {
                           <div className="flex items-center space-x-1.5 space-x-reverse">
                             <ShoppingBag className="w-4 h-4 ml-1" />
                             <span>
-                              {isRestaurantOpen
+                              {isSectionDisabled
+                                ? 'الطلب متوقف (إعدادات القسم معطلة)'
+                                : isRestaurantOpen
                                 ? `إتمام طلب (${group.restaurantName})`
                                 : 'المطعم مغلق - لا يمكن الإتمام الآن'}
                             </span>

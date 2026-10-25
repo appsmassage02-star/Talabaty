@@ -87,55 +87,74 @@ export const foodService = {
   async getSectionSettings(): Promise<RestaurantSectionSettings | null> {
     if (!isSupabaseConfigured() || !supabase) {
       return {
-        id: 'default',
-        section_enabled: true,
+        id: 'unconfigured',
+        section_enabled: false,
         global_max_delivery_radius_km: 15,
         no_driver_timeout_minutes: 10,
+        status_message: 'قاعدة بيانات Supabase غير مهيأة.',
       };
     }
 
     try {
       const { data, error } = await supabase
         .from('restaurant_section_settings')
-        .select('id, section_enabled, global_max_delivery_radius_km, no_driver_timeout_minutes, created_at, updated_at')
-        .limit(1)
-        .maybeSingle();
+        .select('id, section_enabled, global_max_delivery_radius_km, no_driver_timeout_minutes, created_at, updated_at');
 
       if (error) {
         console.warn('[foodService] Error reading restaurant_section_settings:', error.message);
         return {
-          id: 'fallback',
-          section_enabled: true,
+          id: 'error',
+          section_enabled: false,
           global_max_delivery_radius_km: 15,
           no_driver_timeout_minutes: 10,
+          status_message: `تعذر قراءة إعدادات قسم المطاعم من قاعدة البيانات: ${error.message}`,
         };
       }
 
-      if (!data) {
-        // If settings table is empty, treat as enabled by default
+      if (!data || data.length === 0) {
         return {
-          id: 'default-enabled',
-          section_enabled: true,
+          id: 'empty',
+          section_enabled: false,
           global_max_delivery_radius_km: 15,
           no_driver_timeout_minutes: 10,
+          status_message:
+            'قسم المطاعم غير متاح حالياً: جدول إعدادات القسم (restaurant_section_settings) فارغ ولا يحتوي على سجل تهيئة.',
         };
       }
+
+      if (data.length > 1) {
+        return {
+          id: 'ambiguous',
+          section_enabled: false,
+          global_max_delivery_radius_km: 15,
+          no_driver_timeout_minutes: 10,
+          status_message:
+            'تعذر تفعيل قسم المطاعم لوجود أكثر من سجل في جدول إعدادات القسم دون تحديد السجل النشط.',
+        };
+      }
+
+      const row = data[0];
+      const isEnabled = Boolean(row.section_enabled);
 
       return {
-        id: data.id,
-        section_enabled: Boolean(data.section_enabled),
-        global_max_delivery_radius_km: Number(data.global_max_delivery_radius_km) || 15,
-        no_driver_timeout_minutes: Number(data.no_driver_timeout_minutes) || 10,
-        created_at: data.created_at,
-        updated_at: data.updated_at,
+        id: row.id,
+        section_enabled: isEnabled,
+        global_max_delivery_radius_km: Number(row.global_max_delivery_radius_km) || 15,
+        no_driver_timeout_minutes: Number(row.no_driver_timeout_minutes) || 10,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        status_message: isEnabled
+          ? undefined
+          : 'قسم المطاعم متوقف حالياً من قِبل إدارة التطبيق (section_enabled = false).',
       };
     } catch (err: any) {
       console.warn('[foodService] Exception fetching restaurant_section_settings:', err);
       return {
-        id: 'fallback',
-        section_enabled: true,
+        id: 'exception',
+        section_enabled: false,
         global_max_delivery_radius_km: 15,
         no_driver_timeout_minutes: 10,
+        status_message: 'حدث استثناء غير متوقع أثناء فحص إعدادات قسم المطاعم.',
       };
     }
   },
@@ -815,7 +834,60 @@ export const foodService = {
     };
   },
 
-  // 11. Authoritative Create Restaurant Order (invoices -> delivery_orders -> delivery_order_items)
+  // Resolve Restaurant Delivery Fee with Area Priority
+  async resolveDeliveryFee(
+    restaurantId: string,
+    address?: FoodCustomerAddress,
+    defaultRestaurantFee: number = 15
+  ): Promise<number> {
+    if (!isSupabaseConfigured() || !supabase) return defaultRestaurantFee;
+    try {
+      const { data: areaFees, error: areaErr } = await supabase
+        .from('restaurant_area_delivery_fees')
+        .select('id, restaurant_id, area_id, delivery_fee, is_active')
+        .eq('restaurant_id', restaurantId)
+        .eq('is_active', true);
+
+      if (areaErr || !areaFees || areaFees.length === 0) {
+        return defaultRestaurantFee;
+      }
+
+      if (!address) {
+        return Number(areaFees[0].delivery_fee) || defaultRestaurantFee;
+      }
+
+      const areaIds = areaFees.map((f: any) => f.area_id);
+      const { data: areas } = await supabase
+        .from('food_areas')
+        .select('id, name_ar, name_en')
+        .in('id', areaIds);
+
+      if (areas && areas.length > 0) {
+        const matched = areas.find((a: any) => {
+          const name = a.name_ar || a.name_en;
+          if (!name) return false;
+          return (
+            (address.markaz && (address.markaz.includes(name) || name.includes(address.markaz))) ||
+            (address.detailedAddress && address.detailedAddress.includes(name))
+          );
+        });
+
+        if (matched) {
+          const feeRow = areaFees.find((f: any) => f.area_id === matched.id);
+          if (feeRow && feeRow.delivery_fee !== null && feeRow.delivery_fee !== undefined) {
+            return Number(feeRow.delivery_fee);
+          }
+        }
+      }
+
+      return defaultRestaurantFee;
+    } catch (err) {
+      console.warn('[foodService] Error resolving delivery fee:', err);
+      return defaultRestaurantFee;
+    }
+  },
+
+  // 11. Authoritative Create Restaurant Order (public.restaurant_orders)
   async createRestaurantOrder(params: {
     restaurant: Restaurant;
     items: FoodCartItem[];
@@ -828,6 +900,17 @@ export const foodService = {
   }): Promise<{ success: boolean; order?: FoodOrder; message?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
       return { success: false, message: 'الاتصال بقاعدة بيانات Supabase غير مهيأ.' };
+    }
+
+    // Step 0: Check restaurant_section_settings strictly
+    const sectionSettings = await this.getSectionSettings();
+    if (!sectionSettings || !sectionSettings.section_enabled) {
+      return {
+        success: false,
+        message:
+          sectionSettings?.status_message ||
+          'قسم المطاعم غير متاح حالياً؛ لم يتم تفعيل إعدادات القسم في قاعدة البيانات (restaurant_section_settings).',
+      };
     }
 
     if (!params.items || params.items.length === 0) {
@@ -928,13 +1011,11 @@ export const foodService = {
       // Calculate Verified Totals
       let verifiedSubtotal = 0;
       const verifiedItemsList: Array<{
-        product_id: string;
-        product_name: string;
-        category_id: string;
-        category_name: string;
-        quantity: string;
-        unit_price: number;
-        total_price: number;
+        menu_item_id: string;
+        item_name_snapshot: string;
+        unit_price_snapshot: number;
+        quantity: number;
+        line_total: number;
         options_snapshot: any[];
         notes?: string;
       }> = [];
@@ -973,212 +1054,150 @@ export const foodService = {
         const lineTotal = verifiedUnitPrice * qty;
         verifiedSubtotal += lineTotal;
 
-        const optionsText = verifiedOptions.map((o) => o.option_name).join('، ');
-        const formattedProductName = optionsText
-          ? `${verifiedDbItem.name} (${optionsText})${cartItem.notes ? ` - ملاحظات: ${cartItem.notes}` : ''}`
-          : `${verifiedDbItem.name}${cartItem.notes ? ` - ملاحظات: ${cartItem.notes}` : ''}`;
-
         verifiedItemsList.push({
-          product_id: verifiedDbItem.id,
-          product_name: formattedProductName,
-          category_id: dbRestaurant.id,
-          category_name: 'أكلات جاهزة ومطاعم',
-          quantity: String(qty),
-          unit_price: verifiedUnitPrice,
-          total_price: lineTotal,
+          menu_item_id: verifiedDbItem.id,
+          item_name_snapshot: verifiedDbItem.name,
+          unit_price_snapshot: verifiedUnitPrice,
+          quantity: qty,
+          line_total: lineTotal,
           options_snapshot: verifiedOptions,
           notes: cartItem.notes,
         });
       }
 
-      const verifiedDeliveryFee = Number(dbRestaurant.delivery_fee) || 15;
+      // 6. Resolve delivery fee using area fees with fallback to restaurant delivery fee
+      const verifiedDeliveryFee = await this.resolveDeliveryFee(
+        dbRestaurant.id,
+        params.address,
+        Number(dbRestaurant.delivery_fee) || 15
+      );
       const verifiedTotalAmount = verifiedSubtotal + verifiedDeliveryFee;
 
-      // 6. Step 1: Create Invoice in public.invoices
-      const invoiceId = crypto.randomUUID();
-      const invoiceNumber = `INV-FOOD-${Date.now().toString().slice(-6)}`;
-      const invoicePayload: any = {
-        id: invoiceId,
+      // 7. Authoritative Insert into public.restaurant_orders
+      // Note: order_number is generated by database identity/default column, DO NOT provide it
+      const orderPayload: any = {
+        customer_user_id: userId,
+        restaurant_id: dbRestaurant.id,
         household_id: householdId,
-        invoice_number: invoiceNumber,
-        date: new Date().toISOString().split('T')[0],
-        category: 'food',
-        category_arabic: 'أكلات جاهزة ومطاعم',
-        products: verifiedItemsList.map((item) => ({
-          id: item.product_id,
-          name: item.product_name,
-          quantity: item.quantity,
-          price: item.unit_price,
-          total_price: item.total_price,
-          category: 'food',
-          categoryArabic: 'مطاعم',
-          restaurant_id: dbRestaurant.id,
-          restaurant_name: dbRestaurant.name,
-          options: item.options_snapshot,
-          notes: item.notes,
-        })),
-        total_price: verifiedSubtotal,
-        notes: `طلب مطعم ${dbRestaurant.name}${params.notes ? ` - ${params.notes}` : ''}`,
-        registered_by: params.customerName?.trim() || session?.user?.email || 'عميل المطعم',
-        payment_method: 'cash_on_delivery',
-        created_at: new Date().toISOString(),
-      };
-
-      const { data: createdInvoice, error: invErr } = await supabase
-        .from('invoices')
-        .insert(invoicePayload)
-        .select()
-        .single();
-
-      if (invErr) {
-        console.error('[foodService] Error inserting invoice:', invErr);
-        return {
-          success: false,
-          message: `فشل إنشاء الفاتورة في قاعدة البيانات: ${invErr.message}`,
-        };
-      }
-
-      // 7. Step 2: Create Delivery Order in public.delivery_orders
-      const deliveryOrderId = crypto.randomUUID();
-      const deliveryOrderPayload: any = {
-        id: deliveryOrderId,
-        household_id: householdId,
-        invoice_id: invoiceId,
-        created_by: userId,
-        user_id: userId,
-        address_id: dbAddr.id,
+        delivery_address_id: dbAddr.id,
         customer_name: params.customerName?.trim() || dbAddr.full_name || 'العميل',
         customer_phone: params.customerPhone?.trim() || dbAddr.phone || '',
-        country: dbAddr.country || 'مصر',
-        governorate_name: dbAddr.governorate_name || 'القاهرة',
-        markaz_name: dbAddr.markaz_name || '',
-        detailed_address: dbAddr.detailed_address || '',
+        status: 'pending',
+        fulfillment_route:
+          dbRestaurant.delivery_type === 'restaurant_delivery' ? 'restaurant_delivery' : 'driver_delivery',
+        payment_method: 'cash',
+        food_subtotal: verifiedSubtotal,
+        discount_amount: 0,
         delivery_fee: verifiedDeliveryFee,
-        subtotal: verifiedSubtotal,
-        total_amount: verifiedTotalAmount,
-        delivery_notes: `مطعم: ${dbRestaurant.name}${params.notes ? ` - ${params.notes}` : ''}`,
-        status: 'pending_review',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        customer_total: verifiedTotalAmount,
+        restaurant_notes: params.notes?.trim() || null,
+        delivery_notes: params.notes?.trim() || null,
+        idempotency_key: crypto.randomUUID(),
       };
 
-      let { data: createdOrder, error: orderErr } = await supabase
-        .from('delivery_orders')
-        .insert(deliveryOrderPayload)
+      const { data: createdOrder, error: orderErr } = await supabase
+        .from('restaurant_orders')
+        .insert(orderPayload)
         .select()
         .single();
 
-      if (orderErr && orderErr.code === 'PGRST204') {
-        if (orderErr.message?.includes('user_id')) {
-          delete deliveryOrderPayload.user_id;
-        } else if (orderErr.message?.includes('created_by')) {
-          delete deliveryOrderPayload.created_by;
+      // RLS and Permission Handling Check (Section 5)
+      if (orderErr) {
+        console.error('[foodService] Error inserting restaurant_orders:', orderErr);
+        if (
+          orderErr.code === '42501' ||
+          orderErr.message?.includes('violates row-level security policy') ||
+          orderErr.message?.includes('permission denied')
+        ) {
+          return {
+            success: false,
+            message:
+              'تعذر إنشاء طلب المطعم: لا تتوفر صلاحية إضافة (INSERT RLS Policy) لحساب العميل في جدول restaurant_orders ولا توجد دالة RPC مخصصة في قاعدة البيانات. يتطلب تفعيل هذا المسار إضافة سياسة RLS لـ INSERT أو دالة قاعدة بيانات مصرحة.',
+          };
         }
-        const retry = await supabase
-          .from('delivery_orders')
-          .insert(deliveryOrderPayload)
+
+        return {
+          success: false,
+          message: `فشل إنشاء الطلب في جدول restaurant_orders: ${orderErr.message}`,
+        };
+      }
+
+      if (!createdOrder) {
+        return {
+          success: false,
+          message: 'فشل إنشاء الطلب في جدول طلبات المطاعم.',
+        };
+      }
+
+      // 8. Insert Order Items into public.restaurant_order_items
+      const createdItems: FoodOrderItem[] = [];
+      for (const it of verifiedItemsList) {
+        const itemPayload = {
+          order_id: createdOrder.id,
+          menu_item_id: it.menu_item_id,
+          item_name_snapshot: it.item_name_snapshot,
+          unit_price_snapshot: it.unit_price_snapshot,
+          quantity: it.quantity,
+          discount_amount: 0,
+          line_total: it.line_total,
+          customer_approved_price_change: false,
+        };
+
+        const { data: insertedItem, error: itemErr } = await supabase
+          .from('restaurant_order_items')
+          .insert(itemPayload)
           .select()
           .single();
-        createdOrder = retry.data;
-        orderErr = retry.error;
-      }
 
-      if (orderErr || !createdOrder) {
-        console.error('[foodService] Error inserting delivery_orders:', orderErr);
-        // Safe rollback of invoice
-        try {
-          await supabase.from('invoices').delete().eq('id', invoiceId);
-        } catch {}
-        return {
-          success: false,
-          message: `فشل إنشاء طلب التوصيل: ${orderErr?.message || 'خطأ غير معروف'}`,
-        };
-      }
+        if (itemErr) {
+          console.warn('[foodService] Error inserting restaurant_order_items:', itemErr.message);
+        }
 
-      // 8. Step 3: Insert Items into public.delivery_order_items using EXACT column order_id
-      const itemsPayload = verifiedItemsList.map((item) => ({
-        order_id: deliveryOrderId,
-        product_id: item.product_id,
-        product_name: item.product_name,
-        category_id: item.category_id,
-        category_name: item.category_name,
-        quantity: item.quantity,
-        unit_price: item.unit_price,
-        total_price: item.total_price,
-      }));
-
-      let { data: insertedItems, error: itemsInsertErr } = await supabase
-        .from('delivery_order_items')
-        .insert(itemsPayload)
-        .select();
-
-      // Dynamic fallback if remote schema has different column names
-      if (itemsInsertErr && itemsInsertErr.code === 'PGRST204') {
-        const missingMatch = /Could not find the '([^']+)' column/i.exec(itemsInsertErr.message);
-        const missingCol = missingMatch?.[1];
-
-        if (missingCol === 'order_id') {
-          // Switch to delivery_order_id if schema expected it
-          const altPayload = itemsPayload.map(({ order_id, ...rest }: any) => ({
-            ...rest,
-            delivery_order_id: deliveryOrderId,
+        // 9. Insert Options into public.restaurant_order_item_options
+        if (insertedItem && it.options_snapshot.length > 0) {
+          const optionsPayload = it.options_snapshot.map((opt: any) => ({
+            order_item_id: insertedItem.id,
+            option_name_snapshot: opt.group_name || opt.option_name,
+            value_name_snapshot: opt.option_name,
+            extra_price_snapshot: Number(opt.extra_price) || 0,
           }));
-          const retry = await supabase.from('delivery_order_items').insert(altPayload).select();
-          insertedItems = retry.data;
-          itemsInsertErr = retry.error;
-        } else if (missingCol && missingCol in itemsPayload[0]) {
-          // Strip unexpected column and retry
-          const altPayload = itemsPayload.map((item: any) => {
-            const copy = { ...item };
-            delete copy[missingCol];
-            return copy;
-          });
-          const retry = await supabase.from('delivery_order_items').insert(altPayload).select();
-          insertedItems = retry.data;
-          itemsInsertErr = retry.error;
+
+          const { error: optErr } = await supabase
+            .from('restaurant_order_item_options')
+            .insert(optionsPayload);
+
+          if (optErr) {
+            console.warn('[foodService] Error inserting restaurant_order_item_options:', optErr.message);
+          }
         }
+
+        const optionsText = it.options_snapshot.map((o: any) => o.option_name).join('، ');
+        createdItems.push({
+          menuItemId: it.menu_item_id,
+          name: it.item_name_snapshot,
+          quantity: it.quantity,
+          unitPrice: it.unit_price_snapshot,
+          totalPrice: it.line_total,
+          selectedOptionsDescription: optionsText || undefined,
+          notes: it.notes,
+        });
       }
 
-      if (itemsInsertErr) {
-        console.error('[foodService] Error inserting delivery_order_items:', itemsInsertErr);
-        return {
-          success: false,
-          message: `فشل حفظ بنود الطلب في جدول تفاصيل التوصيل: ${itemsInsertErr.message}`,
-        };
+      // 10. Record Initial Status History in public.restaurant_order_status_history
+      try {
+        await supabase.from('restaurant_order_status_history').insert({
+          order_id: createdOrder.id,
+          status: 'pending',
+          changed_by_user_id: userId,
+          notes: 'تم إرسال الطلب بواسطة العميل',
+        });
+      } catch (histErr) {
+        console.warn('[foodService] Non-critical history insert error:', histErr);
       }
 
-      // 9. Step 4: Verification of Saved Records
-      const { data: verifiedOrder } = await supabase
-        .from('delivery_orders')
-        .select('*')
-        .eq('id', deliveryOrderId)
-        .maybeSingle();
-
-      let { data: verifiedSavedItems } = await supabase
-        .from('delivery_order_items')
-        .select('*')
-        .eq('order_id', deliveryOrderId);
-
-      if (!verifiedSavedItems || verifiedSavedItems.length === 0) {
-        const altCheck = await supabase
-          .from('delivery_order_items')
-          .select('*')
-          .eq('delivery_order_id', deliveryOrderId);
-        if (altCheck.data && altCheck.data.length > 0) {
-          verifiedSavedItems = altCheck.data;
-        }
-      }
-
-      if (!verifiedOrder || !verifiedSavedItems || verifiedSavedItems.length === 0) {
-        return {
-          success: false,
-          message: 'فشل التحقق من حفظ الطلب وأصنافه في قاعدة البيانات.',
-        };
-      }
-
-      // 10. Construct Domain FoodOrder Response
+      // 11. Construct Domain FoodOrder Response
       const responseOrder: FoodOrder = {
-        id: deliveryOrderId,
+        id: createdOrder.id,
         restaurantId: dbRestaurant.id,
         restaurantName: dbRestaurant.name,
         restaurantPhone: dbRestaurant.phone || '',
@@ -1197,14 +1216,7 @@ export const foodService = {
           longitude: Number(dbAddr.longitude) || 0,
           isDefault: Boolean(dbAddr.is_default),
         },
-        items: verifiedItemsList.map((i) => ({
-          menuItemId: i.product_id,
-          name: i.product_name,
-          quantity: Number(i.quantity) || 1,
-          unitPrice: i.unit_price,
-          totalPrice: i.total_price,
-          notes: i.notes,
-        })),
+        items: createdItems,
         subtotal: verifiedSubtotal,
         discount: 0,
         deliveryFee: verifiedDeliveryFee,
@@ -1213,9 +1225,9 @@ export const foodService = {
         paymentMethod: 'cash_on_delivery',
         deliveryChannel: dbRestaurant.deliveryChannel || 'direct_system',
         orderStatus: 'pending_restaurant_confirmation',
-        deliveryStatus: mapDeliveryOrderStatus('pending_review'),
-        invoiceIssued: true,
-        invoiceNumber,
+        deliveryStatus: 'waiting_dispatch',
+        invoiceIssued: false,
+        invoiceNumber: createdOrder.order_number ? `ORD-${createdOrder.order_number}` : undefined,
         createdAt: createdOrder.created_at,
         updatedAt: createdOrder.updated_at || createdOrder.created_at,
         estimatedDeliveryTime: 'خلال 35-45 دقيقة',
@@ -1224,18 +1236,18 @@ export const foodService = {
       return {
         success: true,
         order: responseOrder,
-        message: 'تم إرسال وحفظ طلب الطعام والفاتورة بنجاح!',
+        message: 'تم إرسال طلب المطعم بنجاح!',
       };
     } catch (err: any) {
       console.error('[foodService] Exception creating restaurant order:', err);
       return {
         success: false,
-        message: err.message || 'حدث خطأ غير متوقع أثناء حفظ الطلب في قاعدة البيانات.',
+        message: err.message || 'حدث خطأ غير متوقع أثناء معالجة الطلب.',
       };
     }
   },
 
-  // 12. Read Customer Orders from public.delivery_orders & public.invoices & public.delivery_order_items
+  // 12. Read Customer Orders directly from public.restaurant_orders
   async listCustomerOrders(
     providedHouseholdId?: string,
     providedUserId?: string
@@ -1251,151 +1263,202 @@ export const foodService = {
       const userId = providedUserId || session?.user?.id;
       if (!userId) return [];
 
-      const householdId = providedHouseholdId || (await this.getUserHouseholdId(userId));
-      if (!householdId) return [];
-
-      // Query delivery_orders with joined invoice
       const { data: dbOrders, error: ordersErr } = await supabase
-        .from('delivery_orders')
+        .from('restaurant_orders')
         .select(`
           *,
-          invoices (
+          restaurants (
             id,
-            invoice_number,
-            products,
-            notes,
-            total_price,
-            category,
-            category_arabic
+            name,
+            phone,
+            address,
+            image_url,
+            delivery_fee
+          ),
+          restaurant_order_items (
+            id,
+            order_id,
+            menu_item_id,
+            item_name_snapshot,
+            unit_price_snapshot,
+            quantity,
+            discount_amount,
+            line_total,
+            customer_approved_price_change,
+            restaurant_order_item_options (
+              id,
+              option_name_snapshot,
+              value_name_snapshot,
+              extra_price_snapshot
+            )
           )
         `)
-        .or(`household_id.eq.${householdId},created_by.eq.${userId},user_id.eq.${userId}`)
+        .eq('customer_user_id', userId)
         .order('created_at', { ascending: false });
 
       if (ordersErr || !dbOrders) {
-        console.warn('[foodService] Error reading delivery_orders:', ordersErr?.message);
+        console.warn('[foodService] Error reading restaurant_orders:', ordersErr?.message);
         return [];
       }
 
-      // Query delivery_order_items for these orders
-      const orderIds = dbOrders.map((o: any) => o.id);
-      const itemsMap = new Map<string, any[]>();
-
-      if (orderIds.length > 0) {
-        let itemsRows: any[] | null = null;
-        const res = await supabase
-          .from('delivery_order_items')
-          .select('*')
-          .in('order_id', orderIds);
-
-        if (!res.error && res.data) {
-          itemsRows = res.data;
-        } else if (res.error && res.error.code === 'PGRST204') {
-          // Schema cache might have delivery_order_id instead
-          const altRes = await supabase
-            .from('delivery_order_items')
-            .select('*')
-            .in('delivery_order_id', orderIds);
-          if (altRes.data) itemsRows = altRes.data;
-        }
-
-        if (itemsRows) {
-          itemsRows.forEach((r: any) => {
-            const oId = r.order_id || r.delivery_order_id;
-            if (!itemsMap.has(oId)) itemsMap.set(oId, []);
-            itemsMap.get(oId)!.push(r);
-          });
-        }
-      }
-
       return dbOrders.map((o: any) => {
-        const dbItems = itemsMap.get(o.id) || [];
-        const invoiceProducts = Array.isArray(o.invoices?.products) ? o.invoices.products : [];
+        const rest = o.restaurants;
+        const orderItems: FoodOrderItem[] = (o.restaurant_order_items || []).map((it: any) => {
+          const optionsDesc = (it.restaurant_order_item_options || [])
+            .map((opt: any) => `${opt.value_name_snapshot} (+${opt.extra_price_snapshot} ج.م)`)
+            .join('، ');
 
-        // Determine Restaurant Name
-        let restaurantName = 'مطعم';
-        if (invoiceProducts.length > 0 && invoiceProducts[0].restaurant_name) {
-          restaurantName = invoiceProducts[0].restaurant_name;
-        } else if (o.delivery_notes?.includes('مطعم:')) {
-          const match = o.delivery_notes.match(/مطعم:\s*([^\-]+)/);
-          if (match && match[1]) {
-            restaurantName = match[1].trim();
-          }
-        }
-
-        // Map items from delivery_order_items or invoices.products (NEVER return [] if items exist!)
-        let items: FoodOrderItem[] = [];
-        if (dbItems.length > 0) {
-          items = dbItems.map((it: any) => ({
-            menuItemId: it.product_id || it.id,
-            name: it.product_name,
+          return {
+            menuItemId: it.menu_item_id || it.id,
+            name: it.item_name_snapshot || 'صنف',
             quantity: Number(it.quantity) || 1,
-            unitPrice: Number(it.unit_price) || 0,
-            totalPrice: Number(it.total_price) || 0,
-          }));
-        } else if (invoiceProducts.length > 0) {
-          items = invoiceProducts.map((p: any) => ({
-            menuItemId: p.id || '',
-            name: p.name,
-            quantity: Number(p.quantity) || 1,
-            unitPrice: Number(p.price) || 0,
-            totalPrice: Number(p.total_price) || (Number(p.price) * (Number(p.quantity) || 1)),
-          }));
-        }
-
-        const invoiceNumber =
-          o.invoices?.invoice_number || (o.invoice_id ? `INV-${o.invoice_id.slice(0, 8)}` : undefined);
+            unitPrice: Number(it.unit_price_snapshot) || 0,
+            totalPrice: Number(it.line_total) || 0,
+            selectedOptionsDescription: optionsDesc || undefined,
+          };
+        });
 
         return {
           id: o.id,
-          restaurantId: invoiceProducts[0]?.restaurant_id || 'rest-general',
-          restaurantName,
-          restaurantPhone: '',
-          restaurantAddress: '',
-          customerName: o.customer_name || '',
+          restaurantId: o.restaurant_id,
+          restaurantName: rest?.name || 'مطعم',
+          restaurantPhone: rest?.phone || '',
+          restaurantAddress: rest?.address || '',
+          customerName: o.customer_name || 'العميل',
           customerPhone: o.customer_phone || '',
           address: {
-            id: o.address_id || 'addr-default',
+            id: o.delivery_address_id || 'addr-default',
             label: 'عنوان التوصيل',
             recipientName: o.customer_name || '',
             phone: o.customer_phone || '',
-            governorate: o.governorate_name || '',
-            markaz: o.markaz_name || '',
-            detailedAddress: o.detailed_address || '',
-            latitude: Number(o.delivery_latitude) || 30.05,
-            longitude: Number(o.delivery_longitude) || 31.34,
+            governorate: '',
+            markaz: '',
+            detailedAddress: '',
+            latitude: 0,
+            longitude: 0,
             isDefault: false,
           },
-          items,
-          subtotal: Number(o.subtotal) || 0,
-          discount: 0,
+          items: orderItems,
+          subtotal: Number(o.food_subtotal) || 0,
+          discount: Number(o.discount_amount) || 0,
           deliveryFee: Number(o.delivery_fee) || 0,
-          totalAmount: Number(o.total_amount) || 0,
-          notes: o.delivery_notes || undefined,
+          totalAmount: Number(o.customer_total) || 0,
+          notes: o.delivery_notes || o.restaurant_notes || undefined,
           paymentMethod: 'cash_on_delivery',
           deliveryChannel: 'direct_system',
           orderStatus: mapDeliveryStatusToFoodStatus(o.status),
           deliveryStatus: mapDeliveryOrderStatus(o.status),
-          invoiceIssued: Boolean(o.invoice_id),
-          invoiceNumber,
+          invoiceIssued: false,
+          invoiceNumber: o.order_number ? `ORD-${o.order_number}` : undefined,
           createdAt: o.created_at,
           updatedAt: o.updated_at || o.created_at,
-          estimatedDeliveryTime: 'خلال 35 دقيقة',
+          estimatedDeliveryTime: 'خلال 35-45 دقيقة',
         };
       });
     } catch (err) {
-      console.warn('[foodService] Exception reading customer orders:', err);
+      console.warn('[foodService] Exception reading restaurant_orders:', err);
       return [];
     }
   },
 
-  // 13. Read Single Order Details
+  // 13. Read Single Order Details from public.restaurant_orders
   async getOrderDetails(orderId: string): Promise<FoodOrder | null> {
-    const list = await this.listCustomerOrders();
-    return list.find((o) => o.id === orderId) || null;
+    if (!isSupabaseConfigured() || !supabase) return null;
+    try {
+      const { data: o, error } = await supabase
+        .from('restaurant_orders')
+        .select(`
+          *,
+          restaurants (
+            id,
+            name,
+            phone,
+            address,
+            image_url,
+            delivery_fee
+          ),
+          restaurant_order_items (
+            id,
+            order_id,
+            menu_item_id,
+            item_name_snapshot,
+            unit_price_snapshot,
+            quantity,
+            discount_amount,
+            line_total,
+            customer_approved_price_change,
+            restaurant_order_item_options (
+              id,
+              option_name_snapshot,
+              value_name_snapshot,
+              extra_price_snapshot
+            )
+          )
+        `)
+        .eq('id', orderId)
+        .maybeSingle();
+
+      if (error || !o) return null;
+
+      const rest = o.restaurants;
+      const orderItems: FoodOrderItem[] = (o.restaurant_order_items || []).map((it: any) => {
+        const optionsDesc = (it.restaurant_order_item_options || [])
+          .map((opt: any) => `${opt.value_name_snapshot} (+${opt.extra_price_snapshot} ج.م)`)
+          .join('، ');
+
+        return {
+          menuItemId: it.menu_item_id || it.id,
+          name: it.item_name_snapshot || 'صنف',
+          quantity: Number(it.quantity) || 1,
+          unitPrice: Number(it.unit_price_snapshot) || 0,
+          totalPrice: Number(it.line_total) || 0,
+          selectedOptionsDescription: optionsDesc || undefined,
+        };
+      });
+
+      return {
+        id: o.id,
+        restaurantId: o.restaurant_id,
+        restaurantName: rest?.name || 'مطعم',
+        restaurantPhone: rest?.phone || '',
+        restaurantAddress: rest?.address || '',
+        customerName: o.customer_name || 'العميل',
+        customerPhone: o.customer_phone || '',
+        address: {
+          id: o.delivery_address_id || 'addr-default',
+          label: 'عنوان التوصيل',
+          recipientName: o.customer_name || '',
+          phone: o.customer_phone || '',
+          governorate: '',
+          markaz: '',
+          detailedAddress: '',
+          latitude: 0,
+          longitude: 0,
+          isDefault: false,
+        },
+        items: orderItems,
+        subtotal: Number(o.food_subtotal) || 0,
+        discount: Number(o.discount_amount) || 0,
+        deliveryFee: Number(o.delivery_fee) || 0,
+        totalAmount: Number(o.customer_total) || 0,
+        notes: o.delivery_notes || o.restaurant_notes || undefined,
+        paymentMethod: 'cash_on_delivery',
+        deliveryChannel: 'direct_system',
+        orderStatus: mapDeliveryStatusToFoodStatus(o.status),
+        deliveryStatus: mapDeliveryOrderStatus(o.status),
+        invoiceIssued: false,
+        invoiceNumber: o.order_number ? `ORD-${o.order_number}` : undefined,
+        createdAt: o.created_at,
+        updatedAt: o.updated_at || o.created_at,
+        estimatedDeliveryTime: 'خلال 35-45 دقيقة',
+      };
+    } catch (err) {
+      console.warn('[foodService] Exception fetching order details:', err);
+      return null;
+    }
   },
 
-  // 14. Cancel Order in public.delivery_orders
+  // 14. Cancel Order in public.restaurant_orders
   async cancelOrder(orderId: string, reason?: string): Promise<{ success: boolean; message?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
       return { success: false, message: 'قاعدة بيانات Supabase غير مهيأة.' };
@@ -1403,10 +1466,10 @@ export const foodService = {
 
     try {
       const { error } = await supabase
-        .from('delivery_orders')
+        .from('restaurant_orders')
         .update({
           status: 'cancelled',
-          delivery_notes: reason ? `تم الإلغاء: ${reason}` : 'تم الإلغاء بواسطة العميل',
+          cancel_reason: reason ? `تم الإلغاء: ${reason}` : 'تم الإلغاء بواسطة العميل',
           updated_at: new Date().toISOString(),
         })
         .eq('id', orderId);
@@ -1438,9 +1501,9 @@ export const foodService = {
   ): Promise<FoodOrder | null> {
     if (!isSupabaseConfigured() || !supabase) return null;
     try {
-      const rawStatus = deliveryStatus || (newStatus === 'delivered' ? 'completed' : newStatus === 'cancelled' ? 'cancelled' : 'pending_review');
+      const rawStatus = newStatus === 'delivered' ? 'delivered' : newStatus === 'cancelled' ? 'cancelled' : 'pending';
       await supabase
-        .from('delivery_orders')
+        .from('restaurant_orders')
         .update({
           status: rawStatus,
           updated_at: new Date().toISOString(),

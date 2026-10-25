@@ -188,8 +188,10 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     foodService.getSectionSettings().then((settings) => {
       setSectionSettings(settings);
-      if (settings && settings.section_enabled === false) {
+      if (!settings || !settings.section_enabled) {
         setIsSectionDisabled(true);
+      } else {
+        setIsSectionDisabled(false);
       }
     });
 
