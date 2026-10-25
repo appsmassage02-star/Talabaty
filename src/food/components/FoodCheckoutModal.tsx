@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useFood } from '../context/FoodContext';
+import { useApp } from '../../context/AppContext';
 import { FoodCustomerAddress } from '../types/foodTypes';
 import {
   X,
@@ -25,51 +26,97 @@ export const FoodCheckoutModal: React.FC = () => {
     addNewAddress,
   } = useFood();
 
+  const { household, supabaseProfile, supabaseUser } = useApp();
+
   const [selectedAddressId, setSelectedAddressId] = useState<string>(
     addresses[0]?.id || ''
   );
 
-  const [customerName, setCustomerName] = useState<string>('محمد أبو طالب');
-  const [customerPhone, setCustomerPhone] = useState<string>('01012345678');
+  const [customerName, setCustomerName] = useState<string>(
+    supabaseProfile?.fullName || ''
+  );
+  const [customerPhone, setCustomerPhone] = useState<string>(
+    supabaseProfile?.phone || ''
+  );
   const [orderNotes, setOrderNotes] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Quick Inline Address form state if adding a new address
-  const [isAddingNewAddress, setIsAddingNewAddress] = useState<boolean>(false);
-  const [newLabel, setNewLabel] = useState<string>('عنوان إضافي');
+  const [isAddingNewAddress, setIsAddingNewAddress] = useState<boolean>(
+    addresses.length === 0
+  );
+  const [newLabel, setNewLabel] = useState<string>('عنوان المنزل');
   const [newDetailedAddress, setNewDetailedAddress] = useState<string>('');
   const [newGovernorate, setNewGovernorate] = useState<string>('القاهرة');
   const [newMarkaz, setNewMarkaz] = useState<string>('مدينة نصر');
   const [newLat, setNewLat] = useState<number>(30.0524);
   const [newLng, setNewLng] = useState<number>(31.3412);
 
+  // Sync selected address if addresses loaded later
+  useEffect(() => {
+    if (!selectedAddressId && addresses.length > 0) {
+      const def = addresses.find((a) => a.isDefault) || addresses[0];
+      setSelectedAddressId(def.id);
+    }
+  }, [addresses, selectedAddressId]);
+
+  const currentAddress =
+    addresses.find((a) => a.id === selectedAddressId) || addresses[0];
+
+  // Auto-fill recipient name and phone from selected address if not yet entered
+  useEffect(() => {
+    if (currentAddress) {
+      if (!customerName && currentAddress.recipientName) {
+        setCustomerName(currentAddress.recipientName);
+      }
+      if (!customerPhone && currentAddress.phone) {
+        setCustomerPhone(currentAddress.phone);
+      }
+    } else if (addresses.length === 0) {
+      setIsAddingNewAddress(true);
+    }
+  }, [currentAddress, addresses.length]);
+
   if (!checkoutRestaurantGroup) return null;
 
   const restaurant = checkoutRestaurantGroup.restaurant;
   if (!restaurant) return null;
 
-  const currentAddress =
-    addresses.find((a) => a.id === selectedAddressId) || addresses[0];
-
   const handleSaveQuickAddress = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newDetailedAddress.trim()) return;
+    if (!newDetailedAddress.trim()) {
+      setErrorMessage('يرجى إدخال العنوان التفصيلي بدقة.');
+      return;
+    }
+    if (!newGovernorate.trim()) {
+      setErrorMessage('يرجى تحديد المحافظة.');
+      return;
+    }
+    if (!newMarkaz.trim()) {
+      setErrorMessage('يرجى تحديد المركز أو الحي.');
+      return;
+    }
 
-    const created = await addNewAddress({
-      label: newLabel.trim() || 'عنوان جديد',
-      recipientName: customerName,
-      phone: customerPhone,
-      governorate: newGovernorate,
-      markaz: newMarkaz,
-      detailedAddress: newDetailedAddress.trim(),
-      latitude: newLat,
-      longitude: newLng,
-      isDefault: false,
-    });
+    try {
+      const created = await addNewAddress({
+        label: newLabel.trim() || 'عنوان المنزل',
+        recipientName: customerName.trim() || 'المستلم',
+        phone: customerPhone.trim() || '',
+        governorate: newGovernorate.trim(),
+        markaz: newMarkaz.trim(),
+        detailedAddress: newDetailedAddress.trim(),
+        latitude: newLat,
+        longitude: newLng,
+        isDefault: addresses.length === 0,
+      });
 
-    setSelectedAddressId(created.id);
-    setIsAddingNewAddress(false);
+      setSelectedAddressId(created.id);
+      setIsAddingNewAddress(false);
+      setErrorMessage(null);
+    } catch (addrErr: any) {
+      setErrorMessage(addrErr.message || 'فشل حفظ العنوان');
+    }
   };
 
   const handleConfirmOrder = async () => {
@@ -77,8 +124,13 @@ export const FoodCheckoutModal: React.FC = () => {
 
     setErrorMessage(null);
 
-    if (!currentAddress) {
-      setErrorMessage('يرجى اختيار أو إضافة عنوان توصيل.');
+    if (!household?.id) {
+      setErrorMessage('لم يتم العثور على منزل مسجل لحسابك. يرجى الانضمام إلى منزل أو إنشاء منزل أولاً لإتمام الطلب.');
+      return;
+    }
+
+    if (!currentAddress || !currentAddress.detailedAddress?.trim()) {
+      setErrorMessage('يرجى اختيار أو إضافة عنوان توصيل صالح ومكتمل.');
       return;
     }
 
@@ -91,10 +143,10 @@ export const FoodCheckoutModal: React.FC = () => {
     try {
       const res = await submitRestaurantOrder({
         restaurant,
-        customerName,
-        customerPhone,
+        customerName: customerName.trim() || currentAddress.recipientName || 'العميل',
+        customerPhone: customerPhone.trim(),
         address: currentAddress,
-        notes: orderNotes,
+        notes: orderNotes.trim() || undefined,
       });
 
       if (!res.success) {

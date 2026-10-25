@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useApp } from '../../context/AppContext';
 import {
   Restaurant,
   MenuItem,
@@ -13,6 +14,8 @@ import {
   RestaurantCategory,
 } from '../types/foodTypes';
 import { foodService, RestaurantFilterParams } from '../services/foodService';
+
+const FOOD_CART_STORAGE_KEY = 'talabaty_food_cart_v1';
 
 export interface FoodCartRestaurantGroup {
   restaurantId: string;
@@ -123,13 +126,47 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
 
   // Modals & Item Customization
+  const { household, supabaseUser } = useApp();
+  const isSubmittingRef = useRef<boolean>(false);
+
   const [customizingItem, setCustomizingItem] = useState<MenuItem | null>(null);
   const [isCartDrawerOpen, setIsCartDrawerOpen] = useState<boolean>(false);
   const [checkoutRestaurantId, setCheckoutRestaurantId] = useState<string | null>(null);
   const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<FoodOrder | null>(null);
 
-  // Cart state
-  const [cartItems, setCartItems] = useState<FoodCartItem[]>([]);
+  // Cart state with localStorage persistence
+  const [cartItems, setCartItems] = useState<FoodCartItem[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const saved = localStorage.getItem(FOOD_CART_STORAGE_KEY);
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (item: any) =>
+          item &&
+          typeof item.cartItemId === 'string' &&
+          typeof item.menuItemId === 'string' &&
+          typeof item.restaurantId === 'string' &&
+          typeof item.name === 'string' &&
+          typeof item.quantity === 'number' &&
+          item.quantity > 0 &&
+          typeof item.unitPrice === 'number'
+      );
+    } catch (e) {
+      console.warn('[FoodContext] Failed to load cart from localStorage:', e);
+      return [];
+    }
+  });
+
+  // Sync cart to localStorage whenever it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(FOOD_CART_STORAGE_KEY, JSON.stringify(cartItems));
+    } catch (e) {
+      console.warn('[FoodContext] Failed to save cart to localStorage:', e);
+    }
+  }, [cartItems]);
 
   // Orders state
   const [orders, setOrders] = useState<FoodOrder[]>([]);
@@ -184,18 +221,18 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshOrders = useCallback(async () => {
     setIsLoadingOrders(true);
     try {
-      const data = await foodService.listMockCustomerOrders();
+      const data = await foodService.listCustomerOrders(household?.id, supabaseUser?.id);
       setOrders(data);
     } finally {
       setIsLoadingOrders(false);
     }
-  }, []);
+  }, [household?.id, supabaseUser?.id]);
 
   // Load addresses
   const refreshAddresses = useCallback(async () => {
-    const data = await foodService.listCustomerAddresses();
+    const data = await foodService.listCustomerAddresses(household?.id, supabaseUser?.id);
     setAddresses(data);
-  }, []);
+  }, [household?.id, supabaseUser?.id]);
 
   useEffect(() => {
     refreshOrders();
@@ -357,54 +394,76 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
       address: FoodCustomerAddress;
       notes?: string;
     }) => {
+      // Prevent double submission from rapid clicking
+      if (isSubmittingRef.current) {
+        return { success: false, message: 'جاري تسجيل الطلب بالفعل، يرجى الانتظار...' };
+      }
+
       const group = cartRestaurantGroups.find((g) => g.restaurantId === params.restaurant.id);
       if (!group || group.items.length === 0) {
         return { success: false, message: 'السلة فارغة لهذا المطعم' };
       }
 
-      const result = await foodService.createMockRestaurantOrder({
-        restaurant: params.restaurant,
-        items: group.items,
-        customerName: params.customerName,
-        customerPhone: params.customerPhone,
-        address: params.address,
-        notes: params.notes,
-      });
+      isSubmittingRef.current = true;
+      try {
+        const result = await foodService.createRestaurantOrder({
+          restaurant: params.restaurant,
+          items: group.items,
+          customerName: params.customerName,
+          customerPhone: params.customerPhone,
+          address: params.address,
+          notes: params.notes,
+          providedHouseholdId: household?.id,
+          providedUserId: supabaseUser?.id,
+        });
 
-      if (result.success && result.order) {
-        // Clear ONLY this restaurant's items from the cart!
-        clearRestaurantCart(params.restaurant.id);
-        // Refresh orders list
-        await refreshOrders();
-        // Select order for detail modal / tracker
-        setSelectedOrderForDetail(result.order);
-        closeCheckoutModal();
+        if (result.success && result.order) {
+          // Clear ONLY this restaurant's items from the cart upon confirmed success!
+          clearRestaurantCart(params.restaurant.id);
+          // Refresh orders list
+          await refreshOrders();
+          // Select order for detail modal / tracker
+          setSelectedOrderForDetail(result.order);
+          closeCheckoutModal();
+        }
+
+        return result;
+      } finally {
+        isSubmittingRef.current = false;
       }
-
-      return result;
     },
-    [cartRestaurantGroups, clearRestaurantCart, refreshOrders, closeCheckoutModal]
+    [cartRestaurantGroups, clearRestaurantCart, refreshOrders, closeCheckoutModal, household?.id, supabaseUser?.id]
   );
 
   // Address Actions
-  const addNewAddress = useCallback(async (address: Omit<FoodCustomerAddress, 'id'>) => {
-    const created = await foodService.addCustomerAddress(address);
-    setAddresses((prev) => [created, ...prev]);
-    return created;
-  }, []);
+  const addNewAddress = useCallback(
+    async (address: Omit<FoodCustomerAddress, 'id'>) => {
+      const created = await foodService.addCustomerAddress(
+        address,
+        household?.id,
+        supabaseUser?.id
+      );
+      setAddresses((prev) => [created, ...prev]);
+      return created;
+    },
+    [household?.id, supabaseUser?.id]
+  );
 
   // Order Actions
-  const cancelOrder = useCallback(async (orderId: string, reason?: string) => {
-    const res = await foodService.cancelOrder(orderId, reason);
-    if (res.success) {
-      await refreshOrders();
-      if (selectedOrderForDetail?.id === orderId) {
-        const updated = await foodService.getMockOrderDetails(orderId);
-        setSelectedOrderForDetail(updated);
+  const cancelOrder = useCallback(
+    async (orderId: string, reason?: string) => {
+      const res = await foodService.cancelOrder(orderId, reason);
+      if (res.success) {
+        await refreshOrders();
+        if (selectedOrderForDetail?.id === orderId) {
+          const updated = await foodService.getOrderDetails(orderId);
+          setSelectedOrderForDetail(updated);
+        }
       }
-    }
-    return res;
-  }, [refreshOrders, selectedOrderForDetail]);
+      return res;
+    },
+    [refreshOrders, selectedOrderForDetail]
+  );
 
   const updateOrderStatusForTesting = useCallback(
     async (orderId: string, newStatus: FoodOrderStatus, deliveryStatus?: FoodDeliveryStatus) => {

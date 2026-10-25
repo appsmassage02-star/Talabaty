@@ -7,6 +7,7 @@ import {
   FoodOffer,
   FoodCustomerAddress,
   FoodOrder,
+  FoodOrderItem,
   FoodCartItem,
   FoodOrderStatus,
   FoodDeliveryStatus,
@@ -27,6 +28,53 @@ export interface RestaurantFilterParams {
   hasDiscount?: boolean;
   minRating?: number;
   sortBy?: 'recommended' | 'rating' | 'prepTime' | 'deliveryFee';
+}
+
+export function mapDeliveryStatusToFoodStatus(status?: string): FoodOrderStatus {
+  switch (status) {
+    case 'pending_review':
+    case 'pending':
+      return 'pending_restaurant_confirmation';
+    case 'accepted':
+      return 'restaurant_accepted';
+    case 'preparing':
+      return 'preparing';
+    case 'ready_for_pickup':
+      return 'ready_for_pickup';
+    case 'in_transit':
+    case 'out_for_delivery':
+      return 'out_for_delivery';
+    case 'delivered':
+    case 'completed':
+      return 'delivered';
+    case 'cancelled':
+      return 'cancelled';
+    case 'rejected':
+      return 'rejected_by_restaurant';
+    default:
+      return 'pending_restaurant_confirmation';
+  }
+}
+
+export function mapDeliveryOrderStatus(status?: string): FoodDeliveryStatus {
+  switch (status) {
+    case 'accepted':
+    case 'assigned':
+      return 'driver_assigned';
+    case 'at_restaurant':
+    case 'picked_up':
+      return 'driver_at_restaurant';
+    case 'in_transit':
+    case 'out_for_delivery':
+      return 'on_the_way';
+    case 'arrived':
+      return 'arrived_customer';
+    case 'completed':
+    case 'delivered':
+      return 'completed';
+    default:
+      return 'waiting_dispatch';
+  }
 }
 
 const FALLBACK_RESTAURANT_IMG =
@@ -605,8 +653,53 @@ export const foodService = {
     }
   },
 
-  // 8. Read Customer Orders (restaurant_orders - Read only)
-  async listMockCustomerOrders(): Promise<FoodOrder[]> {
+  // 8. Helper to resolve user's authoritative household ID
+  async getUserHouseholdId(userId: string): Promise<string | null> {
+    if (!isSupabaseConfigured() || !supabase || !userId) return null;
+
+    try {
+      // 8.1 Check profiles table
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('household_id')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (profile?.household_id) return profile.household_id;
+
+      // 8.2 Check household_members table
+      const { data: member } = await supabase
+        .from('household_members')
+        .select('household_id')
+        .eq('user_id', userId)
+        .order('joined_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (member?.household_id) return member.household_id;
+
+      // 8.3 Check households where user is admin
+      const { data: hh } = await supabase
+        .from('households')
+        .select('id')
+        .eq('admin_id', userId)
+        .limit(1)
+        .maybeSingle();
+
+      if (hh?.id) return hh.id;
+
+      return null;
+    } catch (err) {
+      console.warn('[foodService] Error resolving household ID:', err);
+      return null;
+    }
+  },
+
+  // 9. Read Customer Addresses from public.household_addresses
+  async listCustomerAddresses(
+    providedHouseholdId?: string,
+    providedUserId?: string
+  ): Promise<FoodCustomerAddress[]> {
     if (!isSupabaseConfigured() || !supabase) {
       return [];
     }
@@ -615,116 +708,750 @@ export const foodService = {
       const {
         data: { session },
       } = await supabase.auth.getSession();
-      const userId = session?.user?.id;
+      const userId = providedUserId || session?.user?.id;
       if (!userId) return [];
 
+      const householdId = providedHouseholdId || (await this.getUserHouseholdId(userId));
+      if (!householdId) return [];
+
       const { data, error } = await supabase
-        .from('restaurant_orders')
+        .from('household_addresses')
         .select('*')
-        .eq('customer_user_id', userId)
+        .eq('household_id', householdId)
+        .order('is_default', { ascending: false })
         .order('created_at', { ascending: false });
 
       if (error || !data) {
+        console.warn('[foodService] Error reading household_addresses:', error?.message);
         return [];
       }
 
-      // Map raw restaurant_orders to FoodOrder
-      return data.map((o: any) => ({
-        id: o.order_number || o.id,
-        restaurantId: o.restaurant_id,
-        restaurantName: o.restaurant_name_snapshot || 'مطعم',
-        restaurantPhone: o.restaurant_phone_snapshot || '',
-        restaurantAddress: '',
-        customerName: o.customer_name || '',
-        customerPhone: o.customer_phone || '',
-        address: {
-          id: 'addr-default',
-          label: 'عنوان التوصيل',
-          recipientName: o.customer_name || '',
-          phone: o.customer_phone || '',
-          governorate: '',
-          markaz: '',
-          detailedAddress: o.delivery_address || '',
-          latitude: Number(o.delivery_latitude) || 0,
-          longitude: Number(o.delivery_longitude) || 0,
-        },
-        items: [],
-        subtotal: Number(o.food_subtotal) || 0,
-        discount: Number(o.discount_amount) || 0,
-        deliveryFee: Number(o.delivery_fee) || 0,
-        totalAmount: Number(o.customer_total) || 0,
-        paymentMethod: 'cash_on_delivery',
-        deliveryChannel: o.fulfillment_route === 'call_dispatch' ? 'call_dispatch' : 'direct_system',
-        orderStatus: o.status || 'pending_restaurant_confirmation',
-        deliveryStatus: 'waiting_dispatch',
-        invoiceIssued: Boolean(o.restaurant_confirmed_at),
-        createdAt: o.created_at,
-        updatedAt: o.updated_at,
-        estimatedDeliveryTime: 'خلال 35 دقيقة',
+      return data.map((row: any) => ({
+        id: row.id,
+        label: row.address_label || 'عنوان التوصيل',
+        recipientName: row.full_name || '',
+        phone: row.phone || '',
+        governorate: row.governorate_name || '',
+        markaz: row.markaz_name || '',
+        detailedAddress: row.detailed_address || '',
+        latitude: row.latitude !== null && row.latitude !== undefined ? Number(row.latitude) : 0,
+        longitude: row.longitude !== null && row.longitude !== undefined ? Number(row.longitude) : 0,
+        isDefault: Boolean(row.is_default),
       }));
     } catch (err) {
-      console.warn('[foodService] Exception reading restaurant_orders:', err);
+      console.warn('[foodService] Exception reading household_addresses:', err);
       return [];
     }
   },
 
-  // 9. Read Customer Addresses helper
-  async listCustomerAddresses(): Promise<FoodCustomerAddress[]> {
-    return [
-      {
-        id: 'addr-demo-1',
-        label: 'عنوان المنزل الرئيسي',
-        recipientName: 'المستلم',
-        phone: '01012345678',
-        governorate: 'القاهرة',
-        markaz: 'مدينة نصر',
-        detailedAddress: 'شارع عباس العقاد، برج النصر، الدور الرابع',
-        latitude: 30.0631,
-        longitude: 31.3421,
-        isDefault: true,
-      },
-    ];
-  },
+  // 10. Add Customer Address to public.household_addresses
+  async addCustomerAddress(
+    address: Omit<FoodCustomerAddress, 'id'>,
+    providedHouseholdId?: string,
+    providedUserId?: string
+  ): Promise<FoodCustomerAddress> {
+    if (!isSupabaseConfigured() || !supabase) {
+      throw new Error('قاعدة بيانات Supabase غير مهيأة');
+    }
 
-  async addCustomerAddress(address: Omit<FoodCustomerAddress, 'id'>): Promise<FoodCustomerAddress> {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const userId = providedUserId || session?.user?.id;
+    const householdId = providedHouseholdId || (userId ? await this.getUserHouseholdId(userId) : null);
+
+    if (!householdId) {
+      throw new Error('تعذر حفظ العنوان: يجب تسجيل الدخول والارتباط بمنزل مسجل أولاً.');
+    }
+
+    if (address.isDefault) {
+      try {
+        await supabase
+          .from('household_addresses')
+          .update({ is_default: false })
+          .eq('household_id', householdId);
+      } catch (e) {
+        console.warn('Could not reset other default addresses', e);
+      }
+    }
+
+    const payload: any = {
+      household_id: householdId,
+      address_label: address.label?.trim() || 'عنوان المنزل',
+      full_name: address.recipientName?.trim() || 'المستلم',
+      phone: address.phone?.trim() || '',
+      country: 'مصر',
+      governorate_name: address.governorate?.trim() || 'القاهرة',
+      markaz_name: address.markaz?.trim() || '',
+      detailed_address: address.detailedAddress?.trim() || '',
+      latitude: address.latitude ? Number(Number(address.latitude).toFixed(7)) : null,
+      longitude: address.longitude ? Number(Number(address.longitude).toFixed(7)) : null,
+      is_default: Boolean(address.isDefault),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await supabase
+      .from('household_addresses')
+      .insert(payload)
+      .select()
+      .single();
+
+    if (error || !data) {
+      throw new Error(`فشل حفظ العنوان في قاعدة البيانات: ${error?.message || 'خطأ غير معروف'}`);
+    }
+
     return {
-      ...address,
-      id: `addr-${Date.now()}`,
+      id: data.id,
+      label: data.address_label || 'عنوان المنزل',
+      recipientName: data.full_name || '',
+      phone: data.phone || '',
+      governorate: data.governorate_name || '',
+      markaz: data.markaz_name || '',
+      detailedAddress: data.detailed_address || '',
+      latitude: Number(data.latitude) || 0,
+      longitude: Number(data.longitude) || 0,
+      isDefault: Boolean(data.is_default),
     };
   },
 
-  // 10. Order Placement Placeholder (READ-ONLY PHASE: No INSERTs to restaurant_orders)
-  async createMockRestaurantOrder(params?: {
+  // 11. Authoritative Create Restaurant Order (invoices -> delivery_orders -> delivery_order_items)
+  async createRestaurantOrder(params: {
     restaurant: Restaurant;
     items: FoodCartItem[];
     customerName: string;
     customerPhone: string;
     address: FoodCustomerAddress;
     notes?: string;
+    providedHouseholdId?: string;
+    providedUserId?: string;
   }): Promise<{ success: boolean; order?: FoodOrder; message?: string }> {
-    return {
-      success: false,
-      message:
-        'مرحلة القراءة فقط: تم فحص وتجهيز سلة مشترياتك والتخصيصات بنجاح. سيتم تفعيل إرسال الطلبات وحفظها في قاعدة البيانات في المرحلة التالية بعد اعتماد الربط.',
-    };
+    if (!isSupabaseConfigured() || !supabase) {
+      return { success: false, message: 'الاتصال بقاعدة بيانات Supabase غير مهيأ.' };
+    }
+
+    if (!params.items || params.items.length === 0) {
+      return { success: false, message: 'السلة فارغة، يرجى إضافة أصناف إلى الطلب.' };
+    }
+
+    if (!params.address?.id || !params.address.detailedAddress?.trim()) {
+      return { success: false, message: 'يرجى اختيار أو إضافة عنوان توصيل صالح ومكتمل.' };
+    }
+
+    if (!params.customerPhone?.trim()) {
+      return { success: false, message: 'يرجى كتابة رقم هاتف العميل للتواصل.' };
+    }
+
+    try {
+      // 1. Verify User Session
+      const {
+        data: { session },
+        error: sessionErr,
+      } = await supabase.auth.getSession();
+      const userId = params.providedUserId || session?.user?.id;
+      if (!userId || sessionErr) {
+        return { success: false, message: 'يجب تسجيل الدخول بحساب موثق لإتمام الطلب.' };
+      }
+
+      // 2. Resolve Authoritative Household ID
+      const householdId = params.providedHouseholdId || (await this.getUserHouseholdId(userId));
+      if (!householdId) {
+        return {
+          success: false,
+          message: 'لم يتم العثور على منزل مسجل أو مرتبط بحسابك. يرجى الانضمام لمنزل أو إنشاؤه أولاً من إعدادات التطبيق.',
+        };
+      }
+
+      // 3. Verify Address belongs to this Household
+      const { data: dbAddr, error: addrErr } = await supabase
+        .from('household_addresses')
+        .select('*')
+        .eq('id', params.address.id)
+        .eq('household_id', householdId)
+        .maybeSingle();
+
+      if (addrErr || !dbAddr) {
+        return {
+          success: false,
+          message: 'عنوان التوصيل المحدد غير مسجل للمنزل الحالي أو غير صالح.',
+        };
+      }
+
+      // 4. Re-verify Restaurant in DB
+      const { data: dbRestaurant, error: restErr } = await supabase
+        .from('restaurants')
+        .select('*')
+        .eq('id', params.restaurant.id)
+        .maybeSingle();
+
+      if (restErr || !dbRestaurant || !dbRestaurant.is_active) {
+        return { success: false, message: 'المطعم غير متاح حالياً أو تم إيقاف نشاطه.' };
+      }
+
+      if (!dbRestaurant.is_open) {
+        return { success: false, message: 'المطعم مغلق حالياً ولا يستقبل طلبات جديدة.' };
+      }
+
+      // 5. Re-verify Menu Items & Option Values in DB
+      const menuItemIds = params.items.map((i) => i.menuItemId);
+      const { data: dbItems, error: itemsErr } = await supabase
+        .from('restaurant_menu_items')
+        .select('id, name, price, is_available')
+        .eq('restaurant_id', params.restaurant.id)
+        .in('id', menuItemIds);
+
+      if (itemsErr || !dbItems || dbItems.length === 0) {
+        return { success: false, message: 'تعذر التحقق من قائمة أصناف المطعم في قاعدة البيانات.' };
+      }
+
+      const dbItemMap = new Map(dbItems.map((it: any) => [it.id, it]));
+
+      // Verify Option Values if selected
+      const allOptionValIds = params.items.flatMap((i) => i.selectedOptions.map((o) => o.optionId));
+      const dbOptionValMap = new Map<string, number>();
+
+      if (allOptionValIds.length > 0) {
+        const { data: dbOptVals } = await supabase
+          .from('restaurant_item_option_values')
+          .select('id, extra_price, is_available')
+          .in('id', allOptionValIds);
+
+        if (dbOptVals) {
+          dbOptVals.forEach((ov: any) => {
+            if (ov.is_available) {
+              dbOptionValMap.set(ov.id, Number(ov.extra_price) || 0);
+            }
+          });
+        }
+      }
+
+      // Calculate Verified Totals
+      let verifiedSubtotal = 0;
+      const verifiedItemsList: Array<{
+        product_id: string;
+        product_name: string;
+        category_id: string;
+        category_name: string;
+        quantity: string;
+        unit_price: number;
+        total_price: number;
+        options_snapshot: any[];
+        notes?: string;
+      }> = [];
+
+      for (const cartItem of params.items) {
+        const verifiedDbItem = dbItemMap.get(cartItem.menuItemId);
+        if (!verifiedDbItem) {
+          return {
+            success: false,
+            message: `الصنف "${cartItem.name}" لم يعد موجوداً في منيو هذا المطعم.`,
+          };
+        }
+        if (!verifiedDbItem.is_available) {
+          return {
+            success: false,
+            message: `الصنف "${verifiedDbItem.name}" غير متوفر حالياً بالمطعم.`,
+          };
+        }
+
+        const basePrice = Number(verifiedDbItem.price) || 0;
+        let addOnsTotal = 0;
+        const verifiedOptions = cartItem.selectedOptions.map((opt) => {
+          const verifiedExtra = dbOptionValMap.get(opt.optionId) ?? opt.price;
+          addOnsTotal += verifiedExtra;
+          return {
+            group_id: opt.groupId,
+            group_name: opt.groupName,
+            option_id: opt.optionId,
+            option_name: opt.optionName,
+            extra_price: verifiedExtra,
+          };
+        });
+
+        const verifiedUnitPrice = basePrice + addOnsTotal;
+        const qty = Math.max(1, Math.floor(cartItem.quantity));
+        const lineTotal = verifiedUnitPrice * qty;
+        verifiedSubtotal += lineTotal;
+
+        const optionsText = verifiedOptions.map((o) => o.option_name).join('، ');
+        const formattedProductName = optionsText
+          ? `${verifiedDbItem.name} (${optionsText})${cartItem.notes ? ` - ملاحظات: ${cartItem.notes}` : ''}`
+          : `${verifiedDbItem.name}${cartItem.notes ? ` - ملاحظات: ${cartItem.notes}` : ''}`;
+
+        verifiedItemsList.push({
+          product_id: verifiedDbItem.id,
+          product_name: formattedProductName,
+          category_id: dbRestaurant.id,
+          category_name: 'أكلات جاهزة ومطاعم',
+          quantity: String(qty),
+          unit_price: verifiedUnitPrice,
+          total_price: lineTotal,
+          options_snapshot: verifiedOptions,
+          notes: cartItem.notes,
+        });
+      }
+
+      const verifiedDeliveryFee = Number(dbRestaurant.delivery_fee) || 15;
+      const verifiedTotalAmount = verifiedSubtotal + verifiedDeliveryFee;
+
+      // 6. Step 1: Create Invoice in public.invoices
+      const invoiceId = crypto.randomUUID();
+      const invoiceNumber = `INV-FOOD-${Date.now().toString().slice(-6)}`;
+      const invoicePayload: any = {
+        id: invoiceId,
+        household_id: householdId,
+        invoice_number: invoiceNumber,
+        date: new Date().toISOString().split('T')[0],
+        category: 'food',
+        category_arabic: 'أكلات جاهزة ومطاعم',
+        products: verifiedItemsList.map((item) => ({
+          id: item.product_id,
+          name: item.product_name,
+          quantity: item.quantity,
+          price: item.unit_price,
+          total_price: item.total_price,
+          category: 'food',
+          categoryArabic: 'مطاعم',
+          restaurant_id: dbRestaurant.id,
+          restaurant_name: dbRestaurant.name,
+          options: item.options_snapshot,
+          notes: item.notes,
+        })),
+        total_price: verifiedSubtotal,
+        notes: `طلب مطعم ${dbRestaurant.name}${params.notes ? ` - ${params.notes}` : ''}`,
+        registered_by: params.customerName?.trim() || session?.user?.email || 'عميل المطعم',
+        payment_method: 'cash_on_delivery',
+        created_at: new Date().toISOString(),
+      };
+
+      const { data: createdInvoice, error: invErr } = await supabase
+        .from('invoices')
+        .insert(invoicePayload)
+        .select()
+        .single();
+
+      if (invErr) {
+        console.error('[foodService] Error inserting invoice:', invErr);
+        return {
+          success: false,
+          message: `فشل إنشاء الفاتورة في قاعدة البيانات: ${invErr.message}`,
+        };
+      }
+
+      // 7. Step 2: Create Delivery Order in public.delivery_orders
+      const deliveryOrderId = crypto.randomUUID();
+      const deliveryOrderPayload: any = {
+        id: deliveryOrderId,
+        household_id: householdId,
+        invoice_id: invoiceId,
+        created_by: userId,
+        user_id: userId,
+        address_id: dbAddr.id,
+        customer_name: params.customerName?.trim() || dbAddr.full_name || 'العميل',
+        customer_phone: params.customerPhone?.trim() || dbAddr.phone || '',
+        country: dbAddr.country || 'مصر',
+        governorate_name: dbAddr.governorate_name || 'القاهرة',
+        markaz_name: dbAddr.markaz_name || '',
+        detailed_address: dbAddr.detailed_address || '',
+        delivery_fee: verifiedDeliveryFee,
+        subtotal: verifiedSubtotal,
+        total_amount: verifiedTotalAmount,
+        delivery_notes: `مطعم: ${dbRestaurant.name}${params.notes ? ` - ${params.notes}` : ''}`,
+        status: 'pending_review',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      let { data: createdOrder, error: orderErr } = await supabase
+        .from('delivery_orders')
+        .insert(deliveryOrderPayload)
+        .select()
+        .single();
+
+      if (orderErr && orderErr.code === 'PGRST204') {
+        if (orderErr.message?.includes('user_id')) {
+          delete deliveryOrderPayload.user_id;
+        } else if (orderErr.message?.includes('created_by')) {
+          delete deliveryOrderPayload.created_by;
+        }
+        const retry = await supabase
+          .from('delivery_orders')
+          .insert(deliveryOrderPayload)
+          .select()
+          .single();
+        createdOrder = retry.data;
+        orderErr = retry.error;
+      }
+
+      if (orderErr || !createdOrder) {
+        console.error('[foodService] Error inserting delivery_orders:', orderErr);
+        // Safe rollback of invoice
+        try {
+          await supabase.from('invoices').delete().eq('id', invoiceId);
+        } catch {}
+        return {
+          success: false,
+          message: `فشل إنشاء طلب التوصيل: ${orderErr?.message || 'خطأ غير معروف'}`,
+        };
+      }
+
+      // 8. Step 3: Insert Items into public.delivery_order_items using EXACT column order_id
+      const itemsPayload = verifiedItemsList.map((item) => ({
+        order_id: deliveryOrderId,
+        product_id: item.product_id,
+        product_name: item.product_name,
+        category_id: item.category_id,
+        category_name: item.category_name,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        total_price: item.total_price,
+      }));
+
+      let { data: insertedItems, error: itemsInsertErr } = await supabase
+        .from('delivery_order_items')
+        .insert(itemsPayload)
+        .select();
+
+      // Dynamic fallback if remote schema has different column names
+      if (itemsInsertErr && itemsInsertErr.code === 'PGRST204') {
+        const missingMatch = /Could not find the '([^']+)' column/i.exec(itemsInsertErr.message);
+        const missingCol = missingMatch?.[1];
+
+        if (missingCol === 'order_id') {
+          // Switch to delivery_order_id if schema expected it
+          const altPayload = itemsPayload.map(({ order_id, ...rest }: any) => ({
+            ...rest,
+            delivery_order_id: deliveryOrderId,
+          }));
+          const retry = await supabase.from('delivery_order_items').insert(altPayload).select();
+          insertedItems = retry.data;
+          itemsInsertErr = retry.error;
+        } else if (missingCol && missingCol in itemsPayload[0]) {
+          // Strip unexpected column and retry
+          const altPayload = itemsPayload.map((item: any) => {
+            const copy = { ...item };
+            delete copy[missingCol];
+            return copy;
+          });
+          const retry = await supabase.from('delivery_order_items').insert(altPayload).select();
+          insertedItems = retry.data;
+          itemsInsertErr = retry.error;
+        }
+      }
+
+      if (itemsInsertErr) {
+        console.error('[foodService] Error inserting delivery_order_items:', itemsInsertErr);
+        return {
+          success: false,
+          message: `فشل حفظ بنود الطلب في جدول تفاصيل التوصيل: ${itemsInsertErr.message}`,
+        };
+      }
+
+      // 9. Step 4: Verification of Saved Records
+      const { data: verifiedOrder } = await supabase
+        .from('delivery_orders')
+        .select('*')
+        .eq('id', deliveryOrderId)
+        .maybeSingle();
+
+      let { data: verifiedSavedItems } = await supabase
+        .from('delivery_order_items')
+        .select('*')
+        .eq('order_id', deliveryOrderId);
+
+      if (!verifiedSavedItems || verifiedSavedItems.length === 0) {
+        const altCheck = await supabase
+          .from('delivery_order_items')
+          .select('*')
+          .eq('delivery_order_id', deliveryOrderId);
+        if (altCheck.data && altCheck.data.length > 0) {
+          verifiedSavedItems = altCheck.data;
+        }
+      }
+
+      if (!verifiedOrder || !verifiedSavedItems || verifiedSavedItems.length === 0) {
+        return {
+          success: false,
+          message: 'فشل التحقق من حفظ الطلب وأصنافه في قاعدة البيانات.',
+        };
+      }
+
+      // 10. Construct Domain FoodOrder Response
+      const responseOrder: FoodOrder = {
+        id: deliveryOrderId,
+        restaurantId: dbRestaurant.id,
+        restaurantName: dbRestaurant.name,
+        restaurantPhone: dbRestaurant.phone || '',
+        restaurantAddress: dbRestaurant.address || '',
+        customerName: params.customerName?.trim() || dbAddr.full_name || 'العميل',
+        customerPhone: params.customerPhone?.trim() || dbAddr.phone || '',
+        address: {
+          id: dbAddr.id,
+          label: dbAddr.address_label || 'عنوان التوصيل',
+          recipientName: dbAddr.full_name || '',
+          phone: dbAddr.phone || '',
+          governorate: dbAddr.governorate_name || '',
+          markaz: dbAddr.markaz_name || '',
+          detailedAddress: dbAddr.detailed_address || '',
+          latitude: Number(dbAddr.latitude) || 0,
+          longitude: Number(dbAddr.longitude) || 0,
+          isDefault: Boolean(dbAddr.is_default),
+        },
+        items: verifiedItemsList.map((i) => ({
+          menuItemId: i.product_id,
+          name: i.product_name,
+          quantity: Number(i.quantity) || 1,
+          unitPrice: i.unit_price,
+          totalPrice: i.total_price,
+          notes: i.notes,
+        })),
+        subtotal: verifiedSubtotal,
+        discount: 0,
+        deliveryFee: verifiedDeliveryFee,
+        totalAmount: verifiedTotalAmount,
+        notes: params.notes,
+        paymentMethod: 'cash_on_delivery',
+        deliveryChannel: dbRestaurant.deliveryChannel || 'direct_system',
+        orderStatus: 'pending_restaurant_confirmation',
+        deliveryStatus: mapDeliveryOrderStatus('pending_review'),
+        invoiceIssued: true,
+        invoiceNumber,
+        createdAt: createdOrder.created_at,
+        updatedAt: createdOrder.updated_at || createdOrder.created_at,
+        estimatedDeliveryTime: 'خلال 35-45 دقيقة',
+      };
+
+      return {
+        success: true,
+        order: responseOrder,
+        message: 'تم إرسال وحفظ طلب الطعام والفاتورة بنجاح!',
+      };
+    } catch (err: any) {
+      console.error('[foodService] Exception creating restaurant order:', err);
+      return {
+        success: false,
+        message: err.message || 'حدث خطأ غير متوقع أثناء حفظ الطلب في قاعدة البيانات.',
+      };
+    }
   },
 
-  async getMockOrderDetails(orderId: string): Promise<FoodOrder | null> {
-    return null;
+  // 12. Read Customer Orders from public.delivery_orders & public.invoices & public.delivery_order_items
+  async listCustomerOrders(
+    providedHouseholdId?: string,
+    providedUserId?: string
+  ): Promise<FoodOrder[]> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return [];
+    }
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const userId = providedUserId || session?.user?.id;
+      if (!userId) return [];
+
+      const householdId = providedHouseholdId || (await this.getUserHouseholdId(userId));
+      if (!householdId) return [];
+
+      // Query delivery_orders with joined invoice
+      const { data: dbOrders, error: ordersErr } = await supabase
+        .from('delivery_orders')
+        .select(`
+          *,
+          invoices (
+            id,
+            invoice_number,
+            products,
+            notes,
+            total_price,
+            category,
+            category_arabic
+          )
+        `)
+        .or(`household_id.eq.${householdId},created_by.eq.${userId},user_id.eq.${userId}`)
+        .order('created_at', { ascending: false });
+
+      if (ordersErr || !dbOrders) {
+        console.warn('[foodService] Error reading delivery_orders:', ordersErr?.message);
+        return [];
+      }
+
+      // Query delivery_order_items for these orders
+      const orderIds = dbOrders.map((o: any) => o.id);
+      const itemsMap = new Map<string, any[]>();
+
+      if (orderIds.length > 0) {
+        let itemsRows: any[] | null = null;
+        const res = await supabase
+          .from('delivery_order_items')
+          .select('*')
+          .in('order_id', orderIds);
+
+        if (!res.error && res.data) {
+          itemsRows = res.data;
+        } else if (res.error && res.error.code === 'PGRST204') {
+          // Schema cache might have delivery_order_id instead
+          const altRes = await supabase
+            .from('delivery_order_items')
+            .select('*')
+            .in('delivery_order_id', orderIds);
+          if (altRes.data) itemsRows = altRes.data;
+        }
+
+        if (itemsRows) {
+          itemsRows.forEach((r: any) => {
+            const oId = r.order_id || r.delivery_order_id;
+            if (!itemsMap.has(oId)) itemsMap.set(oId, []);
+            itemsMap.get(oId)!.push(r);
+          });
+        }
+      }
+
+      return dbOrders.map((o: any) => {
+        const dbItems = itemsMap.get(o.id) || [];
+        const invoiceProducts = Array.isArray(o.invoices?.products) ? o.invoices.products : [];
+
+        // Determine Restaurant Name
+        let restaurantName = 'مطعم';
+        if (invoiceProducts.length > 0 && invoiceProducts[0].restaurant_name) {
+          restaurantName = invoiceProducts[0].restaurant_name;
+        } else if (o.delivery_notes?.includes('مطعم:')) {
+          const match = o.delivery_notes.match(/مطعم:\s*([^\-]+)/);
+          if (match && match[1]) {
+            restaurantName = match[1].trim();
+          }
+        }
+
+        // Map items from delivery_order_items or invoices.products (NEVER return [] if items exist!)
+        let items: FoodOrderItem[] = [];
+        if (dbItems.length > 0) {
+          items = dbItems.map((it: any) => ({
+            menuItemId: it.product_id || it.id,
+            name: it.product_name,
+            quantity: Number(it.quantity) || 1,
+            unitPrice: Number(it.unit_price) || 0,
+            totalPrice: Number(it.total_price) || 0,
+          }));
+        } else if (invoiceProducts.length > 0) {
+          items = invoiceProducts.map((p: any) => ({
+            menuItemId: p.id || '',
+            name: p.name,
+            quantity: Number(p.quantity) || 1,
+            unitPrice: Number(p.price) || 0,
+            totalPrice: Number(p.total_price) || (Number(p.price) * (Number(p.quantity) || 1)),
+          }));
+        }
+
+        const invoiceNumber =
+          o.invoices?.invoice_number || (o.invoice_id ? `INV-${o.invoice_id.slice(0, 8)}` : undefined);
+
+        return {
+          id: o.id,
+          restaurantId: invoiceProducts[0]?.restaurant_id || 'rest-general',
+          restaurantName,
+          restaurantPhone: '',
+          restaurantAddress: '',
+          customerName: o.customer_name || '',
+          customerPhone: o.customer_phone || '',
+          address: {
+            id: o.address_id || 'addr-default',
+            label: 'عنوان التوصيل',
+            recipientName: o.customer_name || '',
+            phone: o.customer_phone || '',
+            governorate: o.governorate_name || '',
+            markaz: o.markaz_name || '',
+            detailedAddress: o.detailed_address || '',
+            latitude: Number(o.delivery_latitude) || 30.05,
+            longitude: Number(o.delivery_longitude) || 31.34,
+            isDefault: false,
+          },
+          items,
+          subtotal: Number(o.subtotal) || 0,
+          discount: 0,
+          deliveryFee: Number(o.delivery_fee) || 0,
+          totalAmount: Number(o.total_amount) || 0,
+          notes: o.delivery_notes || undefined,
+          paymentMethod: 'cash_on_delivery',
+          deliveryChannel: 'direct_system',
+          orderStatus: mapDeliveryStatusToFoodStatus(o.status),
+          deliveryStatus: mapDeliveryOrderStatus(o.status),
+          invoiceIssued: Boolean(o.invoice_id),
+          invoiceNumber,
+          createdAt: o.created_at,
+          updatedAt: o.updated_at || o.created_at,
+          estimatedDeliveryTime: 'خلال 35 دقيقة',
+        };
+      });
+    } catch (err) {
+      console.warn('[foodService] Exception reading customer orders:', err);
+      return [];
+    }
   },
 
-  async updateMockOrderStatusForTesting(
+  // 13. Read Single Order Details
+  async getOrderDetails(orderId: string): Promise<FoodOrder | null> {
+    const list = await this.listCustomerOrders();
+    return list.find((o) => o.id === orderId) || null;
+  },
+
+  // 14. Cancel Order in public.delivery_orders
+  async cancelOrder(orderId: string, reason?: string): Promise<{ success: boolean; message?: string }> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return { success: false, message: 'قاعدة بيانات Supabase غير مهيأة.' };
+    }
+
+    try {
+      const { error } = await supabase
+        .from('delivery_orders')
+        .update({
+          status: 'cancelled',
+          delivery_notes: reason ? `تم الإلغاء: ${reason}` : 'تم الإلغاء بواسطة العميل',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+
+      if (error) {
+        return { success: false, message: `فشل إلغاء الطلب: ${error.message}` };
+      }
+
+      return { success: true, message: 'تم إلغاء الطلب بنجاح.' };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'حدث خطأ أثناء إلغاء الطلب.' };
+    }
+  },
+
+  // Backward Compatibility Aliases
+  createMockRestaurantOrder(params: any) {
+    return this.createRestaurantOrder(params);
+  },
+  listMockCustomerOrders(householdId?: string, userId?: string) {
+    return this.listCustomerOrders(householdId, userId);
+  },
+  getMockOrderDetails(orderId: string) {
+    return this.getOrderDetails(orderId);
+  },
+  async updateOrderStatusForTesting(
     orderId: string,
     newStatus: FoodOrderStatus,
     deliveryStatus?: FoodDeliveryStatus
   ): Promise<FoodOrder | null> {
-    return null;
+    if (!isSupabaseConfigured() || !supabase) return null;
+    try {
+      const rawStatus = deliveryStatus || (newStatus === 'delivered' ? 'completed' : newStatus === 'cancelled' ? 'cancelled' : 'pending_review');
+      await supabase
+        .from('delivery_orders')
+        .update({
+          status: rawStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+      return this.getOrderDetails(orderId);
+    } catch {
+      return null;
+    }
   },
-
-  async cancelOrder(orderId: string, reason?: string): Promise<{ success: boolean; message?: string }> {
-    return {
-      success: false,
-      message: 'مرحلة القراءة فقط: إلغاء الطلبات من قاعدة البيانات غير متاح في هذه المرحلة.',
-    };
+  updateMockOrderStatusForTesting(orderId: string, newStatus: FoodOrderStatus, deliveryStatus?: FoodDeliveryStatus) {
+    return this.updateOrderStatusForTesting(orderId, newStatus, deliveryStatus);
   },
 };

@@ -17,7 +17,7 @@ interface Props {
 }
 
 export const ItemCustomizerModal: React.FC<Props> = ({ item, onClose }) => {
-  const { addToCart, setIsCartDrawerOpen } = useFood();
+  const { addToCart } = useFood();
 
   const [quantity, setQuantity] = useState<number>(1);
   const [selectedOptionsMap, setSelectedOptionsMap] = useState<Record<string, string[]>>({});
@@ -126,8 +126,6 @@ export const ItemCustomizerModal: React.FC<Props> = ({ item, onClose }) => {
 
     addToCart(item, quantity, flatSelectedOptions, notes);
     onClose();
-    // Open cart drawer for delightful instant feedback
-    setIsCartDrawerOpen(true);
   };
 
   if (!item) return null;
