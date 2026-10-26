@@ -26,6 +26,7 @@ export const FoodCheckoutModal: React.FC = () => {
     addNewAddress,
     sectionSettings,
     isSectionDisabled,
+    verifyGeographicScope,
   } = useFood();
 
   const { household, supabaseProfile, supabaseUser } = useApp();
@@ -43,6 +44,9 @@ export const FoodCheckoutModal: React.FC = () => {
   const [orderNotes, setOrderNotes] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Geographic scope verification for selected address
+  const [addressGeoScope, setAddressGeoScope] = useState<{ isServiceable: boolean; reason?: string } | null>(null);
 
   // Quick Inline Address form state if adding a new address
   const [isAddingNewAddress, setIsAddingNewAddress] = useState<boolean>(
@@ -65,6 +69,15 @@ export const FoodCheckoutModal: React.FC = () => {
 
   const currentAddress =
     addresses.find((a) => a.id === selectedAddressId) || addresses[0];
+
+  // Verify geographic scope whenever selected address changes
+  useEffect(() => {
+    if (currentAddress) {
+      verifyGeographicScope(currentAddress).then((res) => {
+        setAddressGeoScope(res);
+      });
+    }
+  }, [currentAddress, verifyGeographicScope]);
 
   // Auto-fill recipient name and phone from selected address if not yet entered
   useEffect(() => {
@@ -144,6 +157,12 @@ export const FoodCheckoutModal: React.FC = () => {
       return;
     }
 
+    // Verify Geographic Scope
+    if (addressGeoScope && !addressGeoScope.isServiceable) {
+      setErrorMessage(addressGeoScope.reason || 'العنوان المختار خارج النطاق الجغرافي المخدوم لقسم المطاعم.');
+      return;
+    }
+
     if (!customerPhone.trim()) {
       setErrorMessage('يرجى كتابة رقم هاتف العميل للتواصل.');
       return;
@@ -211,6 +230,17 @@ export const FoodCheckoutModal: React.FC = () => {
                   {sectionSettings?.status_message ||
                     'قسم المطاعم غير متاح حالياً أو لم يتم ضبط سجل الإعدادات في جدول restaurant_section_settings.'}
                 </p>
+              </div>
+            </div>
+          )}
+
+          {/* Geographic Scope Warning */}
+          {addressGeoScope && !addressGeoScope.isServiceable && (
+            <div className="p-3.5 bg-rose-50 border border-rose-300 rounded-2xl text-xs text-rose-950 flex items-start space-x-2.5 space-x-reverse animate-in fade-in shadow-2xs">
+              <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+              <div className="space-y-1 leading-relaxed">
+                <p className="font-black text-rose-900">العنوان المختار خارج نطاق التوصيل المعتمد:</p>
+                <p className="font-medium text-rose-800">{addressGeoScope.reason}</p>
               </div>
             </div>
           )}
@@ -507,7 +537,13 @@ export const FoodCheckoutModal: React.FC = () => {
           <button
             type="button"
             onClick={handleConfirmOrder}
-            disabled={isSubmitting || !sectionSettings || !sectionSettings.section_enabled || isSectionDisabled}
+            disabled={
+              isSubmitting ||
+              !sectionSettings ||
+              !sectionSettings.section_enabled ||
+              isSectionDisabled ||
+              (addressGeoScope !== null && !addressGeoScope.isServiceable)
+            }
             className="flex-1 py-3 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl text-xs sm:text-sm font-black flex items-center justify-center space-x-2 space-x-reverse shadow-lg shadow-emerald-600/25 transition-all"
           >
             {isSubmitting ? (
@@ -517,6 +553,8 @@ export const FoodCheckoutModal: React.FC = () => {
               </>
             ) : !sectionSettings || !sectionSettings.section_enabled || isSectionDisabled ? (
               <span>الطلب متوقف (إعدادات القسم غير مفعلة)</span>
+            ) : addressGeoScope && !addressGeoScope.isServiceable ? (
+              <span>العنوان خارج نطاق التوصيل المتاح</span>
             ) : (
               <>
                 <Check className="w-4 h-4 ml-1" />

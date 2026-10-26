@@ -181,15 +181,38 @@ export type FoodSectionView =
   | 'favorites'
   | 'offers';
 
-// Supabase Schema Interfaces for Read-Only integration
+export type SectionVisibility = 'visible' | 'hidden';
+export type DisabledDisplayMode = 'show_disabled' | 'grayscale' | 'hide';
+
 export interface RestaurantSectionSettings {
   id: string;
   section_enabled: boolean;
+  section_visibility: SectionVisibility;
+  disabled_display_mode: DisabledDisplayMode;
   global_max_delivery_radius_km: number;
   no_driver_timeout_minutes: number;
   created_at?: string;
   updated_at?: string;
   status_message?: string;
+}
+
+export interface RestaurantSectionServiceArea {
+  id: string;
+  governorate_id: string | null;
+  center_id: string | null;
+  area_id: string | null;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GeographicVerificationResult {
+  isServiceable: boolean;
+  reason?: string;
+  matchedLevel?: 'area' | 'center' | 'governorate';
+  governorateId?: string;
+  centerId?: string;
+  areaId?: string;
 }
 
 export interface RestaurantCategory {

@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { useApp } from "../context/AppContext";
 import { usePharmacy } from "../lib/usePharmacy";
+import { foodService } from "../food/services/foodService";
+import { RestaurantSectionSettings, GeographicVerificationResult } from "../food/types/foodTypes";
 import { CATEGORY_IMAGE_PRESETS } from "../data/categories";
 import {
   ChevronLeft,
@@ -31,9 +33,34 @@ export const CategoryGridView: React.FC = () => {
   const [disabledNotice, setDisabledNotice] = useState<string | null>(null);
   const actionablePharmacyOrdersCount = activeOrders.length;
 
+  // Food section settings & geographic scope
+  const [foodSettings, setFoodSettings] = useState<RestaurantSectionSettings | null>(null);
+  const [foodGeoScope, setFoodGeoScope] = useState<GeographicVerificationResult | null>(null);
+
   useEffect(() => {
     refreshActiveStateFromCache();
   }, [refreshActiveStateFromCache]);
+
+  useEffect(() => {
+    let isMounted = true;
+    Promise.all([
+      foodService.getSectionSettings(),
+      foodService.verifyGeographicScope(),
+    ])
+      .then(([settings, geoRes]) => {
+        if (isMounted) {
+          setFoodSettings(settings);
+          setFoodGeoScope(geoRes);
+        }
+      })
+      .catch((err) => {
+        console.warn("[CategoryGridView] Error loading food section settings:", err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Count missing items per category
   const getMissingCount = (catId: string) => {
@@ -62,6 +89,15 @@ export const CategoryGridView: React.FC = () => {
   const isPharmacyHidden = pharmacyStatus === "hidden";
   const pharmacyDisplayWidth = serviceSettings.displayWidth; // "full" | "half" from pharmacy_settings.display_width
 
+  // Food Section Operational & Visibility Rules:
+  // 1. If section_visibility === 'hidden' -> completely hidden (null)
+  // 2. Is section enabled globally AND geographically serviceable?
+  const isFoodOperational = Boolean(foodSettings?.section_enabled) && Boolean(foodGeoScope?.isServiceable);
+  const isFoodSectionHidden =
+    foodSettings?.section_visibility === "hidden" ||
+    (!isFoodOperational && foodSettings?.disabled_display_mode === "hide");
+  const isFoodDisabledDisplay = !isFoodOperational && !isFoodSectionHidden;
+
   const handlePharmacyClick = () => {
     if (isPharmacyDisabled) {
       setDisabledNotice(
@@ -75,6 +111,11 @@ export const CategoryGridView: React.FC = () => {
   };
 
   const handleFoodClick = () => {
+    if (isFoodDisabledDisplay) {
+      setDisabledNotice("قسم المطاعم معطل، سيتم التشغيل لاحقًا.");
+      setTimeout(() => setDisabledNotice(null), 3500);
+      return;
+    }
     setSelectedCategory(null);
     setActiveTab("food");
   };
@@ -196,66 +237,111 @@ export const CategoryGridView: React.FC = () => {
       </div>
 
       {/* Dedicated Ready-Food & Restaurants Section */}
-      <div className="space-y-3 pt-2">
-        <div className="relative flex items-center justify-center my-3">
-          <div className="border-t-2 border-slate-200/90 w-full" />
-          <span className="bg-[#F6F8FA] px-3.5 py-0.5 text-xs font-bold text-slate-500 rounded-full border border-slate-200 shadow-2xs absolute">
-            قسم الأكلات الجاهزة ومطاعم التوصيل
-          </span>
-        </div>
+      {!isFoodSectionHidden && (
+        <div className="space-y-3 pt-2">
+          <div className="relative flex items-center justify-center my-3">
+            <div className="border-t-2 border-slate-200/90 w-full" />
+            <span className="bg-[#F6F8FA] px-3.5 py-0.5 text-xs font-bold text-slate-500 rounded-full border border-slate-200 shadow-2xs absolute">
+              قسم الأكلات الجاهزة ومطاعم التوصيل
+            </span>
+          </div>
 
-        <div className="w-full">
-          <button
-            onClick={handleFoodClick}
-            className="group w-full bg-white rounded-2xl border-2 border-emerald-500/80 hover:border-emerald-600 text-right flex flex-col sm:flex-row sm:items-stretch justify-between overflow-hidden shadow-2xs hover:shadow-md transition-all cursor-pointer relative"
-          >
-            <div className="relative overflow-hidden bg-slate-900 sm:w-56 sm:h-auto h-32 shrink-0">
-              <img
-                src="https://images.unsplash.com/photo-1555939594-58d7cb561ad1?auto=format&fit=crop&w=800&q=80"
-                alt="الأكلات الجاهزة"
-                className="w-full h-full object-cover opacity-90 group-hover:scale-105 transition-transform duration-500"
-                loading="lazy"
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-900/30 to-transparent" />
-
-              <div className="absolute top-2 right-2">
-                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-amber-950 shadow-sm flex items-center space-x-1 space-x-reverse border border-white/40">
-                  <Sparkles className="w-2.5 h-2.5 ml-0.5" />
-                  <span>توصيل سريع</span>
-                </span>
-              </div>
-
-              <div className="absolute inset-x-0 bottom-0 min-h-[46px] h-11 px-2.5 py-1 text-white flex items-center justify-center bg-gradient-to-t from-slate-950/90 via-slate-950/60 to-transparent">
-                <h3 className="font-bold text-xs sm:text-sm text-center leading-snug drop-shadow-md line-clamp-2 w-full">
-                  الأكلات الجاهزة ومطاعم البيت
-                </h3>
-              </div>
-            </div>
-
-            <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between bg-white">
-              <div>
-                <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 mb-0.5">
-                  <div className="flex items-center space-x-1.5 space-x-reverse text-emerald-800">
-                    <UtensilsCrossed className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>مشويات، بيتزا، شاورما، كشري، أسماك وحلويات</span>
-                  </div>
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    دفع عند الاستلام
+          <div className="w-full">
+            <button
+              onClick={handleFoodClick}
+              className={`group w-full bg-white rounded-2xl border-2 text-right flex flex-col sm:flex-row sm:items-stretch justify-between overflow-hidden shadow-2xs transition-all relative ${
+                isFoodDisabledDisplay
+                  ? "grayscale contrast-90 opacity-80 border-slate-300 cursor-not-allowed"
+                  : "border-emerald-500/80 hover:border-emerald-600 hover:shadow-md cursor-pointer"
+              }`}
+            >
+              {/* Prominent Stamp for Disabled State: «معطل، سيتم التشغيل لاحقًا» */}
+              {isFoodDisabledDisplay && (
+                <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-[1px] flex items-center justify-center pointer-events-none z-20">
+                  <span className="px-5 py-2 rounded-2xl text-xs sm:text-sm font-black bg-rose-600 text-white shadow-2xl border-2 border-white tracking-wider flex items-center space-x-2 space-x-reverse rotate-[-4deg] animate-pulse">
+                    <Ban className="w-4 h-4 text-white ml-1.5" />
+                    <span>معطل، سيتم التشغيل لاحقًا</span>
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
-                  تصفح قوائم أفضل المطاعم القريبة منك، واختر وجباتك المفضلة مع الإضافات الخاصة، وتابع وصول طيار التوصيل خطوة بخطوة حتى باب منزلك.
-                </p>
+              )}
+
+              <div className="relative overflow-hidden bg-slate-900 sm:w-56 sm:h-auto h-32 shrink-0">
+                <img
+                  src="https://images.unsplash.com/photo-1555939594-58d7cb561ad1?auto=format&fit=crop&w=800&q=80"
+                  alt="الأكلات الجاهزة"
+                  className={`w-full h-full object-cover transition-transform duration-500 ${
+                    isFoodDisabledDisplay
+                      ? "grayscale opacity-75"
+                      : "opacity-90 group-hover:scale-105"
+                  }`}
+                  loading="lazy"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-900/30 to-transparent" />
+
+                <div className="absolute top-2 right-2">
+                  {isFoodDisabledDisplay ? (
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-slate-800 text-slate-100 shadow-sm flex items-center space-x-1 space-x-reverse border border-slate-600">
+                      <Lock className="w-2.5 h-2.5 ml-0.5" />
+                      <span>غير متاح</span>
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-amber-950 shadow-sm flex items-center space-x-1 space-x-reverse border border-white/40">
+                      <Sparkles className="w-2.5 h-2.5 ml-0.5" />
+                      <span>توصيل سريع</span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="absolute inset-x-0 bottom-0 min-h-[46px] h-11 px-2.5 py-1 text-white flex items-center justify-center bg-gradient-to-t from-slate-950/90 via-slate-950/60 to-transparent">
+                  <h3 className="font-bold text-xs sm:text-sm text-center leading-snug drop-shadow-md line-clamp-2 w-full">
+                    الأكلات الجاهزة ومطاعم البيت
+                  </h3>
+                </div>
               </div>
 
-              <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-emerald-700">
-                <span>تصفح المطاعم وقوائم الطعام</span>
-                <ChevronLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-1" />
+              <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between bg-white">
+                <div>
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 mb-0.5">
+                    <div className="flex items-center space-x-1.5 space-x-reverse text-emerald-800">
+                      <UtensilsCrossed className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>مشويات، بيتزا، شاورما، كشري، أسماك وحلويات</span>
+                    </div>
+                    {isFoodDisabledDisplay ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-50 text-rose-700 border border-rose-200">
+                        معطل مؤقتاً
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        دفع عند الاستلام
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
+                    {isFoodDisabledDisplay
+                      ? (foodSettings?.status_message ||
+                         foodGeoScope?.reason ||
+                         "قسم المطاعم معطل حالياً وسيتم التشغيل لاحقاً وفق التغطية الجغرافية المعتمدة.")
+                      : "تصفح قوائم أفضل المطاعم القريبة منك، واختر وجباتك المفضلة مع الإضافات الخاصة، وتابع وصول طيار التوصيل خطوة بخطوة حتى باب منزلك."}
+                  </p>
+                </div>
+
+                <div
+                  className={`pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold ${
+                    isFoodDisabledDisplay ? "text-slate-400" : "text-emerald-700"
+                  }`}
+                >
+                  <span>
+                    {isFoodDisabledDisplay
+                      ? "معطل، سيتم التشغيل لاحقًا"
+                      : "تصفح المطاعم وقوائم الطعام"}
+                  </span>
+                  <ChevronLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-1" />
+                </div>
               </div>
-            </div>
-          </button>
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 2. Clear Divider Line & 3. Dedicated Pharmacy Section (Requirement 1, 2, 3) */}
       {!isPharmacyHidden && (

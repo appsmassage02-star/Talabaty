@@ -13,12 +13,28 @@ import {
   FoodDeliveryStatus,
   RestaurantSectionSettings,
   RestaurantCategory,
+  RestaurantSectionServiceArea,
+  GeographicVerificationResult,
+  SectionVisibility,
+  DisabledDisplayMode,
   RawDbRestaurant,
   RawDbMenuItem,
   RawDbItemOption,
   RawDbItemOptionValue,
   RawDbOffer,
 } from '../types/foodTypes';
+
+export function normalizeArabicText(text?: string | null): string {
+  if (!text) return '';
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/\s+/g, ' ');
+}
 
 export interface RestaurantFilterParams {
   searchQuery?: string;
@@ -89,7 +105,9 @@ export const foodService = {
       return {
         id: 'unconfigured',
         section_enabled: false,
-        global_max_delivery_radius_km: 15,
+        section_visibility: 'visible',
+        disabled_display_mode: 'show_disabled',
+        global_max_delivery_radius_km: 10,
         no_driver_timeout_minutes: 10,
         status_message: 'قاعدة بيانات Supabase غير مهيأة.',
       };
@@ -98,14 +116,18 @@ export const foodService = {
     try {
       const { data, error } = await supabase
         .from('restaurant_section_settings')
-        .select('id, section_enabled, global_max_delivery_radius_km, no_driver_timeout_minutes, created_at, updated_at');
+        .select(
+          'id, section_enabled, section_visibility, disabled_display_mode, global_max_delivery_radius_km, no_driver_timeout_minutes, created_at, updated_at'
+        );
 
       if (error) {
         console.warn('[foodService] Error reading restaurant_section_settings:', error.message);
         return {
           id: 'error',
           section_enabled: false,
-          global_max_delivery_radius_km: 15,
+          section_visibility: 'visible',
+          disabled_display_mode: 'show_disabled',
+          global_max_delivery_radius_km: 10,
           no_driver_timeout_minutes: 10,
           status_message: `تعذر قراءة إعدادات قسم المطاعم من قاعدة البيانات: ${error.message}`,
         };
@@ -115,7 +137,9 @@ export const foodService = {
         return {
           id: 'empty',
           section_enabled: false,
-          global_max_delivery_radius_km: 15,
+          section_visibility: 'visible',
+          disabled_display_mode: 'show_disabled',
+          global_max_delivery_radius_km: 10,
           no_driver_timeout_minutes: 10,
           status_message:
             'قسم المطاعم غير متاح حالياً: جدول إعدادات القسم (restaurant_section_settings) فارغ ولا يحتوي على سجل تهيئة.',
@@ -126,7 +150,9 @@ export const foodService = {
         return {
           id: 'ambiguous',
           section_enabled: false,
-          global_max_delivery_radius_km: 15,
+          section_visibility: 'visible',
+          disabled_display_mode: 'show_disabled',
+          global_max_delivery_radius_km: 10,
           no_driver_timeout_minutes: 10,
           status_message:
             'تعذر تفعيل قسم المطاعم لوجود أكثر من سجل في جدول إعدادات القسم دون تحديد السجل النشط.',
@@ -135,11 +161,19 @@ export const foodService = {
 
       const row = data[0];
       const isEnabled = Boolean(row.section_enabled);
+      const visibility = (row.section_visibility === 'hidden' ? 'hidden' : 'visible') as SectionVisibility;
+      const disabledMode = (
+        ['show_disabled', 'grayscale', 'hide'].includes(row.disabled_display_mode)
+          ? row.disabled_display_mode
+          : 'show_disabled'
+      ) as DisabledDisplayMode;
 
       return {
         id: row.id,
         section_enabled: isEnabled,
-        global_max_delivery_radius_km: Number(row.global_max_delivery_radius_km) || 15,
+        section_visibility: visibility,
+        disabled_display_mode: disabledMode,
+        global_max_delivery_radius_km: Number(row.global_max_delivery_radius_km) || 10,
         no_driver_timeout_minutes: Number(row.no_driver_timeout_minutes) || 10,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -152,9 +186,243 @@ export const foodService = {
       return {
         id: 'exception',
         section_enabled: false,
-        global_max_delivery_radius_km: 15,
+        section_visibility: 'visible',
+        disabled_display_mode: 'show_disabled',
+        global_max_delivery_radius_km: 10,
         no_driver_timeout_minutes: 10,
         status_message: 'حدث استثناء غير متوقع أثناء فحص إعدادات قسم المطاعم.',
+      };
+    }
+  },
+
+  // 1.1 Verify Geographic Service Area Scope (restaurant_section_service_areas, food_governorates, food_centers, food_areas)
+  async verifyGeographicScope(
+    address?: FoodCustomerAddress | null,
+    providedHouseholdId?: string,
+    providedUserId?: string
+  ): Promise<GeographicVerificationResult> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return {
+        isServiceable: false,
+        reason: 'قاعدة بيانات Supabase غير مهيأة للتحقق من النطاق الجغرافي.',
+      };
+    }
+
+    try {
+      // Step A: Fetch active service areas from restaurant_section_service_areas
+      const { data: activeServiceAreas, error: saError } = await supabase
+        .from('restaurant_section_service_areas')
+        .select('id, governorate_id, center_id, area_id, is_active')
+        .eq('is_active', true);
+
+      if (saError) {
+        console.warn('[foodService] Error reading restaurant_section_service_areas:', saError.message);
+        return {
+          isServiceable: false,
+          reason: `تعذر التحقق من نطاقات الخدمة في قاعدة البيانات: ${saError.message}`,
+        };
+      }
+
+      // Rule: Absence of active service areas is NOT permission (strict denial)
+      if (!activeServiceAreas || activeServiceAreas.length === 0) {
+        return {
+          isServiceable: false,
+          reason: 'لا يوجد نطاق جغرافي مفعّل لقسم المطاعم في قاعدة البيانات حالياً.',
+        };
+      }
+
+      // If address is not provided directly, attempt to resolve user's saved/default address
+      let targetAddress = address;
+      if (!targetAddress) {
+        const savedAddresses = await this.listCustomerAddresses(providedHouseholdId, providedUserId);
+        targetAddress = savedAddresses.find((a) => a.isDefault) || savedAddresses[0] || null;
+      }
+
+      // If still no address is available (e.g. general visitor checking section visibility),
+      // since active service areas exist, allow general entrance view but require address verification before ordering
+      if (!targetAddress) {
+        return {
+          isServiceable: true,
+          reason: 'يوجد نطاق جغرافي مفعّل لقسم المطاعم؛ يلزم تحديد عنوان معتمد للتحقق عند الطلب.',
+        };
+      }
+
+      // Validate required address hierarchy fields
+      if (!targetAddress.governorate?.trim() || !targetAddress.markaz?.trim()) {
+        return {
+          isServiceable: false,
+          reason: 'بيانات العنوان المختار غير مكتملة (المحافظة أو المركز مفقود). يرجى اختيار أو تحديث العنوان.',
+        };
+      }
+
+      // Step B: Fetch food_governorates and verify active status
+      const { data: govs, error: govError } = await supabase
+        .from('food_governorates')
+        .select('id, name_ar, name_en, is_active');
+
+      if (govError || !govs || govs.length === 0) {
+        return {
+          isServiceable: false,
+          reason: 'تعذر التحقق من قائمة المحافظات المعتمدة في النظام.',
+        };
+      }
+
+      const normAddressGov = normalizeArabicText(targetAddress.governorate);
+      const matchedGov = govs.find((g: any) => {
+        const nameArNorm = normalizeArabicText(g.name_ar);
+        const nameEn = (g.name_en || '').toLowerCase();
+        return (
+          nameArNorm === normAddressGov ||
+          nameEn === targetAddress.governorate.trim().toLowerCase() ||
+          nameArNorm.includes(normAddressGov) ||
+          normAddressGov.includes(nameArNorm)
+        );
+      });
+
+      if (!matchedGov) {
+        return {
+          isServiceable: false,
+          reason: `محافظة العنوان (${targetAddress.governorate}) غير مطابقة لأي محافظة معتمدة في قاعدة البيانات.`,
+        };
+      }
+
+      if (!matchedGov.is_active) {
+        return {
+          isServiceable: false,
+          reason: `محافظة (${matchedGov.name_ar}) غير مفعّلة في خدمة التوصيل حالياً.`,
+          governorateId: matchedGov.id,
+        };
+      }
+
+      // Step C: Fetch food_centers for this governorate and verify active status
+      const { data: centers, error: centerError } = await supabase
+        .from('food_centers')
+        .select('id, governorate_id, name_ar, name_en, is_active')
+        .eq('governorate_id', matchedGov.id);
+
+      if (centerError || !centers || centers.length === 0) {
+        return {
+          isServiceable: false,
+          reason: `لا توجد مراكز أو مدن مسجلة تابعة لمحافظة (${matchedGov.name_ar}).`,
+          governorateId: matchedGov.id,
+        };
+      }
+
+      const normAddressMarkaz = normalizeArabicText(targetAddress.markaz);
+      const matchedCenter = centers.find((c: any) => {
+        const nameArNorm = normalizeArabicText(c.name_ar);
+        const nameEn = (c.name_en || '').toLowerCase();
+        return (
+          nameArNorm === normAddressMarkaz ||
+          nameEn === targetAddress.markaz.trim().toLowerCase() ||
+          nameArNorm.includes(normAddressMarkaz) ||
+          normAddressMarkaz.includes(nameArNorm)
+        );
+      });
+
+      if (!matchedCenter) {
+        return {
+          isServiceable: false,
+          reason: `المركز/المدينة (${targetAddress.markaz}) غير مطابق للمراكز المعتمدة التابعة لمحافظة (${matchedGov.name_ar}).`,
+          governorateId: matchedGov.id,
+        };
+      }
+
+      if (!matchedCenter.is_active) {
+        return {
+          isServiceable: false,
+          reason: `مركز/مدينة (${matchedCenter.name_ar}) غير مفعّل في خدمة التوصيل حالياً.`,
+          governorateId: matchedGov.id,
+          centerId: matchedCenter.id,
+        };
+      }
+
+      // Step D: Fetch food_areas for this center to check specific area matching if identifiable
+      const { data: areas } = await supabase
+        .from('food_areas')
+        .select('id, center_id, name_ar, name_en, is_active')
+        .eq('center_id', matchedCenter.id);
+
+      let matchedArea: any = null;
+      if (areas && areas.length > 0 && targetAddress.detailedAddress) {
+        const normDetailed = normalizeArabicText(targetAddress.detailedAddress);
+        matchedArea = areas.find((a: any) => {
+          const areaArNorm = normalizeArabicText(a.name_ar);
+          if (areaArNorm.length >= 3 && normDetailed.includes(areaArNorm)) {
+            return true;
+          }
+          if (a.name_en && a.name_en.length >= 3 && normDetailed.includes(a.name_en.toLowerCase())) {
+            return true;
+          }
+          return false;
+        });
+      }
+
+      // Step E: Hierarchical Scope Matching in restaurant_section_service_areas
+      // Priority 1: Area level
+      if (matchedArea) {
+        const areaScope = activeServiceAreas.find((sa: any) => sa.area_id === matchedArea.id);
+        if (areaScope) {
+          if (!matchedArea.is_active) {
+            return {
+              isServiceable: false,
+              reason: `منطقة (${matchedArea.name_ar}) غير مفعّلة في خدمة التوصيل حالياً.`,
+              governorateId: matchedGov.id,
+              centerId: matchedCenter.id,
+              areaId: matchedArea.id,
+            };
+          }
+          return {
+            isServiceable: true,
+            matchedLevel: 'area',
+            governorateId: matchedGov.id,
+            centerId: matchedCenter.id,
+            areaId: matchedArea.id,
+          };
+        }
+      }
+
+      // Priority 2: Center level (center_id matches, area_id is null)
+      const centerScope = activeServiceAreas.find(
+        (sa: any) => sa.center_id === matchedCenter.id && !sa.area_id
+      );
+      if (centerScope) {
+        return {
+          isServiceable: true,
+          matchedLevel: 'center',
+          governorateId: matchedGov.id,
+          centerId: matchedCenter.id,
+          areaId: matchedArea?.id,
+        };
+      }
+
+      // Priority 3: Governorate level (governorate_id matches, center_id is null, area_id is null)
+      const govScope = activeServiceAreas.find(
+        (sa: any) => sa.governorate_id === matchedGov.id && !sa.center_id && !sa.area_id
+      );
+      if (govScope) {
+        return {
+          isServiceable: true,
+          matchedLevel: 'governorate',
+          governorateId: matchedGov.id,
+          centerId: matchedCenter.id,
+          areaId: matchedArea?.id,
+        };
+      }
+
+      // Out of active service area scope
+      return {
+        isServiceable: false,
+        reason: `العنوان المختار (${matchedGov.name_ar} - ${matchedCenter.name_ar}) خارج النطاق الجغرافي المخدوم حالياً لقسم المطاعم.`,
+        governorateId: matchedGov.id,
+        centerId: matchedCenter.id,
+        areaId: matchedArea?.id,
+      };
+    } catch (err: any) {
+      console.warn('[foodService] Exception verifying geographic scope:', err);
+      return {
+        isServiceable: false,
+        reason: 'حدث خطأ غير متوقع أثناء التحقق من النطاق الجغرافي للخدمة.',
       };
     }
   },
@@ -913,6 +1181,28 @@ export const foodService = {
       };
     }
 
+    if (sectionSettings.section_visibility === 'hidden') {
+      return {
+        success: false,
+        message: 'قسم المطاعم غير متاح حالياً؛ إعدادات الرؤية محددة بالمخفي.',
+      };
+    }
+
+    // Step 0.1: Check Geographic Service Area Scope strictly
+    const geoScopeResult = await this.verifyGeographicScope(
+      params.address,
+      params.providedHouseholdId,
+      params.providedUserId
+    );
+    if (!geoScopeResult.isServiceable) {
+      return {
+        success: false,
+        message:
+          geoScopeResult.reason ||
+          'العنوان المختار خارج النطاق الجغرافي المخدوم حالياً لقسم المطاعم.',
+      };
+    }
+
     if (!params.items || params.items.length === 0) {
       return { success: false, message: 'السلة فارغة، يرجى إضافة أصناف إلى الطلب.' };
     }
@@ -1075,24 +1365,40 @@ export const foodService = {
 
       // 7. Authoritative Insert into public.restaurant_orders
       // Note: order_number is generated by database identity/default column, DO NOT provide it
+      const adminFeeShare = Number(
+        ((verifiedSubtotal * (Number(dbRestaurant.commission_percent) || 0)) / 100).toFixed(2)
+      );
+      const restaurantFeeShare = Number((verifiedSubtotal - adminFeeShare).toFixed(2));
+      const driverFeeShare = verifiedDeliveryFee;
+
       const orderPayload: any = {
         customer_user_id: userId,
         restaurant_id: dbRestaurant.id,
-        household_id: householdId,
-        delivery_address_id: dbAddr.id,
-        customer_name: params.customerName?.trim() || dbAddr.full_name || 'العميل',
-        customer_phone: params.customerPhone?.trim() || dbAddr.phone || '',
-        status: 'pending',
         fulfillment_route:
           dbRestaurant.delivery_type === 'restaurant_delivery' ? 'restaurant_delivery' : 'driver_delivery',
-        payment_method: 'cash',
+        status: 'pending',
+        restaurant_name_snapshot: dbRestaurant.name,
+        restaurant_phone_snapshot: dbRestaurant.phone || null,
+        restaurant_latitude_snapshot: Number(dbRestaurant.latitude) || 30.05,
+        restaurant_longitude_snapshot: Number(dbRestaurant.longitude) || 31.34,
+        customer_name: params.customerName?.trim() || dbAddr.full_name || 'العميل',
+        customer_phone: params.customerPhone?.trim() || dbAddr.phone || '',
+        delivery_address: dbAddr.detailed_address || params.address.detailedAddress || '',
+        delivery_latitude: Number(dbAddr.latitude) || Number(params.address.latitude) || 30.05,
+        delivery_longitude: Number(dbAddr.longitude) || Number(params.address.longitude) || 31.34,
         food_subtotal: verifiedSubtotal,
         discount_amount: 0,
         delivery_fee: verifiedDeliveryFee,
         customer_total: verifiedTotalAmount,
-        restaurant_notes: params.notes?.trim() || null,
-        delivery_notes: params.notes?.trim() || null,
+        commission_percent_snapshot: Number(dbRestaurant.commission_percent) || 0,
+        driver_fee_share: driverFeeShare,
+        admin_fee_share: adminFeeShare,
+        restaurant_fee_share: restaurantFeeShare,
+        payment_method: 'cash',
         idempotency_key: crypto.randomUUID(),
+        delivery_governorate_name_snapshot: dbAddr.governorate_name || params.address.governorate || 'القاهرة',
+        delivery_center_name_snapshot: dbAddr.markaz_name || params.address.markaz || '',
+        delivery_area_name_snapshot: dbAddr.markaz_name || params.address.markaz || '',
       };
 
       const { data: createdOrder, error: orderErr } = await supabase
@@ -1187,9 +1493,9 @@ export const foodService = {
       try {
         await supabase.from('restaurant_order_status_history').insert({
           order_id: createdOrder.id,
-          status: 'pending',
-          changed_by_user_id: userId,
-          notes: 'تم إرسال الطلب بواسطة العميل',
+          new_status: 'pending',
+          changed_by: userId,
+          note: 'تم إرسال الطلب بواسطة العميل',
         });
       } catch (histErr) {
         console.warn('[foodService] Non-critical history insert error:', histErr);
@@ -1321,21 +1627,21 @@ export const foodService = {
         return {
           id: o.id,
           restaurantId: o.restaurant_id,
-          restaurantName: rest?.name || 'مطعم',
-          restaurantPhone: rest?.phone || '',
+          restaurantName: rest?.name || o.restaurant_name_snapshot || 'مطعم',
+          restaurantPhone: rest?.phone || o.restaurant_phone_snapshot || '',
           restaurantAddress: rest?.address || '',
           customerName: o.customer_name || 'العميل',
           customerPhone: o.customer_phone || '',
           address: {
-            id: o.delivery_address_id || 'addr-default',
+            id: o.delivery_area_id || 'addr-default',
             label: 'عنوان التوصيل',
             recipientName: o.customer_name || '',
             phone: o.customer_phone || '',
-            governorate: '',
-            markaz: '',
-            detailedAddress: '',
-            latitude: 0,
-            longitude: 0,
+            governorate: o.delivery_governorate_name_snapshot || '',
+            markaz: o.delivery_center_name_snapshot || '',
+            detailedAddress: o.delivery_address || '',
+            latitude: Number(o.delivery_latitude) || 0,
+            longitude: Number(o.delivery_longitude) || 0,
             isDefault: false,
           },
           items: orderItems,
@@ -1343,7 +1649,7 @@ export const foodService = {
           discount: Number(o.discount_amount) || 0,
           deliveryFee: Number(o.delivery_fee) || 0,
           totalAmount: Number(o.customer_total) || 0,
-          notes: o.delivery_notes || o.restaurant_notes || undefined,
+          notes: o.cancellation_reason ? `سبب الإلغاء: ${o.cancellation_reason}` : undefined,
           paymentMethod: 'cash_on_delivery',
           deliveryChannel: 'direct_system',
           orderStatus: mapDeliveryStatusToFoodStatus(o.status),
@@ -1419,21 +1725,21 @@ export const foodService = {
       return {
         id: o.id,
         restaurantId: o.restaurant_id,
-        restaurantName: rest?.name || 'مطعم',
-        restaurantPhone: rest?.phone || '',
+        restaurantName: rest?.name || o.restaurant_name_snapshot || 'مطعم',
+        restaurantPhone: rest?.phone || o.restaurant_phone_snapshot || '',
         restaurantAddress: rest?.address || '',
         customerName: o.customer_name || 'العميل',
         customerPhone: o.customer_phone || '',
         address: {
-          id: o.delivery_address_id || 'addr-default',
+          id: o.delivery_area_id || 'addr-default',
           label: 'عنوان التوصيل',
           recipientName: o.customer_name || '',
           phone: o.customer_phone || '',
-          governorate: '',
-          markaz: '',
-          detailedAddress: '',
-          latitude: 0,
-          longitude: 0,
+          governorate: o.delivery_governorate_name_snapshot || '',
+          markaz: o.delivery_center_name_snapshot || '',
+          detailedAddress: o.delivery_address || '',
+          latitude: Number(o.delivery_latitude) || 0,
+          longitude: Number(o.delivery_longitude) || 0,
           isDefault: false,
         },
         items: orderItems,
@@ -1441,7 +1747,7 @@ export const foodService = {
         discount: Number(o.discount_amount) || 0,
         deliveryFee: Number(o.delivery_fee) || 0,
         totalAmount: Number(o.customer_total) || 0,
-        notes: o.delivery_notes || o.restaurant_notes || undefined,
+        notes: o.cancellation_reason ? `سبب الإلغاء: ${o.cancellation_reason}` : undefined,
         paymentMethod: 'cash_on_delivery',
         deliveryChannel: 'direct_system',
         orderStatus: mapDeliveryStatusToFoodStatus(o.status),
@@ -1469,7 +1775,7 @@ export const foodService = {
         .from('restaurant_orders')
         .update({
           status: 'cancelled',
-          cancel_reason: reason ? `تم الإلغاء: ${reason}` : 'تم الإلغاء بواسطة العميل',
+          cancellation_reason: reason ? `تم الإلغاء: ${reason}` : 'تم الإلغاء بواسطة العميل',
           updated_at: new Date().toISOString(),
         })
         .eq('id', orderId);

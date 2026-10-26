@@ -12,6 +12,7 @@ import {
   FoodDeliveryStatus,
   RestaurantSectionSettings,
   RestaurantCategory,
+  GeographicVerificationResult,
 } from '../types/foodTypes';
 import { foodService, RestaurantFilterParams } from '../services/foodService';
 
@@ -104,9 +105,11 @@ interface FoodContextType {
   isRestaurantFavorite: (id: string) => boolean;
   isMenuItemFavorite: (id: string) => boolean;
 
-  // Supabase Section Settings & Categories
+  // Supabase Section Settings & Categories & Geographic Scope
   sectionSettings: RestaurantSectionSettings | null;
   isSectionDisabled: boolean;
+  geoScopeResult: GeographicVerificationResult | null;
+  verifyGeographicScope: (address?: FoodCustomerAddress | null) => Promise<GeographicVerificationResult>;
   dbCategories: RestaurantCategory[];
 }
 
@@ -175,8 +178,9 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Addresses state
   const [addresses, setAddresses] = useState<FoodCustomerAddress[]>([]);
 
-  // Supabase Section Settings & Categories
+  // Supabase Section Settings, Geographic Scope & Categories
   const [sectionSettings, setSectionSettings] = useState<RestaurantSectionSettings | null>(null);
+  const [geoScopeResult, setGeoScopeResult] = useState<GeographicVerificationResult | null>(null);
   const [isSectionDisabled, setIsSectionDisabled] = useState<boolean>(false);
   const [dbCategories, setDbCategories] = useState<RestaurantCategory[]>([]);
 
@@ -184,11 +188,29 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [favoriteRestaurantIds, setFavoriteRestaurantIds] = useState<string[]>([]);
   const [favoriteMenuItemIds, setFavoriteMenuItemIds] = useState<string[]>([]);
 
-  // Fetch Section Settings, Categories, and Customer Favorites from Supabase
+  // Geographic Scope Verification helper
+  const verifyGeographicScope = useCallback(
+    async (targetAddress?: FoodCustomerAddress | null) => {
+      const result = await foodService.verifyGeographicScope(
+        targetAddress,
+        household?.id,
+        supabaseUser?.id
+      );
+      setGeoScopeResult(result);
+      return result;
+    },
+    [household?.id, supabaseUser?.id]
+  );
+
+  // Fetch Section Settings, Geographic Scope, Categories, and Customer Favorites from Supabase
   useEffect(() => {
-    foodService.getSectionSettings().then((settings) => {
+    Promise.all([
+      foodService.getSectionSettings(),
+      foodService.verifyGeographicScope(undefined, household?.id, supabaseUser?.id),
+    ]).then(([settings, geoRes]) => {
       setSectionSettings(settings);
-      if (!settings || !settings.section_enabled) {
+      setGeoScopeResult(geoRes);
+      if (!settings || !settings.section_enabled || !geoRes.isServiceable) {
         setIsSectionDisabled(true);
       } else {
         setIsSectionDisabled(false);
@@ -202,7 +224,7 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
     foodService.listCustomerFavorites().then((favs) => {
       setFavoriteRestaurantIds(favs);
     });
-  }, []);
+  }, [household?.id, supabaseUser?.id]);
 
   // Load restaurants
   const refreshRestaurants = useCallback(async () => {
@@ -551,6 +573,8 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isMenuItemFavorite,
         sectionSettings,
         isSectionDisabled,
+        geoScopeResult,
+        verifyGeographicScope,
         dbCategories,
       }}
     >

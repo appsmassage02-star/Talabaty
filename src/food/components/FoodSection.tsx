@@ -42,6 +42,7 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
     navigateBackToFoodHome,
     isSectionDisabled,
     sectionSettings,
+    geoScopeResult,
   } = useFood();
 
   const activeOrdersCount = orders.filter(
@@ -61,6 +62,7 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
           <span>
             {sectionSettings?.status_message ||
+              geoScopeResult?.reason ||
               'قسم الأكلات الجاهزة والمطاعم معطل حالياً بقرار من الإدارة لأعمال الصيانة والتحديث. تصفح القوائم متاح للمعاينة فقط.'}
           </span>
         </div>
