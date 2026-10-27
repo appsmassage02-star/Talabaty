@@ -101,13 +101,41 @@ export interface FoodCartItem {
   currentActualPrice?: number;
 }
 
+export interface FoodGovernorate {
+  id: string;
+  name_ar: string;
+  name_en?: string;
+  is_active: boolean;
+}
+
+export interface FoodCenter {
+  id: string;
+  governorate_id: string;
+  name_ar: string;
+  name_en?: string;
+  is_active: boolean;
+}
+
+export interface FoodArea {
+  id: string;
+  governorate_id: string;
+  center_id: string;
+  name_ar: string;
+  name_en?: string;
+  is_active: boolean;
+}
+
 export interface FoodCustomerAddress {
   id: string;
   label: string;
   recipientName: string;
   phone: string;
   governorate: string;
+  governorateId?: string;
   markaz: string;
+  centerId?: string;
+  area?: string;
+  areaId?: string;
   detailedAddress: string;
   latitude: number;
   longitude: number;

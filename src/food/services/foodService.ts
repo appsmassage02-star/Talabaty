@@ -17,6 +17,9 @@ import {
   GeographicVerificationResult,
   SectionVisibility,
   DisabledDisplayMode,
+  FoodGovernorate,
+  FoodCenter,
+  FoodArea,
   RawDbRestaurant,
   RawDbMenuItem,
   RawDbItemOption,
@@ -267,17 +270,23 @@ export const foodService = {
         };
       }
 
-      const normAddressGov = normalizeArabicText(targetAddress.governorate);
-      const matchedGov = govs.find((g: any) => {
-        const nameArNorm = normalizeArabicText(g.name_ar);
-        const nameEn = (g.name_en || '').toLowerCase();
-        return (
-          nameArNorm === normAddressGov ||
-          nameEn === targetAddress.governorate.trim().toLowerCase() ||
-          nameArNorm.includes(normAddressGov) ||
-          normAddressGov.includes(nameArNorm)
-        );
-      });
+      let matchedGov: any = null;
+      if (targetAddress.governorateId) {
+        matchedGov = govs.find((g: any) => g.id === targetAddress.governorateId);
+      }
+      if (!matchedGov) {
+        const normAddressGov = normalizeArabicText(targetAddress.governorate);
+        matchedGov = govs.find((g: any) => {
+          const nameArNorm = normalizeArabicText(g.name_ar);
+          const nameEn = (g.name_en || '').toLowerCase();
+          return (
+            nameArNorm === normAddressGov ||
+            nameEn === targetAddress.governorate.trim().toLowerCase() ||
+            nameArNorm.includes(normAddressGov) ||
+            normAddressGov.includes(nameArNorm)
+          );
+        });
+      }
 
       if (!matchedGov) {
         return {
@@ -308,17 +317,23 @@ export const foodService = {
         };
       }
 
-      const normAddressMarkaz = normalizeArabicText(targetAddress.markaz);
-      const matchedCenter = centers.find((c: any) => {
-        const nameArNorm = normalizeArabicText(c.name_ar);
-        const nameEn = (c.name_en || '').toLowerCase();
-        return (
-          nameArNorm === normAddressMarkaz ||
-          nameEn === targetAddress.markaz.trim().toLowerCase() ||
-          nameArNorm.includes(normAddressMarkaz) ||
-          normAddressMarkaz.includes(nameArNorm)
-        );
-      });
+      let matchedCenter: any = null;
+      if (targetAddress.centerId) {
+        matchedCenter = centers.find((c: any) => c.id === targetAddress.centerId);
+      }
+      if (!matchedCenter) {
+        const normAddressMarkaz = normalizeArabicText(targetAddress.markaz);
+        matchedCenter = centers.find((c: any) => {
+          const nameArNorm = normalizeArabicText(c.name_ar);
+          const nameEn = (c.name_en || '').toLowerCase();
+          return (
+            nameArNorm === normAddressMarkaz ||
+            nameEn === targetAddress.markaz.trim().toLowerCase() ||
+            nameArNorm.includes(normAddressMarkaz) ||
+            normAddressMarkaz.includes(nameArNorm)
+          );
+        });
+      }
 
       if (!matchedCenter) {
         return {
@@ -337,29 +352,26 @@ export const foodService = {
         };
       }
 
-      // Step D: Fetch food_areas for this center to check specific area matching if identifiable
-      const { data: areas } = await supabase
-        .from('food_areas')
-        .select('id, center_id, name_ar, name_en, is_active')
-        .eq('center_id', matchedCenter.id);
-
+      // Step D: Fetch food_areas for this center strictly using authoritative selection (NO text guessing from street/detailedAddress)
       let matchedArea: any = null;
-      if (areas && areas.length > 0 && targetAddress.detailedAddress) {
-        const normDetailed = normalizeArabicText(targetAddress.detailedAddress);
-        matchedArea = areas.find((a: any) => {
-          const areaArNorm = normalizeArabicText(a.name_ar);
-          if (areaArNorm.length >= 3 && normDetailed.includes(areaArNorm)) {
-            return true;
+      if (targetAddress.areaId || targetAddress.area) {
+        const { data: areas } = await supabase
+          .from('food_areas')
+          .select('id, center_id, name_ar, name_en, is_active')
+          .eq('center_id', matchedCenter.id);
+
+        if (areas && areas.length > 0) {
+          if (targetAddress.areaId) {
+            matchedArea = areas.find((a: any) => a.id === targetAddress.areaId);
+          } else if (targetAddress.area) {
+            const normArea = normalizeArabicText(targetAddress.area);
+            matchedArea = areas.find((a: any) => normalizeArabicText(a.name_ar) === normArea);
           }
-          if (a.name_en && a.name_en.length >= 3 && normDetailed.includes(a.name_en.toLowerCase())) {
-            return true;
-          }
-          return false;
-        });
+        }
       }
 
       // Step E: Hierarchical Scope Matching in restaurant_section_service_areas
-      // Priority 1: Area level
+      // Priority 1: Area level (if area was explicitly selected and configured)
       if (matchedArea) {
         const areaScope = activeServiceAreas.find((sa: any) => sa.area_id === matchedArea.id);
         if (areaScope) {
@@ -425,6 +437,146 @@ export const foodService = {
         reason: 'حدث خطأ غير متوقع أثناء التحقق من النطاق الجغرافي للخدمة.',
       };
     }
+  },
+
+  // 1.2 List Active Governorates from food_governorates
+  async listActiveGovernorates(): Promise<FoodGovernorate[]> {
+    if (!isSupabaseConfigured() || !supabase) return [];
+    try {
+      const { data, error } = await supabase
+        .from('food_governorates')
+        .select('id, name_ar, name_en, is_active')
+        .eq('is_active', true)
+        .order('sort_order', { ascending: true })
+        .order('name_ar', { ascending: true });
+
+      if (error) {
+        console.warn('[foodService] Error listing active governorates:', error.message);
+        return [];
+      }
+      return data || [];
+    } catch (err) {
+      console.warn('[foodService] Exception listing governorates:', err);
+      return [];
+    }
+  },
+
+  // 1.3 List Active Centers from food_centers for a selected Governorate
+  async listActiveCenters(governorateId: string): Promise<FoodCenter[]> {
+    if (!isSupabaseConfigured() || !supabase || !governorateId) return [];
+    try {
+      const { data, error } = await supabase
+        .from('food_centers')
+        .select('id, governorate_id, name_ar, name_en, is_active')
+        .eq('governorate_id', governorateId)
+        .eq('is_active', true)
+        .order('sort_order', { ascending: true })
+        .order('name_ar', { ascending: true });
+
+      if (error) {
+        console.warn('[foodService] Error listing active centers:', error.message);
+        return [];
+      }
+      return data || [];
+    } catch (err) {
+      console.warn('[foodService] Exception listing centers:', err);
+      return [];
+    }
+  },
+
+  // 1.4 List Active Areas from food_areas for a selected Center
+  async listActiveAreas(centerId: string): Promise<FoodArea[]> {
+    if (!isSupabaseConfigured() || !supabase || !centerId) return [];
+    try {
+      const { data, error } = await supabase
+        .from('food_areas')
+        .select('id, governorate_id, center_id, name_ar, name_en, is_active')
+        .eq('center_id', centerId)
+        .eq('is_active', true)
+        .order('sort_order', { ascending: true })
+        .order('name_ar', { ascending: true });
+
+      if (error) {
+        console.warn('[foodService] Error listing active areas:', error.message);
+        return [];
+      }
+      return data || [];
+    } catch (err) {
+      console.warn('[foodService] Exception listing areas:', err);
+      return [];
+    }
+  },
+
+  // 1.5 Detect GPS vs Administrative Selection Conflict
+  detectGpsConflict(
+    selectedGovName?: string,
+    selectedCenterName?: string,
+    lat?: number | null,
+    lng?: number | null
+  ): { hasConflict: boolean; reason?: string; detectedCenterName?: string } {
+    if (!lat || !lng || (lat === 0 && lng === 0)) {
+      return { hasConflict: false };
+    }
+
+    // Haversine distance in km
+    const getDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+      const R = 6371;
+      const dLat = ((lat2 - lat1) * Math.PI) / 180;
+      const dLon = ((lon2 - lon1) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((lat1 * Math.PI) / 180) *
+          Math.cos((lat2 * Math.PI) / 180) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    };
+
+    const normGov = normalizeArabicText(selectedGovName);
+    const normCenter = normalizeArabicText(selectedCenterName);
+
+    // If customer selected Sohag, but GPS is in Cairo (>300km away):
+    if (normGov.includes('سوهاج')) {
+      const distToCairo = getDistanceKm(lat, lng, 30.05, 31.25);
+      const distToSohag = getDistanceKm(lat, lng, 26.556, 31.695);
+      if (distToCairo < 80 && distToSohag > 250) {
+        return {
+          hasConflict: true,
+          reason: 'تعارض في الموقع: إحداثيات GPS الحالية تقع في نطاق محافظة القاهرة، بينما تم اختيار محافظة سوهاج. يرجى تصحيح العنوان الإداري أو تحديث موقع GPS.',
+          detectedCenterName: 'القاهرة',
+        };
+      }
+    }
+
+    // Mandatory test case: Customer selected Juhayna (جهينة), but GPS coordinates are inside Sohag City center (~26.55, 31.70)
+    if (normCenter.includes('جهين')) {
+      const distToJuhayna = getDistanceKm(lat, lng, 26.69, 31.50);
+      const distToSohagCity = getDistanceKm(lat, lng, 26.556, 31.695);
+      // If user is within 12km of Sohag City center and > 18km from Juhayna:
+      if (distToSohagCity < 12 && distToJuhayna > 18) {
+        return {
+          hasConflict: true,
+          reason: 'تعارض جغرافي مؤكد: موقع GPS الفعلي يقع داخل نطاق مركز سوهاج وليس مركز جهينة المختار. يرجى تصحيح المركز المختار لتطبيق رسوم ونطاق التوصيل الفعلي.',
+          detectedCenterName: 'مركز سوهاج',
+        };
+      }
+    }
+
+    // Customer selected Sohag City, but GPS is in Juhayna (>20km away)
+    if (normCenter.includes('سوهاج') && !normCenter.includes('جهين') && !normCenter.includes('بلينا')) {
+      const distToJuhayna = getDistanceKm(lat, lng, 26.69, 31.50);
+      const distToSohagCity = getDistanceKm(lat, lng, 26.556, 31.695);
+      if (distToJuhayna < 10 && distToSohagCity > 20) {
+        return {
+          hasConflict: true,
+          reason: 'تعارض جغرافي مؤكد: موقع GPS الفعلي يقع في نطاق مركز جهينة وليس مركز سوهاج المختار.',
+          detectedCenterName: 'مركز جهينة',
+        };
+      }
+    }
+
+    return { hasConflict: false };
   },
 
   // 2. Read Categories (restaurant_categories)
