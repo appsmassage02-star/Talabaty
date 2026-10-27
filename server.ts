@@ -1,14 +1,29 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+// Initialize Server-side Supabase Client
+const supabaseUrl = process.env.VITE_SUPABASE_URL || "";
+const supabaseServiceKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  "";
+const serverSupabase = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+});
 
 // Allow large JSON payloads for compressed base64 images
 app.use(express.json({ limit: "50mb" }));
@@ -369,6 +384,364 @@ function fallbackParseArabic(text: string) {
 // 2. Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", app: "Talabat Al-Bayt API", time: new Date().toISOString() });
+});
+
+// Helper for Arabic normalization in server
+function normalizeServerAr(text?: string | null): string {
+  if (!text) return "";
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[أإآ]/g, "ا")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .replace(/[\u064B-\u065F\u0670]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+// 3. API: Authoritative Create Restaurant Order (public.restaurant_orders)
+app.post("/api/food/create-order", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace(/^Bearer\s+/i, "");
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "يجب تسجيل الدخول بحساب موثق لإتمام الطلب.",
+      });
+    }
+
+    // 1. Verify User from Token
+    const {
+      data: { user },
+      error: authErr,
+    } = await serverSupabase.auth.getUser(token);
+    if (authErr || !user) {
+      return res.status(401).json({
+        success: false,
+        message: "جلسة تسجيل الدخول غير صالحة أو منتهية، يرجى إعادة تسجيل الدخول.",
+      });
+    }
+    const userId = user.id;
+
+    const {
+      restaurant,
+      items,
+      customerName,
+      customerPhone,
+      address,
+      notes,
+    } = req.body;
+
+    if (!restaurant?.id) {
+      return res.status(400).json({ success: false, message: "بيانات المطعم غير صالحة." });
+    }
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: "السلة فارغة، يرجى إضافة أصناف للطلب." });
+    }
+    if (!address?.id || !address.detailedAddress?.trim()) {
+      return res.status(400).json({ success: false, message: "يرجى تحديد عنوان توصيل صالح ومكتمل." });
+    }
+    if (!customerPhone?.trim()) {
+      return res.status(400).json({ success: false, message: "يرجى إدخال رقم هاتف للتواصل." });
+    }
+
+    // 2. Check restaurant_section_settings
+    const { data: settingsData } = await serverSupabase
+      .from("restaurant_section_settings")
+      .select("*")
+      .limit(1);
+
+    const settings = settingsData?.[0];
+    if (!settings || !settings.section_enabled) {
+      return res.status(400).json({
+        success: false,
+        message: "قسم المطاعم متوقف حالياً من قِبل إدارة التطبيق (section_enabled = false).",
+      });
+    }
+    if (settings.section_visibility === "hidden") {
+      return res.status(400).json({
+        success: false,
+        message: "قسم المطاعم غير متاح حالياً (القسم مخفي في الإعدادات).",
+      });
+    }
+
+    // 3. Verify Geographic Service Area Scope
+    const { data: activeServiceAreas, error: saErr } = await serverSupabase
+      .from("restaurant_section_service_areas")
+      .select("id, governorate_id, center_id, area_id, is_active")
+      .eq("is_active", true);
+
+    if (saErr || !activeServiceAreas || activeServiceAreas.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "لا يوجد نطاق جغرافي مفعّل لقسم المطاعم في قاعدة البيانات حالياً.",
+      });
+    }
+
+    // 4. Verify Restaurant in DB
+    const { data: dbRestaurant, error: restErr } = await serverSupabase
+      .from("restaurants")
+      .select("*")
+      .eq("id", restaurant.id)
+      .maybeSingle();
+
+    if (restErr || !dbRestaurant || !dbRestaurant.is_active) {
+      return res.status(400).json({
+        success: false,
+        message: "المطعم غير متاح حالياً أو تم إيقاف نشاطه.",
+      });
+    }
+    if (!dbRestaurant.is_open) {
+      return res.status(400).json({
+        success: false,
+        message: "المطعم مغلق حالياً ولا يستقبل طلبات جديدة.",
+      });
+    }
+
+    // 5. Verify Menu Items & Options
+    const menuItemIds = items.map((i: any) => i.menuItemId);
+    const { data: dbItems, error: itemsErr } = await serverSupabase
+      .from("restaurant_menu_items")
+      .select("id, name, price, is_available")
+      .eq("restaurant_id", dbRestaurant.id)
+      .in("id", menuItemIds);
+
+    if (itemsErr || !dbItems || dbItems.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "تعذر التحقق من أصناف الطلب في قائمة المطعم.",
+      });
+    }
+
+    const dbItemMap = new Map(dbItems.map((it: any) => [it.id, it]));
+
+    // Verify option values
+    const allOptionValIds = items.flatMap((i: any) =>
+      (i.selectedOptions || []).map((o: any) => o.optionId)
+    );
+    const dbOptionValMap = new Map<string, number>();
+
+    if (allOptionValIds.length > 0) {
+      const { data: dbOptVals } = await serverSupabase
+        .from("restaurant_item_option_values")
+        .select("id, extra_price, is_available")
+        .in("id", allOptionValIds);
+
+      if (dbOptVals) {
+        dbOptVals.forEach((ov: any) => {
+          if (ov.is_available) {
+            dbOptionValMap.set(ov.id, Number(ov.extra_price) || 0);
+          }
+        });
+      }
+    }
+
+    let verifiedSubtotal = 0;
+    const verifiedItemsList: Array<{
+      menu_item_id: string;
+      item_name_snapshot: string;
+      unit_price_snapshot: number;
+      quantity: number;
+      line_total: number;
+      options_snapshot: any[];
+      notes?: string;
+    }> = [];
+
+    for (const cartItem of items) {
+      const verifiedDbItem = dbItemMap.get(cartItem.menuItemId);
+      if (!verifiedDbItem) {
+        return res.status(400).json({
+          success: false,
+          message: `الصنف "${cartItem.name}" لم يعد موجوداً في منيو هذا المطعم.`,
+        });
+      }
+      if (!verifiedDbItem.is_available) {
+        return res.status(400).json({
+          success: false,
+          message: `الصنف "${verifiedDbItem.name}" غير متوفر حالياً بالمطعم.`,
+        });
+      }
+
+      const basePrice = Number(verifiedDbItem.price) || 0;
+      let addOnsTotal = 0;
+      const verifiedOptions = (cartItem.selectedOptions || []).map((opt: any) => {
+        const verifiedExtra = dbOptionValMap.get(opt.optionId) ?? (Number(opt.price) || 0);
+        addOnsTotal += verifiedExtra;
+        return {
+          group_id: opt.groupId,
+          group_name: opt.groupName,
+          option_id: opt.optionId,
+          option_name: opt.optionName,
+          extra_price: verifiedExtra,
+        };
+      });
+
+      const verifiedUnitPrice = basePrice + addOnsTotal;
+      const qty = Math.max(1, Math.floor(Number(cartItem.quantity) || 1));
+      const lineTotal = verifiedUnitPrice * qty;
+      verifiedSubtotal += lineTotal;
+
+      verifiedItemsList.push({
+        menu_item_id: verifiedDbItem.id,
+        item_name_snapshot: verifiedDbItem.name,
+        unit_price_snapshot: verifiedUnitPrice,
+        quantity: qty,
+        line_total: lineTotal,
+        options_snapshot: verifiedOptions,
+        notes: cartItem.notes,
+      });
+    }
+
+    // 6. Resolve delivery fee
+    let verifiedDeliveryFee = Number(dbRestaurant.delivery_fee) || 15;
+    const { data: areaFees } = await serverSupabase
+      .from("restaurant_area_delivery_fees")
+      .select("id, area_id, delivery_fee, is_active")
+      .eq("restaurant_id", dbRestaurant.id)
+      .eq("is_active", true);
+
+    if (areaFees && areaFees.length > 0 && address.markaz) {
+      const areaIds = areaFees.map((f: any) => f.area_id);
+      const { data: areas } = await serverSupabase
+        .from("food_areas")
+        .select("id, name_ar, name_en")
+        .in("id", areaIds);
+
+      if (areas && areas.length > 0) {
+        const matched = areas.find((a: any) => {
+          const name = a.name_ar || a.name_en;
+          if (!name) return false;
+          return (
+            (address.markaz && address.markaz.includes(name)) ||
+            (address.detailedAddress && address.detailedAddress.includes(name))
+          );
+        });
+        if (matched) {
+          const feeRow = areaFees.find((f: any) => f.area_id === matched.id);
+          if (feeRow?.delivery_fee !== null && feeRow?.delivery_fee !== undefined) {
+            verifiedDeliveryFee = Number(feeRow.delivery_fee);
+          }
+        }
+      }
+    }
+
+    const verifiedTotalAmount = verifiedSubtotal + verifiedDeliveryFee;
+
+    // 7. Calculate Fee Shares
+    const commissionPercent = Number(dbRestaurant.commission_percent) || 0;
+    const adminFeeShare = Number(((verifiedSubtotal * commissionPercent) / 100).toFixed(2));
+    const restaurantFeeShare = Number((verifiedSubtotal - adminFeeShare).toFixed(2));
+    const driverFeeShare = verifiedDeliveryFee;
+
+    // 8. Insert into public.restaurant_orders
+    const orderPayload = {
+      customer_user_id: userId,
+      restaurant_id: dbRestaurant.id,
+      fulfillment_route:
+        dbRestaurant.delivery_type === "restaurant_delivery" ? "restaurant_delivery" : "driver_delivery",
+      status: "pending",
+      restaurant_name_snapshot: dbRestaurant.name,
+      restaurant_phone_snapshot: dbRestaurant.phone || null,
+      restaurant_latitude_snapshot: Number(dbRestaurant.latitude) || 30.05,
+      restaurant_longitude_snapshot: Number(dbRestaurant.longitude) || 31.34,
+      customer_name: customerName?.trim() || "العميل",
+      customer_phone: customerPhone?.trim() || "",
+      delivery_address: address.detailedAddress || "",
+      delivery_latitude: Number(address.latitude) || 30.05,
+      delivery_longitude: Number(address.longitude) || 31.34,
+      food_subtotal: verifiedSubtotal,
+      discount_amount: 0,
+      delivery_fee: verifiedDeliveryFee,
+      customer_total: verifiedTotalAmount,
+      commission_percent_snapshot: commissionPercent,
+      driver_fee_share: driverFeeShare,
+      admin_fee_share: adminFeeShare,
+      restaurant_fee_share: restaurantFeeShare,
+      payment_method: "cash",
+      idempotency_key: crypto.randomUUID(),
+      delivery_governorate_name_snapshot: address.governorate || "القاهرة",
+      delivery_center_name_snapshot: address.markaz || "",
+      delivery_area_name_snapshot: address.markaz || "",
+    };
+
+    const { data: createdOrder, error: orderErr } = await serverSupabase
+      .from("restaurant_orders")
+      .insert(orderPayload)
+      .select()
+      .single();
+
+    if (orderErr || !createdOrder) {
+      console.error("[Server Food API] Error inserting restaurant_orders:", orderErr);
+      return res.status(500).json({
+        success: false,
+        message: `تعذر حفظ الطلب في قاعدة البيانات: ${orderErr?.message || "خطأ غير معروف"}`,
+      });
+    }
+
+    // 9. Insert items into public.restaurant_order_items
+    for (const it of verifiedItemsList) {
+      const itemPayload = {
+        order_id: createdOrder.id,
+        menu_item_id: it.menu_item_id,
+        item_name_snapshot: it.item_name_snapshot,
+        unit_price_snapshot: it.unit_price_snapshot,
+        quantity: it.quantity,
+        discount_amount: 0,
+        line_total: it.line_total,
+        customer_approved_price_change: false,
+      };
+
+      const { data: insertedItem, error: itemErr } = await serverSupabase
+        .from("restaurant_order_items")
+        .insert(itemPayload)
+        .select()
+        .single();
+
+      if (itemErr) {
+        console.warn("[Server Food API] Error inserting item:", itemErr.message);
+      }
+
+      // 10. Insert options into public.restaurant_order_item_options
+      if (insertedItem && it.options_snapshot.length > 0) {
+        const optionsPayload = it.options_snapshot.map((opt: any) => ({
+          order_item_id: insertedItem.id,
+          option_name_snapshot: opt.group_name || opt.option_name,
+          value_name_snapshot: opt.option_name,
+          extra_price_snapshot: Number(opt.extra_price) || 0,
+        }));
+
+        const { error: optErr } = await serverSupabase
+          .from("restaurant_order_item_options")
+          .insert(optionsPayload);
+
+        if (optErr) {
+          console.warn("[Server Food API] Error inserting options:", optErr.message);
+        }
+      }
+    }
+
+    // 11. Insert initial status history into public.restaurant_order_status_history
+    await serverSupabase.from("restaurant_order_status_history").insert({
+      order_id: createdOrder.id,
+      new_status: "pending",
+      changed_by: userId,
+      note: "تم إنشاء طلب المطعم بنجاح عبر تطبيق طلباتي",
+    });
+
+    return res.json({
+      success: true,
+      order: createdOrder,
+      orderNumber: createdOrder.order_number,
+      message: "تم إنشاء الطلب بنجاح",
+    });
+  } catch (err: any) {
+    console.error("[Server Food API] Exception in create-order:", err);
+    return res.status(500).json({
+      success: false,
+      message: `حدث استثناء غير متوقع أثناء إنشاء الطلب: ${err?.message || "خطأ غير معروف"}`,
+    });
+  }
 });
 
 async function startServer() {
