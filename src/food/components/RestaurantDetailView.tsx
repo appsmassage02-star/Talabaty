@@ -14,6 +14,8 @@ import {
   Phone,
   Info,
   Tag,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 import { foodService } from '../services/foodService';
 import { MenuItem } from '../types/foodTypes';
@@ -31,6 +33,23 @@ export const RestaurantDetailView: React.FC = () => {
   const [isLoadingMenu, setIsLoadingMenu] = useState<boolean>(true);
   const [selectedCategory, setSelectedCategory] = useState<string>('الكل');
   const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
+    try {
+      const saved = localStorage.getItem('talabaty_menu_view_mode');
+      return saved === 'list' ? 'list' : 'grid';
+    } catch {
+      return 'grid';
+    }
+  });
+
+  const handleToggleViewMode = (mode: 'grid' | 'list') => {
+    setViewMode(mode);
+    try {
+      localStorage.setItem('talabaty_menu_view_mode', mode);
+    } catch {
+      // ignore
+    }
+  };
 
   const restaurant = useMemo(() => {
     return restaurants.find((r) => r.id === selectedRestaurantId);
@@ -237,26 +256,58 @@ export const RestaurantDetailView: React.FC = () => {
           />
         </div>
 
-        {/* Menu Category Chips */}
-        <div className="flex items-center space-x-2 space-x-reverse overflow-x-auto pb-1.5 scrollbar-none">
-          {allCategories.map((cat) => (
+        {/* Menu Category Chips & View Switcher */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center space-x-2 space-x-reverse overflow-x-auto pb-1.5 scrollbar-none flex-1">
+            {allCategories.map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setSelectedCategory(cat)}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all shadow-2xs cursor-pointer ${
+                  selectedCategory === cat
+                    ? 'bg-emerald-600 text-white shadow-emerald-600/20'
+                    : 'bg-white text-slate-600 hover:text-slate-900 border border-slate-200'
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          {/* View Mode Switcher */}
+          <div className="flex items-center bg-white border border-slate-200 rounded-xl p-0.5 shadow-2xs shrink-0 mb-1.5">
             <button
-              key={cat}
               type="button"
-              onClick={() => setSelectedCategory(cat)}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all shadow-2xs cursor-pointer ${
-                selectedCategory === cat
-                  ? 'bg-emerald-600 text-white shadow-emerald-600/20'
-                  : 'bg-white text-slate-600 hover:text-slate-900 border border-slate-200'
+              onClick={() => handleToggleViewMode('grid')}
+              title="عرض شبكة (بطاقتين بالصف)"
+              aria-label="عرض شبكة"
+              className={`p-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                viewMode === 'grid'
+                  ? 'bg-emerald-600 text-white shadow-2xs'
+                  : 'text-slate-500 hover:text-slate-800'
               }`}
             >
-              {cat}
+              <LayoutGrid className="w-3.5 h-3.5" />
             </button>
-          ))}
+            <button
+              type="button"
+              onClick={() => handleToggleViewMode('list')}
+              title="عرض قائمة"
+              aria-label="عرض قائمة"
+              className={`p-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                viewMode === 'list'
+                  ? 'bg-emerald-600 text-white shadow-2xs'
+                  : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Menu Dishes Grid */}
+      {/* Menu Dishes Grid or List */}
       {isLoadingMenu ? (
         <div className="py-16 text-center space-y-2">
           <div className="w-6 h-6 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto" />
@@ -272,18 +323,25 @@ export const RestaurantDetailView: React.FC = () => {
               setSelectedCategory('الكل');
               setItemSearchQuery('');
             }}
-            className="text-xs text-emerald-700 font-bold hover:underline"
+            className="text-xs text-emerald-700 font-bold hover:underline cursor-pointer"
           >
             إعادة تعيين الفلاتر
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+        <div
+          className={
+            viewMode === 'grid'
+              ? 'grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3.5'
+              : 'flex flex-col gap-3'
+          }
+        >
           {filteredMenuItems.map((item) => (
             <MenuItemCard
               key={item.id}
               item={item}
               restaurantIsOpen={restaurant.isOpen}
+              viewMode={viewMode}
             />
           ))}
         </div>

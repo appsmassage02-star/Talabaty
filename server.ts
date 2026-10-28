@@ -593,7 +593,7 @@ app.post("/api/food/create-order", async (req, res) => {
       });
     }
 
-    // 6. Resolve delivery fee
+    // 6. Resolve delivery fee with area priority & coverage check
     let verifiedDeliveryFee = Number(dbRestaurant.delivery_fee) || 15;
     const { data: areaFees } = await serverSupabase
       .from("restaurant_area_delivery_fees")
@@ -601,28 +601,51 @@ app.post("/api/food/create-order", async (req, res) => {
       .eq("restaurant_id", dbRestaurant.id)
       .eq("is_active", true);
 
-    if (areaFees && areaFees.length > 0 && address.markaz) {
-      const areaIds = areaFees.map((f: any) => f.area_id);
-      const { data: areas } = await serverSupabase
-        .from("food_areas")
-        .select("id, name_ar, name_en")
-        .in("id", areaIds);
+    const { data: serviceAreas } = await serverSupabase
+      .from("restaurant_service_areas")
+      .select("id, governorate_id, center_id, area_id, is_active")
+      .eq("restaurant_id", dbRestaurant.id)
+      .eq("is_active", true);
 
-      if (areas && areas.length > 0) {
-        const matched = areas.find((a: any) => {
-          const name = a.name_ar || a.name_en;
-          if (!name) return false;
-          return (
-            (address.markaz && address.markaz.includes(name)) ||
-            (address.detailedAddress && address.detailedAddress.includes(name))
-          );
-        });
-        if (matched) {
-          const feeRow = areaFees.find((f: any) => f.area_id === matched.id);
-          if (feeRow?.delivery_fee !== null && feeRow?.delivery_fee !== undefined) {
-            verifiedDeliveryFee = Number(feeRow.delivery_fee);
-          }
+    let feeMatched = false;
+    if (address.areaId && areaFees && areaFees.length > 0) {
+      const feeRow = areaFees.find((f: any) => f.area_id === address.areaId);
+      if (feeRow?.delivery_fee !== null && feeRow?.delivery_fee !== undefined) {
+        verifiedDeliveryFee = Number(feeRow.delivery_fee);
+        feeMatched = true;
+      }
+    }
+
+    if (!feeMatched && address.area && address.centerId && areaFees && areaFees.length > 0) {
+      const { data: aList } = await serverSupabase
+        .from("food_areas")
+        .select("id, name_ar")
+        .eq("center_id", address.centerId)
+        .eq("is_active", true);
+
+      const matchedArea = (aList || []).find((a: any) => a.name_ar?.trim() === address.area?.trim());
+      if (matchedArea) {
+        const feeRow = areaFees.find((f: any) => f.area_id === matchedArea.id);
+        if (feeRow?.delivery_fee !== null && feeRow?.delivery_fee !== undefined) {
+          verifiedDeliveryFee = Number(feeRow.delivery_fee);
+          feeMatched = true;
         }
+      }
+    }
+
+    // Verify restaurant covers this location
+    if (serviceAreas && serviceAreas.length > 0) {
+      const covers = serviceAreas.some((sa: any) => {
+        if (address.areaId && sa.area_id === address.areaId) return true;
+        if (address.centerId && sa.center_id === address.centerId) return true;
+        if (address.governorateId && sa.governorate_id === address.governorateId) return true;
+        return false;
+      });
+      if (!covers && !feeMatched) {
+        return res.status(400).json({
+          success: false,
+          message: `المطعم لا يغطي المركز أو المنطقة المحددة (${address.area || address.markaz || address.governorate}) حالياً.`,
+        });
       }
     }
 
@@ -648,8 +671,8 @@ app.post("/api/food/create-order", async (req, res) => {
       customer_name: customerName?.trim() || "العميل",
       customer_phone: customerPhone?.trim() || "",
       delivery_address: address.detailedAddress || "",
-      delivery_latitude: Number(address.latitude) || 30.05,
-      delivery_longitude: Number(address.longitude) || 31.34,
+      delivery_latitude: address.latitude ? Number(address.latitude) : 30.05,
+      delivery_longitude: address.longitude ? Number(address.longitude) : 31.34,
       food_subtotal: verifiedSubtotal,
       discount_amount: 0,
       delivery_fee: verifiedDeliveryFee,
@@ -660,9 +683,9 @@ app.post("/api/food/create-order", async (req, res) => {
       restaurant_fee_share: restaurantFeeShare,
       payment_method: "cash",
       idempotency_key: crypto.randomUUID(),
-      delivery_governorate_name_snapshot: address.governorate || "القاهرة",
+      delivery_governorate_name_snapshot: address.governorate || "",
       delivery_center_name_snapshot: address.markaz || "",
-      delivery_area_name_snapshot: address.markaz || "",
+      delivery_area_name_snapshot: address.area || address.markaz || "",
     };
 
     const { data: createdOrder, error: orderErr } = await serverSupabase

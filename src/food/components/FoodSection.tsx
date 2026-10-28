@@ -41,6 +41,7 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
     setSelectedOrderForDetail,
     navigateBackToFoodHome,
     isSectionDisabled,
+    isLoadingSectionSettings,
     sectionSettings,
     geoScopeResult,
   } = useFood();
@@ -54,9 +55,69 @@ const FoodSectionInner: React.FC<FoodSectionProps> = ({ onBackToHome }) => {
 
   const totalCartPrice = cartRestaurantGroups.reduce((sum, g) => sum + g.total, 0);
 
+  // 1. Explicit Loading State: Prevent rendering misleading disabled state before settings load
+  if (isLoadingSectionSettings) {
+    return (
+      <div className="py-24 text-center space-y-4 animate-in fade-in duration-200">
+        <div className="w-9 h-9 border-3 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto" />
+        <p className="text-xs font-bold text-slate-600">جاري التحقق من إعدادات قسم المطاعم والتغطية الجغرافية...</p>
+      </div>
+    );
+  }
+
+  // 2. Hidden Section Visibility Rule: Never show section content if section_visibility === 'hidden'
+  if (sectionSettings?.section_visibility === 'hidden') {
+    return (
+      <div className="py-20 text-center space-y-4 bg-white rounded-3xl border border-slate-200 p-6 text-right">
+        <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-700 flex items-center justify-center mx-auto">
+          <AlertCircle className="w-6 h-6 text-slate-500" />
+        </div>
+        <h3 className="text-base font-bold text-slate-800 text-center">قسم الأكلات الجاهزة غير متاح حالياً</h3>
+        <p className="text-xs text-slate-500 text-center max-w-sm mx-auto">
+          تم حجب هذا القسم مؤقتاً بقرار من الإدارة.
+        </p>
+        <div className="text-center pt-2">
+          <button
+            type="button"
+            onClick={onBackToHome}
+            className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold shadow-xs hover:bg-emerald-700 transition-colors"
+          >
+            العودة للرئيسية
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Disabled Mode 'hide': If disabled and configured to hide completely
+  if (isSectionDisabled && sectionSettings?.disabled_display_mode === 'hide') {
+    return (
+      <div className="py-20 text-center space-y-4 bg-white rounded-3xl border border-slate-200 p-6 text-right">
+        <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-700 flex items-center justify-center mx-auto border border-amber-200">
+          <AlertCircle className="w-6 h-6 text-amber-600" />
+        </div>
+        <h3 className="text-base font-bold text-slate-800 text-center">
+          {sectionSettings?.status_message || geoScopeResult?.reason || 'قسم المطاعم معطل، سيتم التشغيل لاحقًا'}
+        </h3>
+        <p className="text-xs text-slate-500 text-center max-w-sm mx-auto">
+          تصفح المطاعم متوقف حالياً وفق إعدادات الإدارة أو خارج النطاق الجغرافي المخدوم.
+        </p>
+        <div className="text-center pt-2">
+          <button
+            type="button"
+            onClick={onBackToHome}
+            className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold shadow-xs hover:bg-emerald-700 transition-colors"
+          >
+            العودة للرئيسية
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-4 text-right">
-      {/* Section Disabled Alert Banner */}
+    <div className={`space-y-4 text-right ${isSectionDisabled && sectionSettings?.disabled_display_mode === 'grayscale' ? 'grayscale contrast-95 opacity-90' : ''}`}>
+      {/* Section Disabled Alert Banner (for show_disabled and grayscale modes) */}
       {isSectionDisabled && (
         <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded-2xl flex items-center space-x-2.5 space-x-reverse text-xs font-bold animate-in fade-in shadow-xs">
           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />

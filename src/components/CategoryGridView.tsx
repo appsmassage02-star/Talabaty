@@ -36,6 +36,7 @@ export const CategoryGridView: React.FC = () => {
   // Food section settings & geographic scope
   const [foodSettings, setFoodSettings] = useState<RestaurantSectionSettings | null>(null);
   const [foodGeoScope, setFoodGeoScope] = useState<GeographicVerificationResult | null>(null);
+  const [isLoadingFoodSettings, setIsLoadingFoodSettings] = useState<boolean>(true);
 
   useEffect(() => {
     refreshActiveStateFromCache();
@@ -43,6 +44,7 @@ export const CategoryGridView: React.FC = () => {
 
   useEffect(() => {
     let isMounted = true;
+    setIsLoadingFoodSettings(true);
     Promise.all([
       foodService.getSectionSettings(),
       foodService.verifyGeographicScope(),
@@ -55,6 +57,11 @@ export const CategoryGridView: React.FC = () => {
       })
       .catch((err) => {
         console.warn("[CategoryGridView] Error loading food section settings:", err);
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoadingFoodSettings(false);
+        }
       });
 
     return () => {
@@ -68,7 +75,7 @@ export const CategoryGridView: React.FC = () => {
       (item) =>
         (item.category === catId || (item as any).categoryId === catId) &&
         !item.completed
-    ).length;
+    );
   };
 
   const totalActiveMissing = missingItems.filter((i) => !i.completed).length;
@@ -90,13 +97,15 @@ export const CategoryGridView: React.FC = () => {
   const pharmacyDisplayWidth = serviceSettings.displayWidth; // "full" | "half" from pharmacy_settings.display_width
 
   // Food Section Operational & Visibility Rules:
-  // 1. If section_visibility === 'hidden' -> completely hidden (null)
-  // 2. Is section enabled globally AND geographically serviceable?
+  // 1. While loading: hide to avoid any premature flash of disabled card
+  // 2. If section_visibility === 'hidden' -> completely hidden (null)
+  // 3. Is section enabled globally AND geographically serviceable?
   const isFoodOperational = Boolean(foodSettings?.section_enabled) && Boolean(foodGeoScope?.isServiceable);
   const isFoodSectionHidden =
+    isLoadingFoodSettings ||
     foodSettings?.section_visibility === "hidden" ||
     (!isFoodOperational && foodSettings?.disabled_display_mode === "hide");
-  const isFoodDisabledDisplay = !isFoodOperational && !isFoodSectionHidden;
+  const isFoodDisabledDisplay = !isLoadingFoodSettings && !isFoodOperational && !isFoodSectionHidden;
 
   const handlePharmacyClick = () => {
     if (isPharmacyDisabled) {

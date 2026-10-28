@@ -13,6 +13,9 @@ import {
   RestaurantSectionSettings,
   RestaurantCategory,
   GeographicVerificationResult,
+  FoodGovernorate,
+  FoodCenter,
+  FoodArea,
 } from '../types/foodTypes';
 import { foodService, RestaurantFilterParams } from '../services/foodService';
 
@@ -108,9 +111,21 @@ interface FoodContextType {
   // Supabase Section Settings & Categories & Geographic Scope
   sectionSettings: RestaurantSectionSettings | null;
   isSectionDisabled: boolean;
+  isLoadingSectionSettings: boolean;
   geoScopeResult: GeographicVerificationResult | null;
   verifyGeographicScope: (address?: FoodCustomerAddress | null) => Promise<GeographicVerificationResult>;
   dbCategories: RestaurantCategory[];
+
+  // Geographic Cascading Selectors
+  activeGovernorates: FoodGovernorate[];
+  loadCentersForGov: (govId: string) => Promise<FoodCenter[]>;
+  loadAreasForCenter: (centerId: string) => Promise<FoodArea[]>;
+  detectGpsConflict: (
+    govName?: string,
+    centerName?: string,
+    lat?: number | null,
+    lng?: number | null
+  ) => { hasConflict: boolean; reason?: string; detectedCenterName?: string };
 }
 
 const FoodContext = createContext<FoodContextType | null>(null);
@@ -182,11 +197,29 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [sectionSettings, setSectionSettings] = useState<RestaurantSectionSettings | null>(null);
   const [geoScopeResult, setGeoScopeResult] = useState<GeographicVerificationResult | null>(null);
   const [isSectionDisabled, setIsSectionDisabled] = useState<boolean>(false);
+  const [isLoadingSectionSettings, setIsLoadingSectionSettings] = useState<boolean>(true);
   const [dbCategories, setDbCategories] = useState<RestaurantCategory[]>([]);
+  const [activeGovernorates, setActiveGovernorates] = useState<FoodGovernorate[]>([]);
 
   // Favorites state (loaded from Supabase restaurant_favorites)
   const [favoriteRestaurantIds, setFavoriteRestaurantIds] = useState<string[]>([]);
   const [favoriteMenuItemIds, setFavoriteMenuItemIds] = useState<string[]>([]);
+
+  // Cascading geographic loader callbacks
+  const loadCentersForGov = useCallback(async (govId: string) => {
+    return await foodService.listActiveCenters(govId);
+  }, []);
+
+  const loadAreasForCenter = useCallback(async (centerId: string) => {
+    return await foodService.listActiveAreas(centerId);
+  }, []);
+
+  const detectGpsConflict = useCallback(
+    (govName?: string, centerName?: string, lat?: number | null, lng?: number | null) => {
+      return foodService.detectGpsConflict(govName, centerName, lat, lng);
+    },
+    []
+  );
 
   // Geographic Scope Verification helper
   const verifyGeographicScope = useCallback(
@@ -204,26 +237,45 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Fetch Section Settings, Geographic Scope, Categories, and Customer Favorites from Supabase
   useEffect(() => {
+    let isCancelled = false;
+    setIsLoadingSectionSettings(true);
+
     Promise.all([
       foodService.getSectionSettings(),
       foodService.verifyGeographicScope(undefined, household?.id, supabaseUser?.id),
-    ]).then(([settings, geoRes]) => {
-      setSectionSettings(settings);
-      setGeoScopeResult(geoRes);
-      if (!settings || !settings.section_enabled || !geoRes.isServiceable) {
+      foodService.listActiveGovernorates(),
+      foodService.listCategories(),
+      foodService.listCustomerFavorites(),
+    ])
+      .then(([settings, geoRes, govs, cats, favs]) => {
+        if (isCancelled) return;
+        setSectionSettings(settings);
+        setGeoScopeResult(geoRes);
+        setActiveGovernorates(govs);
+        setDbCategories(cats);
+        setFavoriteRestaurantIds(favs);
+
+        if (!settings || !settings.section_enabled || !geoRes.isServiceable) {
+          setIsSectionDisabled(true);
+        } else {
+          setIsSectionDisabled(false);
+        }
+      })
+      .catch((err) => {
+        if (isCancelled) return;
+        console.warn('[FoodContext] Error loading section settings:', err);
+        setSectionSettings(null);
         setIsSectionDisabled(true);
-      } else {
-        setIsSectionDisabled(false);
-      }
-    });
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setIsLoadingSectionSettings(false);
+        }
+      });
 
-    foodService.listCategories().then((cats) => {
-      setDbCategories(cats);
-    });
-
-    foodService.listCustomerFavorites().then((favs) => {
-      setFavoriteRestaurantIds(favs);
-    });
+    return () => {
+      isCancelled = true;
+    };
   }, [household?.id, supabaseUser?.id]);
 
   // Load restaurants
@@ -573,9 +625,14 @@ export const FoodProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isMenuItemFavorite,
         sectionSettings,
         isSectionDisabled,
+        isLoadingSectionSettings,
         geoScopeResult,
         verifyGeographicScope,
         dbCategories,
+        activeGovernorates,
+        loadCentersForGov,
+        loadAreasForCenter,
+        detectGpsConflict,
       }}
     >
       {children}

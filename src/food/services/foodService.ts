@@ -1220,7 +1220,7 @@ export const foodService = {
       full_name: address.recipientName?.trim() || 'المستلم',
       phone: address.phone?.trim() || '',
       country: 'مصر',
-      governorate_name: address.governorate?.trim() || 'القاهرة',
+      governorate_name: address.governorate?.trim() || '',
       markaz_name: address.markaz?.trim() || '',
       detailed_address: address.detailedAddress?.trim() || '',
       latitude: address.latitude ? Number(Number(address.latitude).toFixed(7)) : null,
@@ -1246,7 +1246,11 @@ export const foodService = {
       recipientName: data.full_name || '',
       phone: data.phone || '',
       governorate: data.governorate_name || '',
+      governorateId: address.governorateId,
       markaz: data.markaz_name || '',
+      centerId: address.centerId,
+      area: address.area,
+      areaId: address.areaId,
       detailedAddress: data.detailed_address || '',
       latitude: Number(data.latitude) || 0,
       longitude: Number(data.longitude) || 0,
@@ -1254,56 +1258,90 @@ export const foodService = {
     };
   },
 
-  // Resolve Restaurant Delivery Fee with Area Priority
+  // Resolve Restaurant Delivery Fee with Area Priority and Coverage Check
   async resolveDeliveryFee(
     restaurantId: string,
     address?: FoodCustomerAddress,
     defaultRestaurantFee: number = 15
-  ): Promise<number> {
-    if (!isSupabaseConfigured() || !supabase) return defaultRestaurantFee;
+  ): Promise<{ fee: number; isCovered: boolean; reason?: string }> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return { fee: defaultRestaurantFee, isCovered: true };
+    }
     try {
-      const { data: areaFees, error: areaErr } = await supabase
+      // 1. Fetch active area delivery fees for this restaurant
+      const { data: areaFees } = await supabase
         .from('restaurant_area_delivery_fees')
         .select('id, restaurant_id, area_id, delivery_fee, is_active')
         .eq('restaurant_id', restaurantId)
         .eq('is_active', true);
 
-      if (areaErr || !areaFees || areaFees.length === 0) {
-        return defaultRestaurantFee;
-      }
+      // 2. Fetch active service areas for this restaurant
+      const { data: serviceAreas } = await supabase
+        .from('restaurant_service_areas')
+        .select('id, restaurant_id, governorate_id, center_id, area_id, is_active')
+        .eq('restaurant_id', restaurantId)
+        .eq('is_active', true);
 
       if (!address) {
-        return Number(areaFees[0].delivery_fee) || defaultRestaurantFee;
+        return { fee: defaultRestaurantFee, isCovered: true };
       }
 
-      const areaIds = areaFees.map((f: any) => f.area_id);
-      const { data: areas } = await supabase
-        .from('food_areas')
-        .select('id, name_ar, name_en')
-        .in('id', areaIds);
+      // Priority 1: Exact area_id match in restaurant_area_delivery_fees
+      if (address.areaId && areaFees && areaFees.length > 0) {
+        const exactFeeRow = areaFees.find((f: any) => f.area_id === address.areaId);
+        if (exactFeeRow && exactFeeRow.delivery_fee !== null && exactFeeRow.delivery_fee !== undefined) {
+          return { fee: Number(exactFeeRow.delivery_fee), isCovered: true };
+        }
+      }
 
-      if (areas && areas.length > 0) {
-        const matched = areas.find((a: any) => {
-          const name = a.name_ar || a.name_en;
-          if (!name) return false;
-          return (
-            (address.markaz && (address.markaz.includes(name) || name.includes(address.markaz))) ||
-            (address.detailedAddress && address.detailedAddress.includes(name))
-          );
-        });
-
+      // Priority 2: If address.area is given without areaId, look up areaId from food_areas for this center
+      let resolvedAreaId = address.areaId;
+      if (!resolvedAreaId && address.area && address.centerId) {
+        const { data: aList } = await supabase
+          .from('food_areas')
+          .select('id, name_ar')
+          .eq('center_id', address.centerId)
+          .eq('is_active', true);
+        const norm = normalizeArabicText(address.area);
+        const matched = (aList || []).find((a: any) => normalizeArabicText(a.name_ar) === norm);
         if (matched) {
-          const feeRow = areaFees.find((f: any) => f.area_id === matched.id);
-          if (feeRow && feeRow.delivery_fee !== null && feeRow.delivery_fee !== undefined) {
-            return Number(feeRow.delivery_fee);
+          resolvedAreaId = matched.id;
+          if (areaFees && areaFees.length > 0) {
+            const exactFeeRow = areaFees.find((f: any) => f.area_id === matched.id);
+            if (exactFeeRow && exactFeeRow.delivery_fee !== null && exactFeeRow.delivery_fee !== undefined) {
+              return { fee: Number(exactFeeRow.delivery_fee), isCovered: true };
+            }
           }
         }
       }
 
-      return defaultRestaurantFee;
+      // Priority 3: Check if restaurant covers this center or governorate in restaurant_service_areas
+      if (serviceAreas && serviceAreas.length > 0) {
+        const coversArea = resolvedAreaId
+          ? serviceAreas.some((sa: any) => sa.area_id === resolvedAreaId)
+          : false;
+        const coversCenter = address.centerId
+          ? serviceAreas.some((sa: any) => sa.center_id === address.centerId)
+          : false;
+        const coversGov = address.governorateId
+          ? serviceAreas.some((sa: any) => sa.governorate_id === address.governorateId)
+          : false;
+
+        if (coversArea || coversCenter || coversGov) {
+          return { fee: defaultRestaurantFee, isCovered: true };
+        } else {
+          return {
+            fee: defaultRestaurantFee,
+            isCovered: false,
+            reason: `المطعم لا يغطي المركز أو المنطقة المحددة (${address.area || address.markaz || address.governorate}) حالياً.`,
+          };
+        }
+      }
+
+      return { fee: defaultRestaurantFee, isCovered: true };
     } catch (err) {
       console.warn('[foodService] Error resolving delivery fee:', err);
-      return defaultRestaurantFee;
+      return { fee: defaultRestaurantFee, isCovered: true };
     }
   },
 
@@ -1508,11 +1546,18 @@ export const foodService = {
       }
 
       // 6. Resolve delivery fee using area fees with fallback to restaurant delivery fee
-      const verifiedDeliveryFee = await this.resolveDeliveryFee(
+      const feeRes = await this.resolveDeliveryFee(
         dbRestaurant.id,
         params.address,
         Number(dbRestaurant.delivery_fee) || 15
       );
+      if (!feeRes.isCovered) {
+        return {
+          success: false,
+          message: feeRes.reason || 'المطعم لا يغطي المركز أو المنطقة المحددة للتوصيل.',
+        };
+      }
+      const verifiedDeliveryFee = feeRes.fee;
       const verifiedTotalAmount = verifiedSubtotal + verifiedDeliveryFee;
 
       // 7. Authoritative Server-side Create Restaurant Order via /api/food/create-order
