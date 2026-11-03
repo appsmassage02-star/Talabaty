@@ -18,12 +18,26 @@ const supabaseServiceKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
   "";
-const serverSupabase = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    persistSession: false,
-    autoRefreshToken: false,
-  },
-});
+
+const isValidUrl = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+const serverSupabase =
+  supabaseUrl && isValidUrl(supabaseUrl) && supabaseServiceKey
+    ? createClient(supabaseUrl, supabaseServiceKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+        },
+      })
+    : null;
+
 
 // Allow large JSON payloads for compressed base64 images
 app.use(express.json({ limit: "50mb" }));
@@ -408,6 +422,13 @@ app.post("/api/food/create-order", async (req, res) => {
       return res.status(401).json({
         success: false,
         message: "يجب تسجيل الدخول بحساب موثق لإتمام الطلب.",
+      });
+    }
+
+    if (!serverSupabase) {
+      return res.status(503).json({
+        success: false,
+        message: "خدمة قاعدة البيانات غير مهيأة على الخادم حالياً. يرجى إعداد متغيرات Supabase.",
       });
     }
 
