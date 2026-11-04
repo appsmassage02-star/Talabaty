@@ -13,6 +13,9 @@ interface BiteBaitRestaurantDetailViewProps {
   cartQuantities?: Record<string, number>;
   favoriteFoodIds?: string[];
   isRestaurantFavorite?: boolean;
+  isLoadingMenu?: boolean;
+  menuError?: string | null;
+  onRetryMenu?: () => void;
   onToggleFavoriteRestaurant?: (restaurantId: string) => void;
   onToggleFavoriteFood?: (foodId: string) => void;
   onNavigateBack: () => void;
@@ -30,6 +33,9 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
   cartQuantities = {},
   favoriteFoodIds = [],
   isRestaurantFavorite = false,
+  isLoadingMenu = false,
+  menuError = null,
+  onRetryMenu,
   onToggleFavoriteRestaurant,
   onToggleFavoriteFood,
   onNavigateBack,
@@ -150,22 +156,36 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
                 />
               </div>
               <p style={{ fontSize: '12.5px', color: '#cbd5e1', margin: '4px 0 0' }}>
-                📍 {restaurant.address || 'القاهرة'} • 🕒 {restaurant.openingHours || '10:00 ص - 01:00 ص'}
+                📍 {restaurant.address || 'العنوان غير محدد'} • 🕒 {restaurant.openingHours || (restaurant.isOpen ? 'مفتوح للطلب' : 'مغلق حالياً')}
               </p>
             </div>
 
             <div style={{ textAlign: 'left' }}>
-              <BiteBaitStarRating
-                rating={restaurant.rating || 4.5}
-                size="md"
-                showCount
-                count={restaurant.reviewsCount || 0}
-              />
+              {restaurant.rating && restaurant.rating > 0 ? (
+                <BiteBaitStarRating
+                  rating={restaurant.rating}
+                  size="md"
+                  showCount
+                  count={restaurant.reviewsCount || 0}
+                />
+              ) : (
+                <span
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.2)',
+                    padding: '4px 10px',
+                    borderRadius: '50px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                  }}
+                >
+                  جديد / بدون تقييم
+                </span>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Restaurant Stats Bar */}
+        {/* Restaurant Stats Bar (Authentic DB data only) */}
         <div
           style={{
             padding: '14px 20px',
@@ -179,9 +199,9 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
             borderTop: '1px solid #f1f5f9',
           }}
         >
-          <span>⏱️ وقت التجهيز: <b>{restaurant.estimatedPrepTimeMinutes || 30} دقيقة</b></span>
-          <span>🛵 رسوم التوصيل: <b>{restaurant.deliveryFee > 0 ? `${restaurant.deliveryFee} ج.م` : 'مجاني'}</b></span>
-          <span>💵 الحد الأدنى: <b>{restaurant.minOrderAmount || 0} ج.م</b></span>
+          <span>⏱️ وقت التجهيز: <b>{restaurant.estimatedPrepTimeMinutes && restaurant.estimatedPrepTimeMinutes > 0 ? `${restaurant.estimatedPrepTimeMinutes} دقيقة` : 'غير محدد'}</b></span>
+          <span>🛵 رسوم التوصيل: <b>{(restaurant.deliveryFee || 0) > 0 ? `${restaurant.deliveryFee} ج.م` : 'مجاني'}</b></span>
+          <span>💵 الحد الأدنى: <b>{(restaurant.minOrderAmount || 0) > 0 ? `${restaurant.minOrderAmount} ج.م` : 'بدون حد أدنى'}</b></span>
           <span>
             الحالة:{' '}
             <b style={{ color: restaurant.isOpen ? '#16a34a' : '#dc2626' }}>
@@ -258,19 +278,88 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
         )}
       </div>
 
-      {/* Menu Items Grid */}
-      <BiteBaitFoodGrid
-        items={filteredItems}
-        title={selectedCategory === 'All' ? 'قائمة الطعام' : selectedCategory}
-        cartQuantities={cartQuantities}
-        favoriteFoodIds={favoriteFoodIds}
-        onToggleFavorite={onToggleFavoriteFood}
-        onAddToCart={onAddToCart}
-        onRemoveFromCart={onRemoveFromCart}
-        onOpenDetails={onOpenItemDetails}
-        emptyTitle="لا توجد أطباق في هذه الفئة"
-        emptyDescription="لم نجد أي طبق في منيو المطعم يطابق البحث أو الفئة المحددة."
-      />
+      {/* Menu Loading & Error States */}
+      {isLoadingMenu ? (
+        <div
+          style={{
+            padding: '48px 20px',
+            textAlign: 'center',
+            background: '#ffffff',
+            borderRadius: '16px',
+            border: '1px solid #e2e8f0',
+            marginBottom: '24px',
+          }}
+        >
+          <div
+            style={{
+              width: '40px',
+              height: '40px',
+              border: '3px solid #f3f4f6',
+              borderTopColor: '#f59e0b',
+              borderRadius: '50%',
+              animation: 'spin 1s linear infinite',
+              margin: '0 auto 12px',
+            }}
+          />
+          <div style={{ fontSize: '14px', fontWeight: 700, color: '#334155' }}>
+            جاري تحميل قائمة الطعام من قاعدة البيانات...
+          </div>
+          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
+            يتم جلب الأصناف والخيارات والأسعار المعتمدة لهذا المطعم
+          </div>
+        </div>
+      ) : menuError ? (
+        <div
+          style={{
+            padding: '24px',
+            textAlign: 'center',
+            background: '#fef2f2',
+            borderRadius: '16px',
+            border: '1.5px solid #fca5a5',
+            marginBottom: '24px',
+          }}
+        >
+          <div style={{ fontSize: '28px', marginBottom: '8px' }}>⚠️</div>
+          <div style={{ fontSize: '14px', fontWeight: 800, color: '#991b1b', marginBottom: '4px' }}>
+            تعذر تحميل قائمة طعام المطعم
+          </div>
+          <div style={{ fontSize: '12px', color: '#b91c1c', marginBottom: '14px' }}>
+            {menuError}
+          </div>
+          {onRetryMenu && (
+            <button
+              type="button"
+              onClick={onRetryMenu}
+              style={{
+                background: '#dc2626',
+                color: '#ffffff',
+                border: 'none',
+                padding: '8px 18px',
+                borderRadius: '8px',
+                fontSize: '12.5px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              🔄 إعادة المحاولة
+            </button>
+          )}
+        </div>
+      ) : (
+        /* Menu Items Grid */
+        <BiteBaitFoodGrid
+          items={filteredItems}
+          title={selectedCategory === 'All' ? 'قائمة الطعام' : selectedCategory}
+          cartQuantities={cartQuantities}
+          favoriteFoodIds={favoriteFoodIds}
+          onToggleFavorite={onToggleFavoriteFood}
+          onAddToCart={onAddToCart}
+          onRemoveFromCart={onRemoveFromCart}
+          onOpenDetails={onOpenItemDetails}
+          emptyTitle="لا توجد أطباق في هذه الفئة"
+          emptyDescription="لم نجد أي طبق في منيو المطعم يطابق البحث أو الفئة المحددة."
+        />
+      )}
 
       {/* Quick Floating Checkout Bar */}
       <BiteBaitQuickCheckout

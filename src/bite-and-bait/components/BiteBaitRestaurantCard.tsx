@@ -132,11 +132,11 @@ export const BiteBaitRestaurantCard: React.FC<BiteBaitRestaurantCardProps> = ({
           </div>
         )}
 
-        {/* Prep Time Badge */}
-        {restaurant.isOpen && (
+        {/* Prep Time Badge (Only show if authentic prep time exists) */}
+        {restaurant.isOpen && Boolean(restaurant.estimatedPrepTimeMinutes && restaurant.estimatedPrepTimeMinutes > 0) && (
           <div className="bnb-restaurant-badge">
             <span>⏱️</span>
-            <span>{restaurant.estimatedPrepTimeMinutes || 30} دقيقة</span>
+            <span>{restaurant.estimatedPrepTimeMinutes} دقيقة</span>
           </div>
         )}
       </div>
@@ -154,12 +154,16 @@ export const BiteBaitRestaurantCard: React.FC<BiteBaitRestaurantCardProps> = ({
             />
           </h3>
 
-          <BiteBaitStarRating
-            rating={restaurant.rating || 4.5}
-            size="sm"
-            showCount
-            count={restaurant.reviewsCount || 0}
-          />
+          {restaurant.rating && restaurant.rating > 0 ? (
+            <BiteBaitStarRating
+              rating={restaurant.rating}
+              size="sm"
+              showCount
+              count={restaurant.reviewsCount || 0}
+            />
+          ) : (
+            <span style={{ fontSize: '10.5px', color: '#94a3b8', fontWeight: 600 }}>جديد / بدون تقييم</span>
+          )}
         </div>
 
         {/* Cuisine Types & Tags */}
@@ -185,15 +189,23 @@ export const BiteBaitRestaurantCard: React.FC<BiteBaitRestaurantCardProps> = ({
 
         {/* Working Hours & Min Order Row */}
         <div style={{ fontSize: '11px', color: '#64748b', display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
-          <span>🕒 {restaurant.openingHours || '10:00 ص - 12:00 م'}</span>
-          <span>الحد الأدنى: <b>{restaurant.minOrderAmount || 50} ج.م</b></span>
+          <span>🕒 {restaurant.openingHours || (restaurant.isOpen ? 'مفتوح للطلب' : 'مغلق حالياً')}</span>
+          {restaurant.minOrderAmount && restaurant.minOrderAmount > 0 ? (
+            <span>الحد الأدنى: <b>{restaurant.minOrderAmount} ج.م</b></span>
+          ) : null}
         </div>
 
         {/* Meta details (Address, Delivery Fee) */}
         <div className="bnb-meta-row" style={{ marginTop: 'auto', paddingTop: '8px', borderTop: '1px solid #f1f5f9' }}>
-          <span>📍 {restaurant.address || 'القاهرة'}</span>
-          <span style={{ fontWeight: 700, color: restaurant.deliveryFee > 0 ? '#0f172a' : '#16a34a' }}>
-            🛵 توصيل: {restaurant.deliveryFee > 0 ? `${restaurant.deliveryFee} ج.م` : 'مجاني'}
+          {restaurant.address ? (
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '60%' }}>
+              📍 {restaurant.address}
+            </span>
+          ) : (
+            <span style={{ color: '#94a3b8' }}>📍 توصيل محلي</span>
+          )}
+          <span style={{ fontWeight: 700, color: (restaurant.deliveryFee || 0) > 0 ? '#0f172a' : '#16a34a' }}>
+            🛵 توصيل: {(restaurant.deliveryFee || 0) > 0 ? `${restaurant.deliveryFee} ج.م` : 'مجاني'}
           </span>
         </div>
       </div>

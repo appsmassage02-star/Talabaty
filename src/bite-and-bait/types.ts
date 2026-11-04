@@ -13,6 +13,7 @@ import type {
   RestaurantCategory,
   RestaurantSectionSettings,
   GeographicVerificationResult,
+  FoodOffer,
 } from '../food/types/foodTypes';
 
 // Re-export original food domain types without duplication
@@ -31,6 +32,7 @@ export type {
   RestaurantCategory,
   RestaurantSectionSettings,
   GeographicVerificationResult,
+  FoodOffer,
 };
 
 /**

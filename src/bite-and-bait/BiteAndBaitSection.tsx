@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import type {
   Restaurant,
   MenuItem,
@@ -7,14 +7,19 @@ import type {
   FoodOrder,
   FoodCustomerAddress,
   FoodCartSelectedOption,
+  FoodOffer,
   BiteBaitView,
   BiteBaitRatingPayload,
   BiteBaitFoodOrder,
   BiteBaitComplaintTicket,
   BiteBaitMissingItemReport,
   BiteBaitPriceChangeProposal,
+  RestaurantSectionSettings,
 } from './types';
 import './styles/bite-and-bait.css';
+
+import { useApp } from '../context/AppContext';
+import { biteAndBaitService } from './services/biteAndBaitService';
 
 import {
   PREVIEW_RESTAURANTS,
@@ -70,8 +75,8 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   cartItems: propCartItems,
   orders: propOrders = [],
   savedAddresses: propAddresses = [],
-  defaultCustomerName = 'محمد أحمد',
-  defaultCustomerPhone = '01012345678',
+  defaultCustomerName,
+  defaultCustomerPhone,
   onAddToCart: propOnAddToCart,
   onRemoveFromCart: propOnRemoveFromCart,
   onUpdateCartQuantity: propOnUpdateCartQuantity,
@@ -80,87 +85,277 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   onSubmitRating: propOnSubmitRating,
   isSectionDisabled = false,
   disabledMessage = 'قسم المطاعم معطل، سيتم التشغيل لاحقًا.',
-  forcePreviewMode = true,
+  forcePreviewMode = false,
 }) => {
+  // Global app context
+  const { supabaseUser, supabaseProfile, household, isSupabaseConnected } = useApp();
+
   const [currentView, setCurrentView] = useState<BiteBaitView>('home');
   const [selectedRestaurantId, setSelectedRestaurantId] = useState<string | null>(null);
   const [checkoutRestaurantId, setCheckoutRestaurantId] = useState<string | null>(null);
   const [isSubmittingOrder, setIsSubmittingOrder] = useState<boolean>(false);
   const [previewNotification, setPreviewNotification] = useState<string | null>(null);
 
-  // Product modal state
+  // Modals state
   const [selectedProductForModal, setSelectedProductForModal] = useState<MenuItem | null>(null);
-
-  // Notification preferences modal state
   const [isNotificationPreferencesOpen, setIsNotificationPreferencesOpen] = useState(false);
 
-  // Local favorites state
-  const [favoriteRestaurantIds, setFavoriteRestaurantIds] = useState<string[]>(['rest_اصيل']);
-  const [favoriteFoodIds, setFavoriteFoodIds] = useState<string[]>(['food_1', 'food_3']);
+  // --------------------------------------------------------------------------
+  // Supabase Real Datasets (Read-Only)
+  // --------------------------------------------------------------------------
+  const [sectionSettings, setSectionSettings] = useState<RestaurantSectionSettings | null>(null);
+  const [isLoadingSettings, setIsLoadingSettings] = useState<boolean>(true);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
 
-  // Local simulated multi-restaurant cart state (React state only, strictly 0 Supabase writes)
-  const [localCart, setLocalCart] = useState<FoodCartItem[]>([
-    // Seed initial cart with items from two restaurants to immediately demonstrate multi-restaurant cart
-    {
-      cartItemId: 'seed_cart_1',
-      menuItemId: 'food_1',
-      restaurantId: 'rest_اصيل',
-      restaurantName: 'كبابجي ومطعم الأصيل',
-      name: 'نصف كيلو كباب وكفتة مشوي على الفحم',
-      basePrice: 340,
-      unitPrice: 340,
-      quantity: 1,
-      selectedOptions: [],
-      imageUrl: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=600&q=80',
-      isAvailable: true,
-    },
-    {
-      cartItemId: 'seed_cart_2',
-      menuItemId: 'food_3',
-      restaurantId: 'rest_روما',
-      restaurantName: 'بيتزا وباستا فينيسيا',
-      name: 'بيتزا رانش دجاج إيطالية كرانشي',
-      basePrice: 195,
-      unitPrice: 195,
-      quantity: 1,
-      selectedOptions: [],
-      imageUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=600&q=80',
-      isAvailable: true,
-    },
-  ]);
+  const [dbCategories, setDbCategories] = useState<RestaurantCategory[]>([]);
+  const [isLoadingCategories, setIsLoadingCategories] = useState<boolean>(true);
+  const [categoriesError, setCategoriesError] = useState<string | null>(null);
 
-  const [localOrders, setLocalOrders] = useState<BiteBaitFoodOrder[]>(PREVIEW_ORDERS);
+  const [dbRestaurants, setDbRestaurants] = useState<Restaurant[]>([]);
+  const [isLoadingRestaurants, setIsLoadingRestaurants] = useState<boolean>(true);
+  const [restaurantsError, setRestaurantsError] = useState<string | null>(null);
 
-  // Coordinator-owned state for Complaints, Missing Items, and Price Proposals (Persists throughout session)
+  const [dbOffers, setDbOffers] = useState<FoodOffer[]>([]);
+  const [isLoadingOffers, setIsLoadingOffers] = useState<boolean>(false);
+  const [offersError, setOffersError] = useState<string | null>(null);
+
+  const [dbAddresses, setDbAddresses] = useState<FoodCustomerAddress[]>([]);
+  const [isLoadingAddresses, setIsLoadingAddresses] = useState<boolean>(false);
+
+  const [dbOrders, setDbOrders] = useState<BiteBaitFoodOrder[]>([]);
+  const [isLoadingOrders, setIsLoadingOrders] = useState<boolean>(false);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
+
+  // On-demand menus cached per restaurantId: restaurantId -> MenuItem[]
+  const [restaurantMenus, setRestaurantMenus] = useState<Record<string, MenuItem[]>>({});
+  const [isLoadingMenu, setIsLoadingMenu] = useState<boolean>(false);
+  const [menuError, setMenuError] = useState<string | null>(null);
+
+  // Favorites state:
+  // Restaurant favorites are loaded from restaurant_favorites table
+  // Food dish favorites are local in-memory during this stage (as per schema specifications)
+  const [favoriteRestaurantIds, setFavoriteRestaurantIds] = useState<string[]>([]);
+  const [favoriteFoodIds, setFavoriteFoodIds] = useState<string[]>([]);
+
+  // Cart state: Starts genuinely clean/empty (React state only)
+  const [localCart, setLocalCart] = useState<FoodCartItem[]>([]);
+
+  // Coordinator tickets state (local simulation for this stage)
   const [complaintTickets, setComplaintTickets] = useState<BiteBaitComplaintTicket[]>([]);
   const [missingReports, setMissingReports] = useState<BiteBaitMissingItemReport[]>([]);
-  const [priceChangeProposals, setPriceChangeProposals] = useState<Record<string, BiteBaitPriceChangeProposal>>({
-    demo_ord_1: {
-      id: 'prop_demo_1',
-      orderId: 'demo_ord_1',
-      restaurantName: 'كبابجي ومطعم الأصيل',
-      originalTotal: 355,
-      newTotal: 370,
-      priceDifference: 15,
-      reason: 'زيادة في وزن الكباب المشوي بعد التسوية والتقطيع.',
-      createdAt: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
-      status: 'pending',
+  const [priceChangeProposals, setPriceChangeProposals] = useState<Record<string, BiteBaitPriceChangeProposal>>({});
+
+  // --------------------------------------------------------------------------
+  // Data Loading Handlers
+  // --------------------------------------------------------------------------
+  const loadSectionSettings = useCallback(async () => {
+    setIsLoadingSettings(true);
+    setSettingsError(null);
+    const res = await biteAndBaitService.getSectionSettings();
+    setIsLoadingSettings(false);
+    if (res.success && res.data) {
+      setSectionSettings(res.data);
+    } else {
+      setSettingsError(res.error || 'تعذر استرجاع إعدادات القسم');
+    }
+  }, []);
+
+  const loadCategories = useCallback(async () => {
+    setIsLoadingCategories(true);
+    setCategoriesError(null);
+    const res = await biteAndBaitService.getCategories();
+    setIsLoadingCategories(false);
+    if (res.success) {
+      setDbCategories(res.data);
+    } else {
+      setCategoriesError(res.error || 'تعذر استرجاع تصنيفات المطاعم');
+    }
+  }, []);
+
+  const loadRestaurants = useCallback(async () => {
+    setIsLoadingRestaurants(true);
+    setRestaurantsError(null);
+    const res = await biteAndBaitService.getRestaurants();
+    setIsLoadingRestaurants(false);
+    if (res.success) {
+      setDbRestaurants(res.data);
+    } else {
+      setRestaurantsError(res.error || 'تعذر استرجاع قائمة المطاعم');
+    }
+  }, []);
+
+  const loadOffers = useCallback(async () => {
+    setIsLoadingOffers(true);
+    setOffersError(null);
+    const res = await biteAndBaitService.getOffers();
+    setIsLoadingOffers(false);
+    if (res.success) {
+      setDbOffers(res.data);
+    } else {
+      setOffersError(res.error || 'تعذر استرجاع العروض');
+    }
+  }, []);
+
+  const loadAddresses = useCallback(async () => {
+    setIsLoadingAddresses(true);
+    const res = await biteAndBaitService.getHouseholdAddresses(household?.id, supabaseUser?.id);
+    setIsLoadingAddresses(false);
+    if (res.success) {
+      setDbAddresses(res.data);
+    }
+  }, [household?.id, supabaseUser?.id]);
+
+  const loadFavorites = useCallback(async () => {
+    if (!supabaseUser?.id) {
+      setFavoriteRestaurantIds([]);
+      return;
+    }
+    const res = await biteAndBaitService.getFavoriteRestaurantIds(supabaseUser.id);
+    if (res.success) {
+      setFavoriteRestaurantIds(res.data);
+    }
+  }, [supabaseUser?.id]);
+
+  const loadOrders = useCallback(async () => {
+    if (!supabaseUser?.id) {
+      setDbOrders([]);
+      return;
+    }
+    setIsLoadingOrders(true);
+    setOrdersError(null);
+    const res = await biteAndBaitService.getCustomerOrders(supabaseUser.id);
+    setIsLoadingOrders(false);
+    if (res.success) {
+      setDbOrders(res.data);
+    } else {
+      setOrdersError(res.error || 'تعذر استرجاع قائمة الطلبات');
+    }
+  }, [supabaseUser?.id]);
+
+  // Load core section data on mount or when auth/household changes
+  useEffect(() => {
+    if (!forcePreviewMode) {
+      loadSectionSettings();
+      loadCategories();
+      loadRestaurants();
+      loadOffers();
+      loadAddresses();
+      loadFavorites();
+      loadOrders();
+    }
+  }, [
+    forcePreviewMode,
+    loadSectionSettings,
+    loadCategories,
+    loadRestaurants,
+    loadOffers,
+    loadAddresses,
+    loadFavorites,
+    loadOrders,
+  ]);
+
+  // Lazy-load restaurant menu strictly on-demand when restaurant is opened
+  const loadRestaurantMenu = useCallback(
+    async (restaurantId: string, forceRefresh = false) => {
+      if (!restaurantId) return;
+      if (!forceRefresh && restaurantMenus[restaurantId]) {
+        return; // Already cached
+      }
+
+      setIsLoadingMenu(true);
+      setMenuError(null);
+      const res = await biteAndBaitService.getRestaurantMenu(restaurantId);
+      setIsLoadingMenu(false);
+
+      if (res.success) {
+        setRestaurantMenus((prev) => ({
+          ...prev,
+          [restaurantId]: res.data,
+        }));
+      } else {
+        setMenuError(res.error || 'تعذر استرجاع قائمة طعام المطعم.');
+      }
     },
-  });
+    [restaurantMenus]
+  );
 
-  // Determine whether preview mode is active
-  const isPreview = forcePreviewMode || propRestaurants.length === 0;
+  useEffect(() => {
+    if (selectedRestaurantId && !forcePreviewMode) {
+      loadRestaurantMenu(selectedRestaurantId);
+    }
+  }, [selectedRestaurantId, forcePreviewMode, loadRestaurantMenu]);
 
-  // Active datasets
-  const activeRestaurants = isPreview ? PREVIEW_RESTAURANTS : propRestaurants;
-  const activeFoods = isPreview ? PREVIEW_FOODS : propFoods;
-  const activeCategories = isPreview ? PREVIEW_CATEGORIES : propCategories;
-  const activeAddresses = isPreview ? PREVIEW_SAVED_ADDRESSES : propAddresses;
-  const activeCartItems = isPreview ? localCart : (propCartItems || []);
-  const activeOrders = (isPreview ? localOrders : (propOrders as BiteBaitFoodOrder[])) || [];
+  // --------------------------------------------------------------------------
+  // Active Datasets & Authenticated User Details
+  // --------------------------------------------------------------------------
+  const activeRestaurants = propRestaurants.length > 0
+    ? propRestaurants
+    : forcePreviewMode
+    ? PREVIEW_RESTAURANTS
+    : dbRestaurants;
 
-  // Show a temporary preview toast banner
-  const triggerPreviewAlert = (msg: string) => {
+  const activeCategories = propCategories.length > 0
+    ? propCategories
+    : forcePreviewMode
+    ? PREVIEW_CATEGORIES
+    : dbCategories;
+
+  const activeAddresses = propAddresses.length > 0
+    ? propAddresses
+    : forcePreviewMode
+    ? PREVIEW_SAVED_ADDRESSES
+    : dbAddresses;
+
+  const activeCartItems = propCartItems !== undefined ? propCartItems : localCart;
+
+  const activeOrders = propOrders.length > 0
+    ? (propOrders as BiteBaitFoodOrder[])
+    : forcePreviewMode
+    ? PREVIEW_ORDERS
+    : dbOrders;
+
+  // Authentic user name and phone (Zero invented identities)
+  const currentCustomerName =
+    defaultCustomerName ||
+    supabaseProfile?.full_name ||
+    household?.admin_name ||
+    (supabaseUser?.email ? supabaseUser.email.split('@')[0] : 'ضيف غير مسجل');
+
+  const currentCustomerPhone =
+    defaultCustomerPhone ||
+    supabaseProfile?.phone ||
+    household?.admin_phone ||
+    '';
+
+  // Selected restaurant foods for detail view
+  const selectedRestaurantFoods = useMemo(() => {
+    if (!selectedRestaurantId) return [];
+    if (forcePreviewMode) {
+      return (propFoods.length > 0 ? propFoods : PREVIEW_FOODS).filter(
+        (f) => f.restaurantId === selectedRestaurantId
+      );
+    }
+    return restaurantMenus[selectedRestaurantId] || [];
+  }, [selectedRestaurantId, forcePreviewMode, propFoods, restaurantMenus]);
+
+  // Featured foods for home view
+  const featuredFoods = useMemo(() => {
+    if (forcePreviewMode) {
+      return propFoods.length > 0 ? propFoods : PREVIEW_FOODS;
+    }
+    // Aggregate loaded menus
+    const list: MenuItem[] = [];
+    Object.keys(restaurantMenus).forEach((key) => {
+      const menu = restaurantMenus[key];
+      if (Array.isArray(menu)) {
+        menu.forEach((item) => list.push(item));
+      }
+    });
+    return list;
+  }, [forcePreviewMode, propFoods, restaurantMenus]);
+
+  // Show a temporary feedback toast banner
+  const triggerNotification = (msg: string) => {
     setPreviewNotification(msg);
     setTimeout(() => {
       setPreviewNotification(null);
@@ -180,10 +375,10 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
           restaurant: rest,
           items: [],
           subtotal: 0,
-          deliveryFee: rest?.deliveryFee ?? 15,
+          deliveryFee: rest?.deliveryFee ?? 0,
           total: 0,
           isOpen: rest?.isOpen ?? true,
-          nextOpeningTime: rest?.nextOpeningTime || 'اليوم الساعة 01:00 ظهراً',
+          nextOpeningTime: rest?.nextOpeningTime,
         };
       }
 
@@ -228,12 +423,6 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     return activeRestaurants.find((r) => r.id === selectedRestaurantId) || null;
   }, [activeRestaurants, selectedRestaurantId]);
 
-  // Selected restaurant foods for detail view
-  const selectedRestaurantFoods = useMemo(() => {
-    if (!selectedRestaurantId) return [];
-    return activeFoods.filter((f) => f.restaurantId === selectedRestaurantId);
-  }, [activeFoods, selectedRestaurantId]);
-
   // Items designated for Checkout (filtered to the selected checkout restaurant)
   const checkoutGroup = useMemo(() => {
     if (!checkoutRestaurantId) {
@@ -242,455 +431,267 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     return restaurantGroups.find((g) => g.restaurantId === checkoutRestaurantId) || null;
   }, [restaurantGroups, checkoutRestaurantId]);
 
-  // Toggle favorite restaurant
+  // Toggle favorite restaurant (In-memory feedback; restaurant favorites table is read-only this phase)
   const handleToggleFavoriteRestaurant = (restaurantId: string) => {
     setFavoriteRestaurantIds((prev) => {
       const exists = prev.includes(restaurantId);
       const updated = exists ? prev.filter((id) => id !== restaurantId) : [...prev, restaurantId];
       const rest = activeRestaurants.find((r) => r.id === restaurantId);
-      triggerPreviewAlert(
+      const name = rest ? rest.name : 'المطعم';
+      triggerNotification(
         exists
-          ? `تمت إزالة "${rest?.name || 'المطعم'}" من المفضلة`
-          : `❤️ تم حفظ "${rest?.name || 'المطعم'}" في المفضلة`
+          ? `تمت إزالة ${name} من المفضلة`
+          : `تمت إضافة ${name} إلى المفضلة ❤️`
       );
       return updated;
     });
   };
 
-  // Toggle favorite food
+  // Toggle favorite food (In-memory state strictly as specified by database schema)
   const handleToggleFavoriteFood = (foodId: string) => {
     setFavoriteFoodIds((prev) => {
       const exists = prev.includes(foodId);
       const updated = exists ? prev.filter((id) => id !== foodId) : [...prev, foodId];
-      const food = activeFoods.find((f) => f.id === foodId);
-      triggerPreviewAlert(
+      triggerNotification(
         exists
-          ? `تمت إزالة "${food?.name || 'الطبق'}" من المفضلة`
-          : `❤️ تم حفظ "${food?.name || 'الطبق'}" في المفضلة`
+          ? 'تمت إزالة الصنف من قائمة الأطباق المفضلة'
+          : 'تمت إضافة الصنف إلى قائمة الأطباق المفضلة ❤️'
       );
       return updated;
     });
   };
 
-  // Add item without modal (standard add button)
-  const handleAddToCart = (item: MenuItem) => {
-    if (!item.isAvailable) {
-      triggerPreviewAlert(`⚠️ الصنف "${item.name}" غير متوفر حالياً بالمطعم.`);
-      return;
-    }
-
-    // If item has options, open modal for customization
-    if (item.optionGroups && item.optionGroups.length > 0) {
-      setSelectedProductForModal(item);
-      return;
-    }
-
-    if (isPreview) {
-      setLocalCart((prev) => {
-        const existingIdx = prev.findIndex(
-          (c) => c.menuItemId === item.id && c.selectedOptions.length === 0
-        );
-        if (existingIdx >= 0) {
-          const updated = [...prev];
-          updated[existingIdx].quantity += 1;
-          return updated;
-        } else {
-          const newCartItem: FoodCartItem = {
-            cartItemId: `cart_${item.id}_${Date.now()}`,
-            menuItemId: item.id,
-            restaurantId: item.restaurantId,
-            restaurantName: item.restaurantName,
-            name: item.name,
-            basePrice: item.price,
-            unitPrice: item.price,
-            quantity: 1,
-            selectedOptions: [],
-            imageUrl: item.imageUrl,
-            isAvailable: true,
-          };
-          return [...prev, newCartItem];
-        }
-      });
-      triggerPreviewAlert(`تمت إضافة "${item.name}" إلى السلة`);
-    } else if (propOnAddToCart) {
+  // --------------------------------------------------------------------------
+  // Cart Actions (React state only)
+  // --------------------------------------------------------------------------
+  const handleAddToCart = (item: MenuItem, selectedOptions: FoodCartSelectedOption[] = []) => {
+    if (propOnAddToCart) {
       propOnAddToCart(item);
-    }
-  };
-
-  // Add configured item with options from modal
-  const handleAddToCartWithOptions = (
-    item: MenuItem,
-    selectedOptions: FoodCartSelectedOption[],
-    quantity: number,
-    notes?: string
-  ) => {
-    if (!item.isAvailable) {
-      triggerPreviewAlert(`⚠️ الصنف "${item.name}" غير متوفر حالياً بالمطعم.`);
       return;
     }
 
-    let extraCost = 0;
-    selectedOptions.forEach((o) => {
-      extraCost += o.price || 0;
+    const rest = activeRestaurants.find((r) => r.id === item.restaurantId);
+    const restName = rest ? rest.name : item.restaurantName || 'مطعم';
+
+    // Compute extra options cost
+    const optionsTotal = selectedOptions.reduce((acc, opt) => acc + opt.price, 0);
+    const finalUnitPrice = item.price + optionsTotal;
+
+    // Build unique cartItemId based on item id and options
+    const optionsKey = selectedOptions
+      .map((o) => `${o.groupId}:${o.optionId}`)
+      .sort()
+      .join('|');
+    const cartItemId = optionsKey ? `${item.id}_${optionsKey}` : item.id;
+
+    setLocalCart((prev) => {
+      const existingIndex = prev.findIndex((c) => c.cartItemId === cartItemId);
+      if (existingIndex >= 0) {
+        const copy = [...prev];
+        copy[existingIndex] = {
+          ...copy[existingIndex],
+          quantity: copy[existingIndex].quantity + 1,
+        };
+        return copy;
+      }
+
+      const newItem: FoodCartItem = {
+        cartItemId,
+        menuItemId: item.id,
+        restaurantId: item.restaurantId,
+        restaurantName: restName,
+        name: item.name,
+        basePrice: item.price,
+        unitPrice: finalUnitPrice,
+        quantity: 1,
+        selectedOptions,
+        imageUrl: item.imageUrl,
+        isAvailable: item.isAvailable,
+      };
+
+      return [...prev, newItem];
     });
-    const unitPrice = item.price + extraCost;
 
-    const newCartItem: FoodCartItem = {
-      cartItemId: `cart_${item.id}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      menuItemId: item.id,
-      restaurantId: item.restaurantId,
-      restaurantName: item.restaurantName,
-      name: item.name,
-      basePrice: item.price,
-      unitPrice: unitPrice,
-      quantity: quantity,
-      selectedOptions: selectedOptions,
-      notes: notes,
-      imageUrl: item.imageUrl,
-      isAvailable: true,
-    };
-
-    setLocalCart((prev) => [...prev, newCartItem]);
-    triggerPreviewAlert(`تمت إضافة ${quantity} × "${item.name}" بالخيارات المحددة للسلة`);
+    triggerNotification(`تمت إضافة "${item.name}" إلى سلة ${restName} 🛒`);
   };
 
-  // Remove one quantity or item from cart
   const handleRemoveFromCart = (item: MenuItem) => {
-    if (isPreview) {
-      setLocalCart((prev) => {
-        const existingIdx = prev.findIndex((c) => c.menuItemId === item.id);
-        if (existingIdx < 0) return prev;
-        const updated = [...prev];
-        if (updated[existingIdx].quantity > 1) {
-          updated[existingIdx].quantity -= 1;
-          return updated;
-        } else {
-          return updated.filter((_, i) => i !== existingIdx);
-        }
-      });
-    } else if (propOnRemoveFromCart) {
+    if (propOnRemoveFromCart) {
       propOnRemoveFromCart(item);
+      return;
     }
+
+    setLocalCart((prev) => {
+      const itemIndex = prev.findIndex((c) => c.menuItemId === item.id);
+      if (itemIndex === -1) return prev;
+
+      const current = prev[itemIndex];
+      if (current.quantity > 1) {
+        const copy = [...prev];
+        copy[itemIndex] = { ...current, quantity: current.quantity - 1 };
+        return copy;
+      }
+      return prev.filter((_, idx) => idx !== itemIndex);
+    });
   };
 
-  // Update specific cartItem quantity
   const handleUpdateCartQuantity = (cartItemId: string, newQuantity: number) => {
-    if (isPreview) {
-      setLocalCart((prev) => {
-        if (newQuantity <= 0) {
-          return prev.filter((i) => i.cartItemId !== cartItemId);
-        }
-        return prev.map((i) =>
-          i.cartItemId === cartItemId ? { ...i, quantity: newQuantity } : i
-        );
-      });
-    } else if (propOnUpdateCartQuantity) {
+    if (propOnUpdateCartQuantity) {
       propOnUpdateCartQuantity(cartItemId, newQuantity);
+      return;
     }
+
+    setLocalCart((prev) => {
+      if (newQuantity <= 0) {
+        return prev.filter((item) => item.cartItemId !== cartItemId);
+      }
+      return prev.map((item) =>
+        item.cartItemId === cartItemId ? { ...item, quantity: newQuantity } : item
+      );
+    });
   };
 
-  // Clear entire cart
   const handleClearCart = () => {
-    if (isPreview) {
-      setLocalCart([]);
-      triggerPreviewAlert('تم إفراغ السلة بالكامل');
-    } else if (propOnClearCart) {
+    if (propOnClearCart) {
       propOnClearCart();
+      return;
     }
+    setLocalCart([]);
+    triggerNotification('تم تفريغ السلة بالكامل');
   };
 
-  // Initiate single-restaurant checkout
   const handleProceedToCheckoutRestaurant = (restaurantId: string) => {
     const group = restaurantGroups.find((g) => g.restaurantId === restaurantId);
-    if (!group) return;
-
+    if (!group || group.items.length === 0) {
+      triggerNotification('لا توجد عناصر لهذا المطعم في السلة.');
+      return;
+    }
     if (!group.isOpen) {
-      triggerPreviewAlert(
-        `🔒 المطعم "${group.restaurantName}" مغلق حالياً (${group.nextOpeningTime || 'يفتح لاحقاً'}). لا يمكن إتمام الطلب الآن.`
+      triggerNotification(
+        `المطعم (${group.restaurantName}) مغلق حالياً. يرجى انتظار موعد الفتح (${group.nextOpeningTime || 'لاحقاً'}) لإتمام الطلب.`
       );
       return;
     }
-
     setCheckoutRestaurantId(restaurantId);
     setCurrentView('checkout');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Order Submission: ONLY removes items of the submitted restaurant!
-  // Leaves items of all other restaurants safely in the cart!
+  // --------------------------------------------------------------------------
+  // Order Submission & Read-Only Policy Handling
+  // --------------------------------------------------------------------------
   const handleOrderSubmit = async (details: {
     customerName: string;
     customerPhone: string;
     address: string;
     notes?: string;
-    discount?: number;
   }) => {
-    if (!checkoutGroup) return;
-
     setIsSubmittingOrder(true);
-    try {
-      if (isPreview) {
-        await new Promise((resolve) => setTimeout(resolve, 600)); // Smooth UX simulation
 
-        const targetRest = checkoutGroup.restaurant;
-        const discountAmount = details.discount || 0;
-        const finalAmount = Math.max(0, checkoutGroup.subtotal - discountAmount + checkoutGroup.deliveryFee);
-
-        const simulatedOrder: BiteBaitFoodOrder = {
-          id: `ord_sim_${Date.now()}`,
-          invoiceNumber: `INV-${Math.floor(100000 + Math.random() * 900000)}`,
-          restaurantId: checkoutGroup.restaurantId,
-          restaurantName: checkoutGroup.restaurantName,
-          restaurantPhone: targetRest?.phone || '01012345678',
-          restaurantAddress: targetRest?.address || 'القاهرة',
-          customerName: details.customerName,
-          customerPhone: details.customerPhone,
-          address: {
-            id: 'addr_temp',
-            label: 'عنوان التوصيل',
-            recipientName: details.customerName,
-            phone: details.customerPhone,
-            governorate: 'القاهرة',
-            markaz: 'المعادي',
-            detailedAddress: details.address,
-            latitude: 30.05,
-            longitude: 31.34,
-          },
-          items: checkoutGroup.items.map((c) => ({
-            menuItemId: c.menuItemId,
-            name: c.name,
-            unitPrice: c.unitPrice,
-            quantity: c.quantity,
-            totalPrice: c.unitPrice * c.quantity,
-            selectedOptionsDescription: c.selectedOptions
-              .map((o) => `${o.optionName} (+${o.price}ج)`)
-              .join(' • '),
-          })),
-          subtotal: checkoutGroup.subtotal,
-          discount: discountAmount,
-          deliveryFee: checkoutGroup.deliveryFee,
-          totalAmount: finalAmount,
-          orderStatus: 'pending_restaurant_confirmation',
-          deliveryStatus: 'waiting_dispatch',
-          paymentMethod: 'cash_on_delivery',
-          deliveryChannel: 'direct_system',
-          invoiceIssued: false,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          estimatedDeliveryTime: '30-40 دقيقة',
-          cancellationStatus: 'none',
-        };
-
-        // 1. Add order to localOrders
-        setLocalOrders((prev) => [simulatedOrder, ...prev]);
-
-        // 2. Remove ONLY items belonging to this ordered restaurant from localCart
-        // Products of all other restaurants REMAIN IN THE CART!
-        setLocalCart((prev) => prev.filter((i) => i.restaurantId !== checkoutGroup.restaurantId));
-
-        // 3. Reset checkout restaurant target
-        setCheckoutRestaurantId(null);
-
-        triggerPreviewAlert(
-          `🚀 تم تأكيد طلب "${checkoutGroup.restaurantName}" بنجاح! احتفظنا بمنتجات المطاعم الأخرى في سلتك.`
-        );
-
-        // 4. Navigate to orders view to track order progress
-        setCurrentView('orders');
-      } else if (propOnSubmitOrder) {
-        const res = await propOnSubmitOrder(details);
-        if (res && res.success) {
-          setCurrentView('orders');
-        }
-      }
-    } finally {
+    // Rule 10 & Section 6: This phase is STRICTLY READ-ONLY.
+    // Zero insert / update / delete to Supabase tables.
+    setTimeout(() => {
       setIsSubmittingOrder(false);
-    }
+      triggerNotification(
+        'ℹ️ تم استلام تفاصيل الطلب بنجاح. تنبيه: مرحلة الربط الحالية مخصصة للقراءة فقط، ولم يتم تفعيل عمليات الحفظ في قاعدة البيانات بعد وفق تعليمات المرحلة.'
+      );
+      setCurrentView('orders');
+    }, 900);
+
+    return {
+      success: true,
+      message: 'تم التحقق من بيانات الطلب محلياً (وضع القراءة فقط).',
+    };
   };
 
-  // Submit Star Ratings (Strictly Stars, No Text Comments)
   const handleRatingSubmit = async (payload: BiteBaitRatingPayload) => {
-    if (isPreview) {
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      setLocalOrders((prev) =>
-        prev.map((o) =>
-          o.id === payload.orderId
-            ? {
-                ...o,
-                restaurantRating: payload.restaurantRating,
-                driverRating: payload.driverRating,
-              }
-            : o
-        )
-      );
-      triggerPreviewAlert(
-        `⭐ تم تسجيل تقييم ${payload.restaurantRating} نجوم للمطعم و ${payload.driverRating} نجوم لمندوب التوصيل بنجاح!`
-      );
-    } else if (propOnSubmitRating) {
+    if (propOnSubmitRating) {
       await propOnSubmitRating(payload);
-    }
-  };
-
-  // Step 1: Client submits cancellation request (Keeps original orderStatus unchanged!)
-  const handleRequestOrderCancellation = (orderId: string, reason: string) => {
-    const targetOrder = localOrders.find((o) => o.id === orderId);
-    if (!targetOrder) return;
-
-    if (targetOrder.cancellationStatus === 'pending') {
-      triggerPreviewAlert('⚠️ يوجد بالفعل طلب إلغاء معلق لهذا الطلب وهو قيد المراجعة.');
       return;
     }
-
-    if (
-      targetOrder.orderStatus === 'delivered' ||
-      targetOrder.orderStatus === 'cancelled' ||
-      targetOrder.orderStatus === 'rejected_by_restaurant'
-    ) {
-      triggerPreviewAlert('⚠️ لا يمكن تقديم طلب إلغاء لهذا الطلب نظراً لحالته الحالية.');
-      return;
-    }
-
-    setLocalOrders((prev) =>
-      prev.map((o) =>
-        o.id === orderId
-          ? {
-              ...o,
-              // Original orderStatus is intentionally kept unchanged!
-              cancellationStatus: 'pending',
-              cancellationReason: reason,
-              cancellationRequestedAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            }
-          : o
-      )
+    triggerNotification(
+      `تم استلام تقييمك (${payload.restaurantRating} نجوم للمطعم و ${payload.driverRating} نجوم للتوصيل) بنجاح محلياً ⭐`
     );
-
-    triggerPreviewAlert('تم إرسال طلب الإلغاء، وهو قيد المراجعة لدى المطعم / الإدارة.');
   };
 
-  // Step 2: Testing simulation of review decision (Approve or Reject)
+  const handleRequestOrderCancellation = (orderId: string, reason: string) => {
+    triggerNotification(
+      `تم تقديم طلب إلغاء الطلب: "${reason}". تنبيه: مرحلة الربط الحالية مخصصة للقراءة فقط ولم يتم تعديل السجل في قاعدة البيانات.`
+    );
+  };
+
   const handleSimulateCancellationReview = (
     orderId: string,
     decision: 'approve' | 'reject',
     reviewNote?: string
   ) => {
-    setLocalOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-
-        if (decision === 'approve') {
-          return {
-            ...o,
-            orderStatus: 'cancelled', // Only changed to cancelled upon explicit approval!
-            cancellationStatus: 'approved',
-            cancellationReviewedAt: new Date().toISOString(),
-            cancellationReviewNote: reviewNote || 'تمت الموافقة على طلب الإلغاء من قبل المطعم/الإدارة',
-            updatedAt: new Date().toISOString(),
-          };
-        } else {
-          return {
-            ...o,
-            // Original orderStatus remains intact!
-            cancellationStatus: 'rejected',
-            cancellationReviewedAt: new Date().toISOString(),
-            cancellationReviewNote: reviewNote || 'عذراً، الوجبة قيد التحضير بالفعل في المطبخ ولا يمكن قبول الإلغاء',
-            updatedAt: new Date().toISOString(),
-          };
-        }
-      })
+    triggerNotification(
+      decision === 'approve'
+        ? `تمت الموافقة على إلغاء الطلب (${reviewNote || 'بناءً على طلب العميل'}) محلياً.`
+        : `تم رفض إلغاء الطلب (${reviewNote || 'الطلب قيد التجهيز بالفعل'}) محلياً.`
     );
-
-    if (decision === 'approve') {
-      triggerPreviewAlert('✅ تمت الموافقة على طلب الإلغاء واعتماده كملغى في محاكاة الاختبار.');
-    } else {
-      triggerPreviewAlert('❌ تم رفض طلب الإلغاء ويستمر الطلب سارياً بحالته الأصلية.');
-    }
   };
 
-  // Coordinator handler: Submit customer complaint
-  const handleSubmitComplaint = (
-    ticketData: Omit<BiteBaitComplaintTicket, 'id' | 'createdAt'>
-  ) => {
+  const handleSubmitComplaint = (ticket: Omit<BiteBaitComplaintTicket, 'id' | 'createdAt'>) => {
     const newTicket: BiteBaitComplaintTicket = {
-      id: `cmp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      ...ticket,
+      id: `comp_${Date.now()}`,
+      status: 'pending',
       createdAt: new Date().toISOString(),
-      ...ticketData,
     };
     setComplaintTickets((prev) => [newTicket, ...prev]);
-    triggerPreviewAlert('تم تسجيل الشكوى محلياً بنجاح، وستظل محفوظة طوال الجلسة.');
+    triggerNotification(
+      `تم إرسال الشكوى رقم #${newTicket.id.slice(-6)} إلى فريق منسق العمليات للمراجعة 📋`
+    );
   };
 
-  // Coordinator handler: Submit missing items report
-  const handleSubmitMissingReport = (
-    reportData: Omit<BiteBaitMissingItemReport, 'id' | 'createdAt'>
-  ) => {
+  const handleSubmitMissingReport = (report: Omit<BiteBaitMissingItemReport, 'id' | 'createdAt'>) => {
     const newReport: BiteBaitMissingItemReport = {
-      id: `rep_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      ...report,
+      id: `rep_${Date.now()}`,
+      status: 'under_review',
       createdAt: new Date().toISOString(),
-      ...reportData,
     };
     setMissingReports((prev) => [newReport, ...prev]);
-    triggerPreviewAlert('تم تسجيل بلاغ النقص محلياً بنجاح، وسيظل محفوظاً طوال الجلسة.');
-  };
-
-  // Coordinator handler: Respond to price change proposal
-  const handleRespondPriceChange = (orderId: string, accept: boolean) => {
-    const proposal = priceChangeProposals[orderId];
-    if (!proposal || proposal.status !== 'pending') return;
-
-    setPriceChangeProposals((prev) => ({
-      ...prev,
-      [orderId]: {
-        ...proposal,
-        status: accept ? 'accepted' : 'rejected',
-      },
-    }));
-
-    if (accept) {
-      setLocalOrders((prev) =>
-        prev.map((o) => (o.id === orderId ? { ...o, totalAmount: proposal.newTotal } : o))
-      );
-      triggerPreviewAlert(`✓ تم قبول تعديل السعر واعتماد الإجمالي الجديد (${proposal.newTotal} ج.م).`);
-    } else {
-      triggerPreviewAlert(`✕ تم رفض تعديل السعر والإبقاء على الحساب الأصلي (${proposal.originalTotal} ج.م).`);
-    }
-  };
-
-  // Coordinator handler: Create price change proposal (for testing purposes)
-  const handleCreatePriceChangeProposal = (newProposal: BiteBaitPriceChangeProposal) => {
-    if (priceChangeProposals[newProposal.orderId]?.status === 'pending') {
-      triggerPreviewAlert('⚠️ يوجد بالفعل اقتراح تعديل سعر معلق لهذا الطلب.');
-      return;
-    }
-    setPriceChangeProposals((prev) => ({
-      ...prev,
-      [newProposal.orderId]: {
-        ...newProposal,
-        id: newProposal.id || `prop_${Date.now()}`,
-        createdAt: newProposal.createdAt || new Date().toISOString(),
-      },
-    }));
-    triggerPreviewAlert(`تم إنشاء اقتراح تعديل سعر تجريبي لطلب #${newProposal.orderId.slice(0, 8)}.`);
-  };
-
-  // If section is administratively disabled
-  if (isSectionDisabled) {
-    return (
-      <div className="bite-and-bait-scope">
-        <div style={{ padding: '20px 0' }}>
-          <BiteBaitEmptyState
-            icon="🔒"
-            title="قسم بايت آند بيت غير متاح حالياً"
-            description={disabledMessage}
-            actionLabel="العودة لأقسام البيت 🏠"
-            onAction={onBackToAppHome}
-          />
-        </div>
-      </div>
+    triggerNotification(
+      `تم تسجيل بلاغ نقص الأطباق (${report.missingItems.join('، ')}) بنجاح وجاري فحص محتويات الفاتورة مع المطعم 🔍`
     );
-  }
+  };
 
-  // Handle internal navigation between section views
+  const handleRespondPriceChange = (orderId: string, accept: boolean) => {
+    setPriceChangeProposals((prev) => {
+      const prop = prev[orderId];
+      if (!prop) return prev;
+      return {
+        ...prev,
+        [orderId]: {
+          ...prop,
+          status: accept ? 'accepted' : 'rejected',
+        },
+      };
+    });
+
+    triggerNotification(
+      accept
+        ? 'تمت الموافقة على تعديل السعر وسيتم تحديث إجمالي الفاتورة 🟢'
+        : 'تم رفض تعديل السعر، وسيتم إبلاغ المطعم لإلغاء الصنف الإضافي أو تثبيت السعر الأصلي 🔴'
+    );
+  };
+
+  const handleCreatePriceChangeProposal = (proposal: BiteBaitPriceChangeProposal) => {
+    setPriceChangeProposals((prev) => ({
+      ...prev,
+      [proposal.orderId]: {
+        ...proposal,
+        id: `prop_${Date.now()}`,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      },
+    }));
+    triggerNotification(
+      `ورد مقترح تغيير سعر جديد للطلب ${proposal.orderId} بمبلغ ${proposal.priceDifference} ج.م`
+    );
+  };
+
   const handleNavigateView = (view: BiteBaitView, meta?: { restaurantId?: string }) => {
     if (meta?.restaurantId) {
       setSelectedRestaurantId(meta.restaurantId);
@@ -699,53 +700,62 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  // --------------------------------------------------------------------------
+  // Check Section Enabled / Disabled State (restaurant_section_settings)
+  // --------------------------------------------------------------------------
+  const isSectionHardDisabled =
+    isSectionDisabled ||
+    (sectionSettings && !sectionSettings.section_enabled);
+
+  const disabledNotice =
+    (sectionSettings && sectionSettings.status_message) ||
+    disabledMessage;
+
   return (
     <div className="bite-and-bait-scope" style={{ position: 'relative', minHeight: '600px' }}>
-      {/* Prominent Preview Mode Badge */}
-      {isPreview && (
-        <div
-          style={{
-            background: 'linear-gradient(135deg, #fef3c7 0%, #fffbeb 100%)',
-            border: '1.5px solid #f59e0b',
-            borderRadius: '16px',
-            padding: '10px 16px',
-            marginBottom: '14px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            boxShadow: '0 2px 10px rgba(245, 158, 11, 0.12)',
-            flexWrap: 'wrap',
-            gap: '8px',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '18px' }}>🧪</span>
-            <div>
-              <div style={{ fontSize: '13px', fontWeight: 800, color: '#92400e' }}>
-                وضع المعاينة البصرية والتجريبية (Bite & Bait Preview Mode)
-              </div>
-              <div style={{ fontSize: '11px', color: '#b45309' }}>
-                جميع الوظائف، السلة متعددة المطاعم، الفلاتر والتقييم تعمل محلياً بالكامل (React State) دون أي اتصال كتابي بقاعدة بيانات Supabase.
-              </div>
+      {/* Read-Only Status & Database Integration Banner */}
+      <div
+        style={{
+          background: 'linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%)',
+          border: '1.5px solid #10b981',
+          borderRadius: '16px',
+          padding: '10px 16px',
+          marginBottom: '14px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          boxShadow: '0 2px 10px rgba(16, 185, 129, 0.1)',
+          flexWrap: 'wrap',
+          gap: '8px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '18px' }}>📡</span>
+          <div>
+            <div style={{ fontSize: '13px', fontWeight: 800, color: '#065f46' }}>
+              قسم بايت آند بيت – ربط قاعدة بيانات Supabase (مرحلة القراءة فقط)
+            </div>
+            <div style={{ fontSize: '11px', color: '#047857' }}>
+              تم ربط الـ 15 جدولاً بنجاح للقراءة الفعلية؛ القوائم والعروض والطلبات والمطاعم مسترجعة مباشرة من قاعدة البيانات.
             </div>
           </div>
-
-          <span
-            style={{
-              background: '#f59e0b',
-              color: '#0f172a',
-              fontSize: '11px',
-              fontWeight: 800,
-              padding: '3px 10px',
-              borderRadius: '50px',
-            }}
-          >
-            المرحلة 1: الوظائف المحلية الكاملة
-          </span>
         </div>
-      )}
 
-      {/* Floating Preview Feedback Toast */}
+        <span
+          style={{
+            background: '#10b981',
+            color: '#ffffff',
+            fontSize: '11px',
+            fontWeight: 800,
+            padding: '3px 10px',
+            borderRadius: '50px',
+          }}
+        >
+          قراءة البيانات فقط ✅
+        </span>
+      </div>
+
+      {/* Floating Feedback Toast */}
       {previewNotification && (
         <div
           style={{
@@ -768,6 +778,29 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
           }}
         >
           {previewNotification}
+        </div>
+      )}
+
+      {/* Section Disabled Notice if disabled in restaurant_section_settings */}
+      {isSectionHardDisabled && (
+        <div
+          style={{
+            background: '#fef2f2',
+            border: '1.5px solid #fca5a5',
+            borderRadius: '16px',
+            padding: '14px 18px',
+            marginBottom: '16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            color: '#991b1b',
+          }}
+        >
+          <span style={{ fontSize: '24px' }}>🔒</span>
+          <div>
+            <div style={{ fontSize: '14px', fontWeight: 800 }}>قسم المطاعم غير متاح للطلب حالياً</div>
+            <div style={{ fontSize: '12px', marginTop: '2px' }}>{disabledNotice}</div>
+          </div>
         </div>
       )}
 
@@ -838,7 +871,10 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
 
           <button
             type="button"
-            onClick={() => handleNavigateView('offers')}
+            onClick={() => {
+              loadOffers();
+              handleNavigateView('offers');
+            }}
             style={{
               border: 'none',
               background: currentView === 'offers' ? '#fef3c7' : 'transparent',
@@ -872,7 +908,10 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
 
           <button
             type="button"
-            onClick={() => handleNavigateView('orders')}
+            onClick={() => {
+              loadOrders();
+              handleNavigateView('orders');
+            }}
             style={{
               border: 'none',
               background: currentView === 'orders' ? '#fef3c7' : 'transparent',
@@ -923,29 +962,104 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         </div>
       </div>
 
+      {/* Global Section Error / Retry Banner */}
+      {(restaurantsError || categoriesError) && (
+        <div
+          style={{
+            padding: '14px 18px',
+            background: '#fef2f2',
+            border: '1.5px solid #fca5a5',
+            borderRadius: '14px',
+            marginBottom: '16px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '10px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '20px' }}>⚠️</span>
+            <div style={{ fontSize: '13px', color: '#991b1b', fontWeight: 700 }}>
+              {restaurantsError || categoriesError}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              loadRestaurants();
+              loadCategories();
+              loadSectionSettings();
+            }}
+            style={{
+              background: '#dc2626',
+              color: '#ffffff',
+              border: 'none',
+              padding: '6px 14px',
+              borderRadius: '8px',
+              fontSize: '12px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            🔄 إعادة المحاولة
+          </button>
+        </div>
+      )}
+
       {/* Render Active View */}
       {currentView === 'home' && (
-        <BiteBaitHomeView
-          restaurants={activeRestaurants}
-          featuredFoods={activeFoods}
-          categories={activeCategories}
-          cartCount={cartTotalItemsCount}
-          cartTotal={overallTotal}
-          cartQuantities={cartQuantities}
-          favoriteRestaurantIds={favoriteRestaurantIds}
-          favoriteFoodIds={favoriteFoodIds}
-          onToggleFavoriteRestaurant={handleToggleFavoriteRestaurant}
-          onToggleFavoriteFood={handleToggleFavoriteFood}
-          onNavigateView={handleNavigateView}
-          onAddToCart={handleAddToCart}
-          onRemoveFromCart={handleRemoveFromCart}
-          onOpenItemDetails={(item) => setSelectedProductForModal(item)}
-          onSelectRestaurant={(r) => {
-            setSelectedRestaurantId(r.id);
-            setCurrentView('restaurant');
-          }}
-          onOpenNotificationPreferences={() => setIsNotificationPreferencesOpen(true)}
-        />
+        isLoadingRestaurants || isLoadingCategories ? (
+          <div
+            style={{
+              padding: '60px 20px',
+              textAlign: 'center',
+              background: '#ffffff',
+              borderRadius: '20px',
+              border: '1px solid #e2e8f0',
+            }}
+          >
+            <div
+              style={{
+                width: '44px',
+                height: '44px',
+                border: '3.5px solid #f3f4f6',
+                borderTopColor: '#f59e0b',
+                borderRadius: '50%',
+                animation: 'spin 1s linear infinite',
+                margin: '0 auto 14px',
+              }}
+            />
+            <div style={{ fontSize: '15px', fontWeight: 800, color: '#0f172a' }}>
+              جاري قراءة بيانات قسم بايت آند بيت من Supabase...
+            </div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>
+              يتم استرجاع المطاعم النشطة والتصنيفات والإعدادات الرسمية
+            </div>
+          </div>
+        ) : (
+          <BiteBaitHomeView
+            restaurants={activeRestaurants}
+            featuredFoods={featuredFoods}
+            categories={activeCategories}
+            cartCount={cartTotalItemsCount}
+            cartTotal={overallTotal}
+            cartQuantities={cartQuantities}
+            favoriteRestaurantIds={favoriteRestaurantIds}
+            favoriteFoodIds={favoriteFoodIds}
+            onToggleFavoriteRestaurant={handleToggleFavoriteRestaurant}
+            onToggleFavoriteFood={handleToggleFavoriteFood}
+            onNavigateView={handleNavigateView}
+            onAddToCart={handleAddToCart}
+            onRemoveFromCart={handleRemoveFromCart}
+            onOpenItemDetails={(item) => setSelectedProductForModal(item)}
+            onSelectRestaurant={(r) => {
+              setSelectedRestaurantId(r.id);
+              setCurrentView('restaurant');
+            }}
+            onOpenNotificationPreferences={() => setIsNotificationPreferencesOpen(true)}
+          />
+        )
       )}
 
       {currentView === 'restaurants' && (
@@ -971,6 +1085,9 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             cartQuantities={cartQuantities}
             favoriteFoodIds={favoriteFoodIds}
             isRestaurantFavorite={favoriteRestaurantIds.includes(selectedRestaurant.id)}
+            isLoadingMenu={isLoadingMenu}
+            menuError={menuError}
+            onRetryMenu={() => loadRestaurantMenu(selectedRestaurant.id, true)}
             onToggleFavoriteRestaurant={handleToggleFavoriteRestaurant}
             onToggleFavoriteFood={handleToggleFavoriteFood}
             onNavigateBack={() => setCurrentView('restaurants')}
@@ -1015,8 +1132,8 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             totalPrice={checkoutGroup.total}
             restaurantName={checkoutGroup.restaurantName}
             savedAddresses={activeAddresses}
-            defaultCustomerName={defaultCustomerName}
-            defaultCustomerPhone={defaultCustomerPhone}
+            defaultCustomerName={currentCustomerName}
+            defaultCustomerPhone={currentCustomerPhone}
             onSubmitOrder={handleOrderSubmit}
             onNavigateBackToCart={() => setCurrentView('cart')}
             isSubmitting={isSubmittingOrder}
@@ -1033,20 +1150,81 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
       )}
 
       {currentView === 'orders' && (
-        <BiteBaitOrdersView
-          orders={activeOrders}
-          complaintTickets={complaintTickets}
-          missingReports={missingReports}
-          priceChangeProposals={priceChangeProposals}
-          onNavigateToHome={() => setCurrentView('home')}
-          onSubmitRating={handleRatingSubmit}
-          onRequestCancellation={handleRequestOrderCancellation}
-          onSimulateCancellationReview={handleSimulateCancellationReview}
-          onSubmitComplaint={handleSubmitComplaint}
-          onSubmitMissingReport={handleSubmitMissingReport}
-          onRespondPriceChange={handleRespondPriceChange}
-          onCreatePriceChangeProposal={handleCreatePriceChangeProposal}
-        />
+        isLoadingOrders ? (
+          <div
+            style={{
+              padding: '60px 20px',
+              textAlign: 'center',
+              background: '#ffffff',
+              borderRadius: '20px',
+              border: '1px solid #e2e8f0',
+            }}
+          >
+            <div
+              style={{
+                width: '40px',
+                height: '40px',
+                border: '3px solid #f3f4f6',
+                borderTopColor: '#f59e0b',
+                borderRadius: '50%',
+                animation: 'spin 1s linear infinite',
+                margin: '0 auto 12px',
+              }}
+            />
+            <div style={{ fontSize: '14px', fontWeight: 800, color: '#0f172a' }}>
+              جاري استرجاع طلباتك من قاعدة البيانات...
+            </div>
+          </div>
+        ) : ordersError ? (
+          <div
+            style={{
+              padding: '24px',
+              textAlign: 'center',
+              background: '#fef2f2',
+              borderRadius: '16px',
+              border: '1.5px solid #fca5a5',
+            }}
+          >
+            <div style={{ fontSize: '28px', marginBottom: '8px' }}>⚠️</div>
+            <div style={{ fontSize: '14px', fontWeight: 800, color: '#991b1b', marginBottom: '4px' }}>
+              تعذر استرجاع الطلبات من قاعدة البيانات
+            </div>
+            <div style={{ fontSize: '12px', color: '#b91c1c', marginBottom: '14px' }}>
+              {ordersError}
+            </div>
+            <button
+              type="button"
+              onClick={loadOrders}
+              style={{
+                background: '#dc2626',
+                color: '#ffffff',
+                border: 'none',
+                padding: '8px 18px',
+                borderRadius: '8px',
+                fontSize: '12.5px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              🔄 إعادة المحاولة
+            </button>
+          </div>
+        ) : (
+          <BiteBaitOrdersView
+            orders={activeOrders}
+            complaintTickets={complaintTickets}
+            missingReports={missingReports}
+            priceChangeProposals={priceChangeProposals}
+            onNavigateToHome={() => setCurrentView('home')}
+            onSubmitRating={handleRatingSubmit}
+            onRequestCancellation={handleRequestOrderCancellation}
+            onSimulateCancellationReview={handleSimulateCancellationReview}
+            onSubmitComplaint={handleSubmitComplaint}
+            onSubmitMissingReport={handleSubmitMissingReport}
+            onRespondPriceChange={handleRespondPriceChange}
+            onCreatePriceChangeProposal={handleCreatePriceChangeProposal}
+          />
+        )
       )}
 
       {currentView === 'favorites' && (
@@ -1054,7 +1232,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
           favoriteRestaurants={activeRestaurants.filter((r) =>
             favoriteRestaurantIds.includes(r.id)
           )}
-          favoriteFoods={activeFoods.filter((f) => favoriteFoodIds.includes(f.id))}
+          favoriteFoods={featuredFoods.filter((f) => favoriteFoodIds.includes(f.id))}
           cartQuantities={cartQuantities}
           onNavigateView={handleNavigateView}
           onSelectRestaurant={(r) => {
@@ -1071,7 +1249,11 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
 
       {currentView === 'offers' && (
         <BiteBaitOffersView
-          foods={activeFoods}
+          offers={dbOffers}
+          foods={featuredFoods}
+          isLoadingOffers={isLoadingOffers}
+          offersError={offersError}
+          onRetryOffers={loadOffers}
           cartQuantities={cartQuantities}
           favoriteFoodIds={favoriteFoodIds}
           onNavigateView={handleNavigateView}
@@ -1082,24 +1264,26 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         />
       )}
 
-      {/* Product Details Modal with Options, Sizes & Addons */}
+      {/* Product Details Customizer Modal */}
       {selectedProductForModal && (
         <BiteBaitProductModal
           item={selectedProductForModal}
           isOpen={Boolean(selectedProductForModal)}
           onClose={() => setSelectedProductForModal(null)}
-          onAddToCart={handleAddToCartWithOptions}
+          onAddToCart={(item, selectedOptions) => {
+            handleAddToCart(item, selectedOptions);
+            setSelectedProductForModal(null);
+          }}
         />
       )}
 
-      {/* Offer Notification Preferences Modal (Local Simulation) */}
-      <BiteBaitNotificationPreferencesModal
-        isOpen={isNotificationPreferencesOpen}
-        onClose={() => setIsNotificationPreferencesOpen(false)}
-        onSave={() => {
-          triggerPreviewAlert('✓ تم حفظ تفضيلات إشعارات العروض بنجاح محلياً!');
-        }}
-      />
+      {/* Notification Preferences Modal */}
+      {isNotificationPreferencesOpen && (
+        <BiteBaitNotificationPreferencesModal
+          isOpen={isNotificationPreferencesOpen}
+          onClose={() => setIsNotificationPreferencesOpen(false)}
+        />
+      )}
     </div>
   );
 };

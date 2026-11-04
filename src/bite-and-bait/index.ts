@@ -21,4 +21,5 @@ export * from './views/BiteBaitCheckoutView';
 export * from './views/BiteBaitOrdersView';
 export * from './views/BiteBaitFavoritesView';
 export * from './views/BiteBaitOffersView';
+export * from './services/biteAndBaitService';
 export * from './BiteAndBaitSection';
