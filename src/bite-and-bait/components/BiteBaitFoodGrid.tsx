@@ -12,6 +12,8 @@ interface BiteBaitFoodGridProps {
   onOpenDetails?: (item: MenuItem) => void;
   emptyTitle?: string;
   emptyDescription?: string;
+  favoriteFoodIds?: string[];
+  onToggleFavorite?: (itemId: string) => void;
 }
 
 export const BiteBaitFoodGrid: React.FC<BiteBaitFoodGridProps> = ({
@@ -23,6 +25,8 @@ export const BiteBaitFoodGrid: React.FC<BiteBaitFoodGridProps> = ({
   onOpenDetails,
   emptyTitle = 'لا توجد أطباق متاحة حالياً',
   emptyDescription = 'لم يتم العثور على أطباق تطابق الفئة المحددة أو شروط البحث.',
+  favoriteFoodIds = [],
+  onToggleFavorite,
 }) => {
   return (
     <div style={{ marginBottom: '32px' }}>
@@ -54,6 +58,8 @@ export const BiteBaitFoodGrid: React.FC<BiteBaitFoodGridProps> = ({
               onAddToCart={onAddToCart}
               onRemoveFromCart={onRemoveFromCart}
               onOpenDetails={onOpenDetails}
+              isFavorite={favoriteFoodIds.includes(item.id)}
+              onToggleFavorite={onToggleFavorite}
             />
           ))}
         </div>

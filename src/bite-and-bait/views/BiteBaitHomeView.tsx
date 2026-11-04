@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
-import type { Restaurant, MenuItem, RestaurantCategory, BiteBaitView } from '../types';
+import type { Restaurant, MenuItem, RestaurantCategory, BiteBaitView, BiteBaitPromoSlide } from '../types';
 import { BiteBaitHeader } from '../components/BiteBaitHeader';
+import { BiteBaitPromoSlider } from '../components/BiteBaitPromoSlider';
 import { BiteBaitExploreMenu } from '../components/BiteBaitExploreMenu';
 import { BiteBaitRestaurantGrid } from '../components/BiteBaitRestaurantGrid';
 import { BiteBaitFoodGrid } from '../components/BiteBaitFoodGrid';
@@ -13,11 +14,16 @@ interface BiteBaitHomeViewProps {
   cartCount: number;
   cartTotal: number;
   cartQuantities?: Record<string, number>;
+  favoriteRestaurantIds?: string[];
+  favoriteFoodIds?: string[];
+  onToggleFavoriteRestaurant?: (restaurantId: string) => void;
+  onToggleFavoriteFood?: (foodId: string) => void;
   onNavigateView: (view: BiteBaitView, meta?: { restaurantId?: string }) => void;
   onAddToCart?: (item: MenuItem) => void;
   onRemoveFromCart?: (item: MenuItem) => void;
   onOpenItemDetails?: (item: MenuItem) => void;
   onSelectRestaurant?: (restaurant: Restaurant) => void;
+  onOpenNotificationPreferences?: () => void;
 }
 
 export const BiteBaitHomeView: React.FC<BiteBaitHomeViewProps> = ({
@@ -27,11 +33,16 @@ export const BiteBaitHomeView: React.FC<BiteBaitHomeViewProps> = ({
   cartCount,
   cartTotal,
   cartQuantities = {},
+  favoriteRestaurantIds = [],
+  favoriteFoodIds = [],
+  onToggleFavoriteRestaurant,
+  onToggleFavoriteFood,
   onNavigateView,
   onAddToCart,
   onRemoveFromCart,
   onOpenItemDetails,
   onSelectRestaurant,
+  onOpenNotificationPreferences,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
@@ -66,9 +77,29 @@ export const BiteBaitHomeView: React.FC<BiteBaitHomeViewProps> = ({
     );
   }, [restaurants, searchQuery]);
 
+  // Handle promo slide click
+  const handlePromoSlideClick = (slide: BiteBaitPromoSlide) => {
+    if (slide.ctaRestaurantId) {
+      const rest = restaurants.find((r) => r.id === slide.ctaRestaurantId);
+      if (rest) {
+        if (onSelectRestaurant) onSelectRestaurant(rest);
+        onNavigateView('restaurant', { restaurantId: rest.id });
+        return;
+      }
+    }
+    if (slide.ctaCategory) {
+      setSelectedCategory(slide.ctaCategory);
+      const el = document.getElementById('bnb-food-section');
+      if (el) el.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
+
   return (
     <div className="bite-and-bait-scope">
-      {/* Hero Header & Search */}
+      {/* Interactive Multi-Slide Promotional Banner */}
+      <BiteBaitPromoSlider onSlideClick={handlePromoSlideClick} />
+
+      {/* Hero Header & Integrated Search Bar */}
       <BiteBaitHeader
         searchQuery={searchQuery}
         onSearch={setSearchQuery}
@@ -78,7 +109,84 @@ export const BiteBaitHomeView: React.FC<BiteBaitHomeViewProps> = ({
         }}
       />
 
-      {/* Explore Menu Categories */}
+      {/* Quick Action Navigation Bar (Offers, Favorites, Notification preferences) */}
+      <div
+        style={{
+          display: 'flex',
+          gap: '8px',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          marginBottom: '20px',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => onNavigateView('offers')}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            background: 'linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)',
+            border: '1px solid #fdba74',
+            padding: '8px 14px',
+            borderRadius: '12px',
+            fontSize: '12.5px',
+            fontWeight: 800,
+            color: '#c2410c',
+            cursor: 'pointer',
+          }}
+        >
+          <span>🔥</span>
+          <span>عروض وخصومات اليوم</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onNavigateView('favorites')}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            background: '#ffffff',
+            border: '1px solid #e2e8f0',
+            padding: '8px 14px',
+            borderRadius: '12px',
+            fontSize: '12.5px',
+            fontWeight: 700,
+            color: '#e11d48',
+            cursor: 'pointer',
+          }}
+        >
+          <span>❤️</span>
+          <span>المفضلة ({favoriteRestaurantIds.length + favoriteFoodIds.length})</span>
+        </button>
+
+        {onOpenNotificationPreferences && (
+          <button
+            type="button"
+            onClick={onOpenNotificationPreferences}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              padding: '8px 14px',
+              borderRadius: '12px',
+              fontSize: '12px',
+              fontWeight: 700,
+              color: '#475569',
+              cursor: 'pointer',
+              marginRight: 'auto',
+            }}
+          >
+            <span>🔔</span>
+            <span>تفضيلات الإشعارات</span>
+          </button>
+        )}
+      </div>
+
+      {/* Explore Menu Categories Carousel */}
       <BiteBaitExploreMenu
         categories={categories}
         selectedCategory={selectedCategory}
@@ -95,6 +203,8 @@ export const BiteBaitHomeView: React.FC<BiteBaitHomeViewProps> = ({
             onNavigateView('restaurant', { restaurantId: r.id });
           }}
           onViewAll={() => onNavigateView('restaurants')}
+          favoriteRestaurantIds={favoriteRestaurantIds}
+          onToggleFavorite={onToggleFavoriteRestaurant}
         />
       )}
 
@@ -110,6 +220,8 @@ export const BiteBaitHomeView: React.FC<BiteBaitHomeViewProps> = ({
               : `أشهى أطباق ${selectedCategory}`
           }
           cartQuantities={cartQuantities}
+          favoriteFoodIds={favoriteFoodIds}
+          onToggleFavorite={onToggleFavoriteFood}
           onAddToCart={onAddToCart}
           onRemoveFromCart={onRemoveFromCart}
           onOpenDetails={onOpenItemDetails}

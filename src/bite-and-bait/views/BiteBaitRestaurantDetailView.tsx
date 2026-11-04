@@ -11,6 +11,10 @@ interface BiteBaitRestaurantDetailViewProps {
   cartCount: number;
   cartTotal: number;
   cartQuantities?: Record<string, number>;
+  favoriteFoodIds?: string[];
+  isRestaurantFavorite?: boolean;
+  onToggleFavoriteRestaurant?: (restaurantId: string) => void;
+  onToggleFavoriteFood?: (foodId: string) => void;
   onNavigateBack: () => void;
   onOpenCart: () => void;
   onAddToCart?: (item: MenuItem) => void;
@@ -24,6 +28,10 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
   cartCount,
   cartTotal,
   cartQuantities = {},
+  favoriteFoodIds = [],
+  isRestaurantFavorite = false,
+  onToggleFavoriteRestaurant,
+  onToggleFavoriteFood,
   onNavigateBack,
   onOpenCart,
   onAddToCart,
@@ -62,7 +70,7 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
   return (
     <div className="bite-and-bait-scope">
       {/* Back Button */}
-      <div style={{ marginBottom: '14px' }}>
+      <div style={{ marginBottom: '14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <button
           type="button"
           onClick={onNavigateBack}
@@ -83,6 +91,28 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
           <span>→</span>
           <span>العودة لقائمة المطاعم</span>
         </button>
+
+        {onToggleFavoriteRestaurant && (
+          <button
+            type="button"
+            onClick={() => onToggleFavoriteRestaurant(restaurant.id)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              background: '#ffffff',
+              border: '1px solid #e2e8f0',
+              padding: '7px 14px',
+              borderRadius: '10px',
+              fontSize: '12px',
+              fontWeight: 700,
+              color: isRestaurantFavorite ? '#e11d48' : '#64748b',
+              cursor: 'pointer',
+            }}
+          >
+            <span>{isRestaurantFavorite ? '❤️ في المفضلة' : '🤍 إضافة للمفضلة'}</span>
+          </button>
+        )}
       </div>
 
       {/* Restaurant Header Banner Card */}
@@ -96,7 +126,7 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
           marginBottom: '24px',
         }}
       >
-        <div style={{ position: 'relative', width: '100%', height: '180px', background: '#0f172a' }}>
+        <div style={{ position: 'relative', width: '100%', height: '190px', background: '#0f172a' }}>
           <img
             src={banner}
             alt={restaurant.name}
@@ -105,7 +135,7 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
               (e.currentTarget as HTMLImageElement).src = biteBaitAssets.placeholder;
             }}
           />
-          <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(15,23,42,0.85) 0%, transparent 70%)' }} />
+          <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(15,23,42,0.88) 0%, transparent 65%)' }} />
 
           <div style={{ position: 'absolute', bottom: '16px', right: '20px', left: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', color: 'white' }}>
             <div>
@@ -120,7 +150,7 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
                 />
               </div>
               <p style={{ fontSize: '12.5px', color: '#cbd5e1', margin: '4px 0 0' }}>
-                📍 {restaurant.address || 'القاهرة'}
+                📍 {restaurant.address || 'القاهرة'} • 🕒 {restaurant.openingHours || '10:00 ص - 01:00 ص'}
               </p>
             </div>
 
@@ -157,6 +187,11 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
             <b style={{ color: restaurant.isOpen ? '#16a34a' : '#dc2626' }}>
               {restaurant.isOpen ? 'مفتوح ويستقبل الطلبات 🟢' : 'مغلق حالياً 🔴'}
             </b>
+            {!restaurant.isOpen && restaurant.nextOpeningTime && (
+              <span style={{ marginRight: '6px', color: '#92400e', fontWeight: 700 }}>
+                (يفتح: {restaurant.nextOpeningTime})
+              </span>
+            )}
           </span>
         </div>
       </div>
@@ -228,6 +263,8 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
         items={filteredItems}
         title={selectedCategory === 'All' ? 'قائمة الطعام' : selectedCategory}
         cartQuantities={cartQuantities}
+        favoriteFoodIds={favoriteFoodIds}
+        onToggleFavorite={onToggleFavoriteFood}
         onAddToCart={onAddToCart}
         onRemoveFromCart={onRemoveFromCart}
         onOpenDetails={onOpenItemDetails}

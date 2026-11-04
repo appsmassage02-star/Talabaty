@@ -1,7 +1,6 @@
 import React from 'react';
 import type { MenuItem } from '../types';
 import { biteBaitAssets } from '../assets';
-import { BiteBaitStarRating } from './BiteBaitStarRating';
 
 interface BiteBaitFoodCardProps {
   item: MenuItem;
@@ -9,6 +8,8 @@ interface BiteBaitFoodCardProps {
   onAddToCart?: (item: MenuItem) => void;
   onRemoveFromCart?: (item: MenuItem) => void;
   onOpenDetails?: (item: MenuItem) => void;
+  isFavorite?: boolean;
+  onToggleFavorite?: (itemId: string) => void;
 }
 
 export const BiteBaitFoodCard: React.FC<BiteBaitFoodCardProps> = ({
@@ -17,11 +18,20 @@ export const BiteBaitFoodCard: React.FC<BiteBaitFoodCardProps> = ({
   onAddToCart,
   onRemoveFromCart,
   onOpenDetails,
+  isFavorite = false,
+  onToggleFavorite,
 }) => {
   const imageUrl = item.imageUrl || biteBaitAssets.placeholder;
 
   return (
-    <div className="bnb-food-card">
+    <div
+      className="bnb-food-card"
+      style={{
+        opacity: item.isAvailable ? 1 : 0.75,
+        filter: item.isAvailable ? 'none' : 'grayscale(20%)',
+        position: 'relative',
+      }}
+    >
       {/* Food Image with Floating Badge & Controls */}
       <div
         className="bnb-food-img-wrap"
@@ -38,67 +48,147 @@ export const BiteBaitFoodCard: React.FC<BiteBaitFoodCardProps> = ({
           }}
         />
 
+        {/* Favorite Heart Button */}
+        {onToggleFavorite && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleFavorite(item.id);
+            }}
+            aria-label={isFavorite ? 'إزالة من المفضلة' : 'إضافة للمفضلة'}
+            style={{
+              position: 'absolute',
+              top: '8px',
+              left: '8px',
+              zIndex: 3,
+              width: '28px',
+              height: '28px',
+              borderRadius: '50%',
+              background: 'rgba(255, 255, 255, 0.9)',
+              border: 'none',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.15)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            {isFavorite ? '❤️' : '🤍'}
+          </button>
+        )}
+
+        {/* Unavailable overlay badge */}
+        {!item.isAvailable && (
+          <span
+            style={{
+              position: 'absolute',
+              top: '8px',
+              right: '8px',
+              background: '#dc2626',
+              color: '#ffffff',
+              fontSize: '11px',
+              fontWeight: 800,
+              padding: '3px 8px',
+              borderRadius: '6px',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+              zIndex: 2,
+            }}
+          >
+            غير متوفر حالياً 🚫
+          </span>
+        )}
+
         {/* Popular / Offer Badge */}
-        {item.isPopular && (
+        {item.isAvailable && item.isPopular && (
           <span className="bnb-food-badge">
             الأكثر طلباً ⭐
           </span>
         )}
-        {item.isOffer && (
+        {item.isAvailable && item.isOffer && (
           <span className="bnb-food-badge" style={{ background: '#fee2e2', color: '#dc2626', borderColor: '#fca5a5' }}>
             عرض خاص 🔥
           </span>
         )}
 
         {/* Add / Counter Controls Overlay */}
-        {quantityInCart === 0 ? (
-          <button
-            type="button"
-            className="bnb-add-circle"
-            title="إضافة للسلة"
-            onClick={(e) => {
-              e.stopPropagation();
-              onAddToCart && onAddToCart(item);
-            }}
-          >
-            <img
-              src={biteBaitAssets.add_icon_white}
-              alt="إضافة"
-              style={{ width: '16px', height: '16px' }}
-            />
-          </button>
+        {item.isAvailable ? (
+          quantityInCart === 0 ? (
+            <button
+              type="button"
+              className="bnb-add-circle"
+              title="إضافة للسلة"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (item.optionGroups && item.optionGroups.length > 0 && onOpenDetails) {
+                  onOpenDetails(item);
+                } else if (onAddToCart) {
+                  onAddToCart(item);
+                }
+              }}
+            >
+              <img
+                src={biteBaitAssets.add_icon_white}
+                alt="إضافة"
+                style={{ width: '16px', height: '16px' }}
+              />
+            </button>
+          ) : (
+            <div
+              className="bnb-counter-pill"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="bnb-counter-btn"
+                title="إنقاص"
+                onClick={() => onRemoveFromCart && onRemoveFromCart(item)}
+              >
+                <img
+                  src={biteBaitAssets.remove_icon_red}
+                  alt="إنقاص"
+                  style={{ width: '18px', height: '18px' }}
+                />
+              </button>
+              <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a', minWidth: '16px', textAlign: 'center' }}>
+                {quantityInCart}
+              </span>
+              <button
+                type="button"
+                className="bnb-counter-btn"
+                title="زيادة"
+                onClick={() => {
+                  if (item.optionGroups && item.optionGroups.length > 0 && onOpenDetails) {
+                    onOpenDetails(item);
+                  } else if (onAddToCart) {
+                    onAddToCart(item);
+                  }
+                }}
+              >
+                <img
+                  src={biteBaitAssets.add_icon_green}
+                  alt="زيادة"
+                  style={{ width: '18px', height: '18px' }}
+                />
+              </button>
+            </div>
+          )
         ) : (
           <div
-            className="bnb-counter-pill"
-            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'absolute',
+              bottom: '10px',
+              left: '10px',
+              background: '#94a3b8',
+              color: '#ffffff',
+              fontSize: '11px',
+              fontWeight: 700,
+              padding: '4px 10px',
+              borderRadius: '50px',
+            }}
           >
-            <button
-              type="button"
-              className="bnb-counter-btn"
-              title="إنقاص"
-              onClick={() => onRemoveFromCart && onRemoveFromCart(item)}
-            >
-              <img
-                src={biteBaitAssets.remove_icon_red}
-                alt="إنقاص"
-                style={{ width: '18px', height: '18px' }}
-              />
-            </button>
-            <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a', minWidth: '16px', textAlign: 'center' }}>
-              {quantityInCart}
-            </span>
-            <button
-              type="button"
-              className="bnb-counter-btn"
-              title="زيادة"
-              onClick={() => onAddToCart && onAddToCart(item)}
-            >
-              <img
-                src={biteBaitAssets.add_icon_green}
-                alt="زيادة"
-                style={{ width: '18px', height: '18px' }}
-              />
-            </button>
+            غير متاح
           </div>
         )}
       </div>
@@ -142,14 +232,14 @@ export const BiteBaitFoodCard: React.FC<BiteBaitFoodCardProps> = ({
             <span
               style={{
                 fontSize: '10.5px',
-                color: '#f59e0b',
+                color: '#d97706',
                 background: '#fef3c7',
-                padding: '2px 6px',
+                padding: '2px 8px',
                 borderRadius: '6px',
                 fontWeight: 700,
               }}
             >
-              خيارات متوفرة
+              خيارات وأحجام ⚙️
             </span>
           )}
         </div>

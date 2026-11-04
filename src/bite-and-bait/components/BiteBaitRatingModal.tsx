@@ -17,8 +17,8 @@ export const BiteBaitRatingModal: React.FC<BiteBaitRatingModalProps> = ({
   onSubmitRating,
   isSubmitting = false,
 }) => {
-  const [rating, setRating] = useState<number>(5);
-  const [reviewText, setReviewText] = useState<string>('');
+  const [restaurantRating, setRestaurantRating] = useState<number>(5);
+  const [driverRating, setDriverRating] = useState<number>(5);
 
   if (!isOpen) return null;
 
@@ -27,8 +27,8 @@ export const BiteBaitRatingModal: React.FC<BiteBaitRatingModalProps> = ({
     onSubmitRating({
       orderId: order.id,
       restaurantId: order.restaurantId,
-      rating,
-      reviewText: reviewText.trim() || undefined,
+      restaurantRating,
+      driverRating,
     });
   };
 
@@ -37,21 +37,22 @@ export const BiteBaitRatingModal: React.FC<BiteBaitRatingModalProps> = ({
       <div
         className="bnb-modal-box"
         onClick={(e) => e.stopPropagation()}
-        style={{ padding: '24px' }}
+        style={{ padding: '24px', maxWidth: '440px' }}
       >
         {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
           <div>
-            <h3 style={{ fontSize: '18px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
-              تقييم الطلب من {order.restaurantName}
+            <h3 style={{ fontSize: '17px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
+              تقييم الطلب بالنجوم ⭐
             </h3>
-            <span style={{ fontSize: '12px', color: '#64748b' }}>
-              طلب رقم #{order.orderNumber || order.id.slice(0, 8)}
+            <span style={{ fontSize: '11.5px', color: '#64748b' }}>
+              طلب رقم #{order.invoiceNumber || order.id.slice(0, 8)} • {order.restaurantName}
             </span>
           </div>
           <button
             type="button"
             onClick={onClose}
+            aria-label="إغلاق"
             style={{
               border: 'none',
               background: '#f1f5f9',
@@ -67,52 +68,80 @@ export const BiteBaitRatingModal: React.FC<BiteBaitRatingModalProps> = ({
           </button>
         </div>
 
-        {/* Rating Stars */}
-        <div style={{ textAlign: 'center', margin: '20px 0' }}>
-          <p style={{ fontSize: '13px', color: '#475569', marginBottom: '10px', fontWeight: 600 }}>
-            كيف كانت تجربتك مع هذا المطعم؟
+        {/* Section 1: Restaurant Rating (Strictly stars only, no text reviews) */}
+        <div
+          style={{
+            background: '#f8fafc',
+            borderRadius: '16px',
+            padding: '16px',
+            border: '1px solid #e2e8f0',
+            marginBottom: '14px',
+            textAlign: 'center',
+          }}
+        >
+          <div style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a', marginBottom: '4px' }}>
+            🏪 تقييم المطعم وجودة الطعام
+          </div>
+          <p style={{ fontSize: '11.5px', color: '#64748b', margin: '0 0 10px' }}>
+            حدد تقييمك لمطعم {order.restaurantName}
           </p>
+
           <BiteBaitStarRating
-            rating={rating}
+            rating={restaurantRating}
             size="lg"
             interactive
-            onRatingChange={(r) => setRating(r)}
+            onRatingChange={(r) => setRestaurantRating(r)}
           />
-          <div style={{ fontSize: '13px', fontWeight: 800, color: '#d97706', marginTop: '6px' }}>
-            {rating === 5
+
+          <div style={{ fontSize: '12px', fontWeight: 800, color: '#d97706', marginTop: '6px' }}>
+            {restaurantRating === 5
               ? 'ممتاز جداً 🌟'
-              : rating === 4
+              : restaurantRating === 4
               ? 'جيد جداً 👍'
-              : rating === 3
+              : restaurantRating === 3
               ? 'متوسط 😐'
-              : rating === 2
-              ? 'غير راضٍ 👎'
-              : 'سيء 😞'}
+              : restaurantRating === 2
+              ? 'دون المستوى 👎'
+              : 'تجربة سيئة 😞'}
           </div>
         </div>
 
-        {/* Review Notes */}
-        <div style={{ marginBottom: '20px' }}>
-          <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>
-            ملاحظاتك الإضافية (اختياري)
-          </label>
-          <textarea
-            rows={3}
-            value={reviewText}
-            onChange={(e) => setReviewText(e.target.value)}
-            placeholder="اكتب رأيك في جودة الوجبة، سرعة التوصيل، أو التغليف..."
-            style={{
-              width: '100%',
-              padding: '10px 12px',
-              borderRadius: '12px',
-              border: '1.5px solid #e2e8f0',
-              fontSize: '13px',
-              outline: 'none',
-              boxSizing: 'border-box',
-              resize: 'none',
-              fontFamily: 'inherit',
-            }}
+        {/* Section 2: Delivery Driver Rating (Strictly stars only) */}
+        <div
+          style={{
+            background: '#f8fafc',
+            borderRadius: '16px',
+            padding: '16px',
+            border: '1px solid #e2e8f0',
+            marginBottom: '20px',
+            textAlign: 'center',
+          }}
+        >
+          <div style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a', marginBottom: '4px' }}>
+            🛵 تقييم مندوب التوصيل
+          </div>
+          <p style={{ fontSize: '11.5px', color: '#64748b', margin: '0 0 10px' }}>
+            حدد تقييمك لسرعة وتعامل كابتن التوصيل
+          </p>
+
+          <BiteBaitStarRating
+            rating={driverRating}
+            size="lg"
+            interactive
+            onRatingChange={(r) => setDriverRating(r)}
           />
+
+          <div style={{ fontSize: '12px', fontWeight: 800, color: '#16a34a', marginTop: '6px' }}>
+            {driverRating === 5
+              ? 'توصيل سريع وممتاز 🚀'
+              : driverRating === 4
+              ? 'كابتن محترم وسريع 👍'
+              : driverRating === 3
+              ? 'توصيل عادي 😐'
+              : driverRating === 2
+              ? 'تأخر التوصيل 👎'
+              : 'تجربة توصيل سيئة 😞'}
+          </div>
         </div>
 
         {/* Action Buttons */}
@@ -152,7 +181,7 @@ export const BiteBaitRatingModal: React.FC<BiteBaitRatingModalProps> = ({
               boxShadow: '0 4px 12px rgba(245, 158, 11, 0.35)',
             }}
           >
-            {isSubmitting ? 'جاري الإرسال...' : 'إرسال التقييم'}
+            {isSubmitting ? 'جاري التأكيد...' : 'تأكيد التقييم بالنجوم ⭐'}
           </button>
         </div>
       </div>

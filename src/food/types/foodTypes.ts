@@ -73,6 +73,7 @@ export interface Restaurant {
   distanceKm: number;
   isFeatured?: boolean;
   discountBadge?: string;
+  nextOpeningTime?: string;
   menuCategories: string[];
 }
 

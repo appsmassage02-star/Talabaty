@@ -157,6 +157,7 @@ export const PREVIEW_RESTAURANTS: Restaurant[] = [
     minOrderAmount: 75,
     isOpen: false,
     openingHours: '01:00 م - 01:00 ص',
+    nextOpeningTime: 'اليوم الساعة 01:00 ظهراً',
     address: 'ميدان لبنان، المهندسين، الجيزة',
     governorate: 'الجيزة',
     phone: '01512345678',
@@ -166,6 +167,7 @@ export const PREVIEW_RESTAURANTS: Restaurant[] = [
   },
 ];
 
+// Rich options definitions
 export const PREVIEW_FOODS: MenuItem[] = [
   {
     id: 'food_1',
@@ -181,6 +183,31 @@ export const PREVIEW_FOODS: MenuItem[] = [
     isPopular: true,
     isOffer: true,
     preparationTimeMinutes: 30,
+    optionGroups: [
+      {
+        id: 'opt_grp_size_1',
+        name: 'حجم الوجبة والوزن',
+        isRequired: true,
+        minSelection: 1,
+        maxSelection: 1,
+        options: [
+          { id: 'size_half', name: 'نصف كيلو مشكل (أساسي)', price: 0 },
+          { id: 'size_kilo', name: 'كيلو كامل مشكل عائلي', price: 320 },
+        ],
+      },
+      {
+        id: 'opt_grp_addons_1',
+        name: 'إضافات ومقبلات خاصة',
+        isRequired: false,
+        minSelection: 0,
+        maxSelection: 3,
+        options: [
+          { id: 'add_tahina', name: 'طحينة بلدي مضاعفة', price: 15 },
+          { id: 'add_bread', name: '5 أرغفة عيش بلدي ساخن', price: 10 },
+          { id: 'add_rice', name: 'طبق أرز بسمتي بالمكسرات', price: 45 },
+        ],
+      },
+    ],
   },
   {
     id: 'food_2',
@@ -195,6 +222,19 @@ export const PREVIEW_FOODS: MenuItem[] = [
     isAvailable: true,
     isPopular: true,
     preparationTimeMinutes: 25,
+    optionGroups: [
+      {
+        id: 'opt_grp_spiciness',
+        name: 'درجة الشواء والتتبيلة',
+        isRequired: true,
+        minSelection: 1,
+        maxSelection: 1,
+        options: [
+          { id: 'spice_mild', name: 'تتبيلة هادئة معتدلة', price: 0 },
+          { id: 'spice_hot', name: 'تتبيلة حارة سبايسي 🔥', price: 0 },
+        ],
+      },
+    ],
   },
   {
     id: 'food_3',
@@ -208,7 +248,34 @@ export const PREVIEW_FOODS: MenuItem[] = [
     imageUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=600&q=80',
     isAvailable: true,
     isPopular: true,
+    isOffer: true,
     preparationTimeMinutes: 20,
+    optionGroups: [
+      {
+        id: 'opt_grp_pizza_size',
+        name: 'مقاس البيتزا',
+        isRequired: true,
+        minSelection: 1,
+        maxSelection: 1,
+        options: [
+          { id: 'pizza_m', name: 'وسط (28 سم) - عادي', price: 0 },
+          { id: 'pizza_l', name: 'كبير (33 سم)', price: 55 },
+          { id: 'pizza_xl', name: 'عائلي جامبو (38 سم)', price: 95 },
+        ],
+      },
+      {
+        id: 'opt_grp_crust',
+        name: 'نوع الأطراف والجبنة',
+        isRequired: false,
+        minSelection: 0,
+        maxSelection: 2,
+        options: [
+          { id: 'crust_cheese', name: 'أطراف محشوة جبنة موتزاريلا', price: 35 },
+          { id: 'extra_cheese', name: 'جبنة موتزاريلا مضاعفة', price: 30 },
+          { id: 'extra_jalapeno', name: 'قطع هالبينو حار', price: 15 },
+        ],
+      },
+    ],
   },
   {
     id: 'food_4',
@@ -236,6 +303,30 @@ export const PREVIEW_FOODS: MenuItem[] = [
     isPopular: true,
     isOffer: true,
     preparationTimeMinutes: 15,
+    optionGroups: [
+      {
+        id: 'opt_grp_shw_size',
+        name: 'حجم الوجبة العربي',
+        isRequired: true,
+        minSelection: 1,
+        maxSelection: 1,
+        options: [
+          { id: 'shw_normal', name: 'وجبة عربي سوبر دبل (2 ساندوتش)', price: 0 },
+          { id: 'shw_triplet', name: 'وجبة عائلية تربل (3 ساندوتشات)', price: 60 },
+        ],
+      },
+      {
+        id: 'opt_grp_shw_extra',
+        name: 'إضافات الساندوتش',
+        isRequired: false,
+        minSelection: 0,
+        maxSelection: 2,
+        options: [
+          { id: 'extra_garlic', name: 'تومية إضافية سورية', price: 12 },
+          { id: 'extra_fries', name: 'باكت بطاطس مبهرة إضافي', price: 20 },
+        ],
+      },
+    ],
   },
   {
     id: 'food_6',
@@ -261,6 +352,65 @@ export const PREVIEW_FOODS: MenuItem[] = [
     imageUrl: 'https://images.unsplash.com/photo-1551024709-8f23befc6f87?auto=format&fit=crop&w=600&q=80',
     isAvailable: true,
     preparationTimeMinutes: 15,
+  },
+  {
+    id: 'food_unavailable',
+    restaurantId: 'rest_اصيل',
+    restaurantName: 'كبابجي ومطعم الأصيل',
+    category: 'مشويات',
+    name: 'طاجن ريش ضاني بالبصل المكرمل والأرز المعمر',
+    description: 'ريش ضاني بلدية متبلة بماء البصل ومطهوة داخل طاجن فخار بالفرن البلدي.',
+    price: 390,
+    imageUrl: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=600&q=80',
+    isAvailable: false, // Explicitly unavailable for test requirements
+    preparationTimeMinutes: 45,
+  },
+];
+
+export const PREVIEW_PROMO_SLIDES: Array<{
+  id: string;
+  badge: string;
+  title: string;
+  subtitle: string;
+  imageUrl: string;
+  ctaText: string;
+  ctaCategory?: string;
+  ctaRestaurantId?: string;
+  discountTag?: string;
+  backgroundColor: string;
+}> = [
+  {
+    id: 'slide_1',
+    badge: '🔥 عروض بايت آند بيت الحصرية',
+    title: 'خصم 20% على مشويات الأصيل الفاخرة',
+    subtitle: 'استمتع بأشهى كباب وكفتة ضاني على الفحم مع طحينة وعيش بلدي طازج يصلك ساخناً.',
+    imageUrl: 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=1200&q=80',
+    ctaText: 'استعراض مشويات الأصيل',
+    ctaRestaurantId: 'rest_اصيل',
+    discountTag: 'وفر حتى 50 ج.م',
+    backgroundColor: 'linear-gradient(135deg, #7f1d1d 0%, #450a0a 100%)',
+  },
+  {
+    id: 'slide_2',
+    badge: '🍕 بيتزا إيطالية طازجة',
+    title: 'عجينة نابولي الإيطالية على الحطب',
+    subtitle: 'اطلب بيتزا رانش أو ألفريدو باستا بصوص الكريمة الغني وتوصيل سريع لباب منزلك.',
+    imageUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1200&q=80',
+    ctaText: 'اكتشف منيو فينيسيا',
+    ctaRestaurantId: 'rest_روما',
+    discountTag: 'توصيل مجاني اليوم',
+    backgroundColor: 'linear-gradient(135deg, #14532d 0%, #052e16 100%)',
+  },
+  {
+    id: 'slide_3',
+    badge: '⚡ سريع ومقرمش',
+    title: 'وجبات شاورما سيتي الشام العائلية',
+    subtitle: 'شاورما سوري ع الصاج بلحم وفراخ بلدي مع التومية الأصلية والبطاطس المقرمشة.',
+    imageUrl: 'https://images.unsplash.com/photo-1561651823-34feb02250e4?auto=format&fit=crop&w=1200&q=80',
+    ctaText: 'طلب وجبة شاورما',
+    ctaRestaurantId: 'rest_شاورما',
+    discountTag: 'وجبة التوفير',
+    backgroundColor: 'linear-gradient(135deg, #7c2d12 0%, #431407 100%)',
   },
 ];
 

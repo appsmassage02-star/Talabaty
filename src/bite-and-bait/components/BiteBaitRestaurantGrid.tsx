@@ -10,6 +10,8 @@ interface BiteBaitRestaurantGridProps {
   onViewAll?: () => void;
   emptyTitle?: string;
   emptyDescription?: string;
+  favoriteRestaurantIds?: string[];
+  onToggleFavorite?: (restaurantId: string) => void;
 }
 
 export const BiteBaitRestaurantGrid: React.FC<BiteBaitRestaurantGridProps> = ({
@@ -18,7 +20,9 @@ export const BiteBaitRestaurantGrid: React.FC<BiteBaitRestaurantGridProps> = ({
   onSelectRestaurant,
   onViewAll,
   emptyTitle = 'لا توجد مطاعم متاحة حالياً',
-  emptyDescription = 'لم يتم العثور على مطاعم مفعلة في منطقتك حالياً. سيتم ربط مطاعم جديدة قريباً.',
+  emptyDescription = 'لم يتم العثور على مطاعم تطابق شروط البحث أو الفلاتر المختارة.',
+  favoriteRestaurantIds = [],
+  onToggleFavorite,
 }) => {
   return (
     <div style={{ marginBottom: '32px' }}>
@@ -58,6 +62,8 @@ export const BiteBaitRestaurantGrid: React.FC<BiteBaitRestaurantGridProps> = ({
               key={restaurant.id}
               restaurant={restaurant}
               onClick={onSelectRestaurant}
+              isFavorite={favoriteRestaurantIds.includes(restaurant.id)}
+              onToggleFavorite={onToggleFavorite}
             />
           ))}
         </div>
