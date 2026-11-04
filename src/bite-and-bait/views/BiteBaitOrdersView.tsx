@@ -31,59 +31,154 @@ interface BiteBaitOrdersViewProps {
   onCreatePriceChangeProposal?: (proposal: BiteBaitPriceChangeProposal) => void;
 }
 
-const STATUS_CONFIG: Record<
-  FoodOrderStatus,
-  { label: string; color: string; bg: string; stepIndex: number }
+export const DB_ORDER_STATUSES: Record<
+  string,
+  { label: string; color: string; bg: string; stepIndex: number; isCompleted: boolean }
 > = {
+  // Pending variations
+  pending: {
+    label: 'في انتظار المراجعة ⏳',
+    color: '#b45309',
+    bg: '#fef3c7',
+    stepIndex: 1,
+    isCompleted: false,
+  },
+  awaiting_restaurant_confirmation: {
+    label: 'بانتظار تأكيد المطعم ⏳',
+    color: '#b45309',
+    bg: '#fef3c7',
+    stepIndex: 1,
+    isCompleted: false,
+  },
   pending_restaurant_confirmation: {
     label: 'بانتظار تأكيد المطعم ⏳',
     color: '#b45309',
     bg: '#fef3c7',
     stepIndex: 1,
+    isCompleted: false,
+  },
+  // Accepted
+  accepted: {
+    label: 'تم قبول الطلب 👨‍🍳',
+    color: '#1e40af',
+    bg: '#dbeafe',
+    stepIndex: 2,
+    isCompleted: false,
   },
   restaurant_accepted: {
     label: 'تم قبول الطلب وجاري التحضير 👨‍🍳',
     color: '#1e40af',
     bg: '#dbeafe',
     stepIndex: 2,
+    isCompleted: false,
   },
+  // Preparing
   preparing: {
-    label: 'جاري التجهيز في المطبخ 🍳',
+    label: 'جاري تحضير الوجبة بالمطبخ 🍳',
     color: '#6b21a8',
     bg: '#f3e8ff',
     stepIndex: 2,
+    isCompleted: false,
+  },
+  // Ready
+  ready: {
+    label: 'الوجبة جاهزة للاستلام 📦',
+    color: '#0369a1',
+    bg: '#e0f2fe',
+    stepIndex: 2,
+    isCompleted: false,
   },
   ready_for_pickup: {
     label: 'الوجبة جاهزة وبانتظار المندوب 📦',
     color: '#0369a1',
     bg: '#e0f2fe',
     stepIndex: 2,
+    isCompleted: false,
+  },
+  // Driver assigned
+  assigned_to_driver: {
+    label: 'تم إسناد الطلب للمندوب 🛵',
+    color: '#0284c7',
+    bg: '#e0f2fe',
+    stepIndex: 3,
+    isCompleted: false,
+  },
+  // Picked up
+  picked_up: {
+    label: 'استلم المندوب الوجبة 🛵',
+    color: '#c2410c',
+    bg: '#ffedd5',
+    stepIndex: 3,
+    isCompleted: false,
+  },
+  // On the way
+  on_the_way: {
+    label: 'الطلب في الطريق إليك 🛵',
+    color: '#ea580c',
+    bg: '#ffedd5',
+    stepIndex: 3,
+    isCompleted: false,
   },
   out_for_delivery: {
     label: 'في الطريق إليك مع المندوب 🛵',
     color: '#c2410c',
     bg: '#ffedd5',
     stepIndex: 3,
+    isCompleted: false,
   },
+  // Delivered
   delivered: {
     label: 'تم التسليم بنجاح ✅',
     color: '#15803d',
     bg: '#dcfce7',
     stepIndex: 4,
+    isCompleted: true,
   },
-  cancelled: {
-    label: 'تم إلغاء الطلب ❌',
-    color: '#b91c1c',
+  // Rejected
+  rejected: {
+    label: 'اعتذر المطعم عن التنفيذ 🛑',
+    color: '#991b1b',
     bg: '#fee2e2',
     stepIndex: 0,
+    isCompleted: true,
   },
   rejected_by_restaurant: {
     label: 'اعتذر المطعم عن التنفيذ 🛑',
     color: '#991b1b',
     bg: '#fee2e2',
     stepIndex: 0,
+    isCompleted: true,
+  },
+  // Cancelled
+  cancelled: {
+    label: 'تم إلغاء الطلب ❌',
+    color: '#b91c1c',
+    bg: '#fee2e2',
+    stepIndex: 0,
+    isCompleted: true,
   },
 };
+
+export function getOrderStatusConfig(order: BiteBaitFoodOrder): {
+  label: string;
+  color: string;
+  bg: string;
+  stepIndex: number;
+  isCompleted: boolean;
+} {
+  const statusKey = (order.rawStatus || order.orderStatus || '').toLowerCase();
+  if (statusKey && DB_ORDER_STATUSES[statusKey]) {
+    return DB_ORDER_STATUSES[statusKey];
+  }
+  // Unknown statuses: NEVER fallback to pending
+  return {
+    label: `حالة غير محددة: ${order.rawStatus || order.orderStatus || 'غير معروف'}`,
+    color: '#475569',
+    bg: '#f1f5f9',
+    stepIndex: 0,
+    isCompleted: false,
+  };
+}
 
 export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
   orders,
@@ -101,6 +196,14 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
 }) => {
   const [filterType, setFilterType] = useState<'all' | 'active' | 'completed' | 'complaints'>('all');
   const [ratingOrder, setRatingOrder] = useState<BiteBaitFoodOrder | null>(null);
+  const [expandedHistoryIds, setExpandedHistoryIds] = useState<Record<string, boolean>>({});
+
+  const toggleHistory = (orderId: string) => {
+    setExpandedHistoryIds((prev) => ({
+      ...prev,
+      [orderId]: !prev[orderId],
+    }));
+  };
 
   // Modals state
   const [cancellingOrder, setCancellingOrder] = useState<BiteBaitFoodOrder | null>(null);
@@ -119,10 +222,8 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
 
   // Filter orders
   const filteredOrders = orders.filter((o) => {
-    const isCompleted =
-      o.orderStatus === 'delivered' ||
-      o.orderStatus === 'cancelled' ||
-      o.orderStatus === 'rejected_by_restaurant';
+    const statusCfg = getOrderStatusConfig(o);
+    const isCompleted = statusCfg.isCompleted;
 
     if (filterType === 'active') return !isCompleted;
     if (filterType === 'completed') return isCompleted;
@@ -428,12 +529,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               {filteredOrders.map((order) => {
-                const statusConfig = STATUS_CONFIG[order.orderStatus] || {
-                  label: order.orderStatus,
-                  color: '#334155',
-                  bg: '#f1f5f9',
-                  stepIndex: 1,
-                };
+                const statusConfig = getOrderStatusConfig(order);
 
                 const priceProposal = priceChangeProposals[order.id];
                 const cancellationStatus: OrderCancellationStatus = order.cancellationStatus || 'none';
@@ -622,8 +718,8 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                       </div>
                     )}
 
-                    {/* Visual 4-Step Stepper */}
-                    {order.orderStatus !== 'cancelled' && order.orderStatus !== 'rejected_by_restaurant' && (
+                    {/* Visual 4-Step Stepper - only displayed for active non-completed orders with positive stepIndex */}
+                    {!statusConfig.isCompleted && statusConfig.stepIndex > 0 && (
                       <div
                         style={{
                           background: '#fafafa',
@@ -806,6 +902,158 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                             </span>
                           </div>
                         ))}
+                    </div>
+
+                    {/* Delivery Address & Authentic Delivery Details */}
+                    {order.address && (
+                      <div
+                        style={{
+                          background: '#f8fafc',
+                          borderRadius: '10px',
+                          padding: '10px 12px',
+                          fontSize: '11.5px',
+                          color: '#475569',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '4px',
+                          border: '1px solid #f1f5f9',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span>📍</span>
+                          <span>
+                            عنوان التوصيل المسجل:{' '}
+                            <b style={{ color: '#0f172a' }}>
+                              {[order.address.detailedAddress, order.address.area, order.address.markaz, order.address.governorate]
+                                .filter(Boolean)
+                                .join('، ') || 'غير محدد بالتفصيل'}
+                            </b>
+                          </span>
+                          {order.address.phone && (
+                            <span style={{ color: '#64748b', marginRight: '6px' }}>
+                              • هاتف: {order.address.phone}
+                            </span>
+                          )}
+                        </div>
+                        {/* Only display GPS coordinates if genuinely present and non-zero */}
+                        {Boolean(
+                          order.address.latitude &&
+                          order.address.longitude &&
+                          order.address.latitude !== 0 &&
+                          order.address.longitude !== 0
+                        ) && (
+                          <div style={{ fontSize: '10.5px', color: '#0284c7' }}>
+                            إحداثيات الموقع المعتمدة: ({order.address.latitude.toFixed(5)}, {order.address.longitude.toFixed(5)})
+                          </div>
+                        )}
+                        {/* Only display estimated delivery time if non-empty and authentic */}
+                        {Boolean(order.estimatedDeliveryTime && order.estimatedDeliveryTime.trim() !== '') && (
+                          <div style={{ fontSize: '11px', color: '#b45309', fontWeight: 700 }}>
+                            ⏱️ وقت التوصيل المتوقع المسجل: {order.estimatedDeliveryTime}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Status History Timeline from restaurant_order_status_history */}
+                    <div
+                      style={{
+                        borderTop: '1px solid #f1f5f9',
+                        paddingTop: '6px',
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleHistory(order.id)}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#475569',
+                          fontSize: '11.5px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '4px 0',
+                        }}
+                      >
+                        <span>⏱️ سجل حركات الحالة الفعلي ({order.statusHistory?.length || 0})</span>
+                        <span style={{ fontSize: '10px' }}>{expandedHistoryIds[order.id] ? '▲ إخفاء' : '▼ عرض التفاصيل'}</span>
+                      </button>
+
+                      {expandedHistoryIds[order.id] && (
+                        <div
+                          style={{
+                            marginTop: '8px',
+                            padding: '12px 14px',
+                            background: '#f8fafc',
+                            borderRadius: '12px',
+                            border: '1px solid #e2e8f0',
+                          }}
+                        >
+                          {order.statusHistory && order.statusHistory.length > 0 ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              {order.statusHistory.map((h, hIdx) => {
+                                const oldCfg = h.oldStatus ? (DB_ORDER_STATUSES[h.oldStatus.toLowerCase()] || { label: h.oldStatus }) : null;
+                                const newCfg = DB_ORDER_STATUSES[h.newStatus.toLowerCase()] || { label: h.newStatus };
+                                return (
+                                  <div
+                                    key={h.id || hIdx}
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'flex-start',
+                                      gap: '8px',
+                                      fontSize: '11.5px',
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        width: '8px',
+                                        height: '8px',
+                                        borderRadius: '50%',
+                                        background: '#f59e0b',
+                                        marginTop: '4px',
+                                        flexShrink: 0,
+                                      }}
+                                    />
+                                    <div style={{ flex: 1 }}>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                                        <span style={{ fontWeight: 800, color: '#0f172a' }}>
+                                          {oldCfg ? `${oldCfg.label} ← ` : ''}
+                                          {newCfg.label}
+                                        </span>
+                                        <span style={{ color: '#94a3b8', fontSize: '10.5px' }}>
+                                          {new Date(h.createdAt).toLocaleString('ar-EG', {
+                                            month: 'short',
+                                            day: 'numeric',
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                          })}
+                                        </span>
+                                      </div>
+                                      {h.changedBy && (
+                                        <div style={{ color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
+                                          بواسطة: {h.changedBy}
+                                        </div>
+                                      )}
+                                      {h.note && (
+                                        <div style={{ color: '#334155', fontSize: '11px', marginTop: '2px', fontStyle: 'italic' }}>
+                                          ملاحظة: {h.note}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: '11.5px', color: '#64748b', textAlign: 'center' }}>
+                              لا توجد حركات مسجلة في جدول سجل التغييرات لهذا الطلب حتى الآن.
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* Bottom Row: Total & Action Buttons */}

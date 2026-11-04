@@ -440,8 +440,8 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
       const name = rest ? rest.name : 'المطعم';
       triggerNotification(
         exists
-          ? `تمت إزالة ${name} من المفضلة`
-          : `تمت إضافة ${name} إلى المفضلة ❤️`
+          ? `تمت إزالة ${name} من المفضلة (تعديل محلي ومؤقت في مرحلة القراءة فقط)`
+          : `تمت إضافة ${name} إلى المفضلة ❤️ (تعديل محلي ومؤقت في مرحلة القراءة فقط)`
       );
       return updated;
     });
@@ -454,8 +454,8 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
       const updated = exists ? prev.filter((id) => id !== foodId) : [...prev, foodId];
       triggerNotification(
         exists
-          ? 'تمت إزالة الصنف من قائمة الأطباق المفضلة'
-          : 'تمت إضافة الصنف إلى قائمة الأطباق المفضلة ❤️'
+          ? 'تمت إزالة الصنف من قائمة الأطباق المفضلة (تعديل محلي ومؤقت في مرحلة القراءة فقط)'
+          : 'تمت إضافة الصنف إلى قائمة الأطباق المفضلة ❤️ (تعديل محلي ومؤقت في مرحلة القراءة فقط)'
       );
       return updated;
     });
@@ -465,6 +465,11 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   // Cart Actions (React state only)
   // --------------------------------------------------------------------------
   const handleAddToCart = (item: MenuItem, selectedOptions: FoodCartSelectedOption[] = []) => {
+    if (isSectionHardDisabled) {
+      triggerNotification(`القسم غير متاح للطلب حالياً: ${disabledNotice}`);
+      return;
+    }
+
     if (propOnAddToCart) {
       propOnAddToCart(item);
       return;
@@ -705,14 +710,200 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   // --------------------------------------------------------------------------
   const isSectionHardDisabled =
     isSectionDisabled ||
-    (sectionSettings && !sectionSettings.section_enabled);
+    Boolean(settingsError) ||
+    (sectionSettings ? !sectionSettings.section_enabled : false);
 
   const disabledNotice =
     (sectionSettings && sectionSettings.status_message) ||
-    disabledMessage;
+    (settingsError ? `تعذر استرجاع إعدادات القسم: ${settingsError}` : disabledMessage);
+
+  // 1. Explicit Loading State for Section Settings
+  if (isLoadingSettings) {
+    return (
+      <div className="bite-and-bait-scope" style={{ padding: '50px 20px', textAlign: 'center' }}>
+        <div
+          style={{
+            display: 'inline-block',
+            width: '36px',
+            height: '36px',
+            border: '3px solid #f1f5f9',
+            borderTopColor: '#f59e0b',
+            borderRadius: '50%',
+            animation: 'bnbSpin 1s linear infinite',
+          }}
+        />
+        <p style={{ marginTop: '14px', fontSize: '13px', fontWeight: 700, color: '#64748b' }}>
+          جاري فحص إعدادات وتصاريح قسم بايت آند بيت من قاعدة البيانات...
+        </p>
+      </div>
+    );
+  }
+
+  // 2. Explicit Error State with Retry Button (Section strictly disabled on error)
+  if (settingsError) {
+    return (
+      <div className="bite-and-bait-scope" style={{ padding: '30px 20px' }}>
+        <div
+          style={{
+            background: '#fef2f2',
+            border: '1.5px solid #fca5a5',
+            borderRadius: '16px',
+            padding: '24px',
+            textAlign: 'center',
+            margin: '0 auto',
+            maxWidth: '540px',
+          }}
+        >
+          <div style={{ fontSize: '32px', marginBottom: '8px' }}>⚠️</div>
+          <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#991b1b', margin: '0 0 8px' }}>
+            تعذر استرجاع إعدادات قسم بايت آند بيت
+          </h3>
+          <p style={{ fontSize: '12.5px', color: '#7f1d1d', margin: '0 0 16px', lineHeight: 1.5 }}>
+            وفقاً لضوابط السلامة الصارمة، يعتبر القسم معطلاً تلقائياً عند فشل استرجاع الإعدادات من قاعدة البيانات لضمان عدم تنفيذ أي عمليات غير مصرح بها.
+            <br />
+            <span style={{ fontSize: '11px', color: '#b91c1c', marginTop: '6px', display: 'block' }}>
+              تفاصيل الخطأ: {settingsError}
+            </span>
+          </p>
+          <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+            <button
+              type="button"
+              onClick={onBackToAppHome}
+              style={{
+                background: '#ffffff',
+                border: '1px solid #cbd5e1',
+                color: '#475569',
+                padding: '8px 18px',
+                borderRadius: '10px',
+                fontSize: '12.5px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              ← العودة للرئيسية
+            </button>
+            <button
+              type="button"
+              onClick={() => loadSectionSettings()}
+              style={{
+                background: '#dc2626',
+                color: '#ffffff',
+                border: 'none',
+                padding: '8px 20px',
+                borderRadius: '10px',
+                fontSize: '12.5px',
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              إعادة المحاولة 🔄
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Section Visibility: Hidden
+  if (sectionSettings && sectionSettings.section_visibility === 'hidden') {
+    return (
+      <div className="bite-and-bait-scope" style={{ padding: '30px 20px' }}>
+        <div
+          style={{
+            background: '#f8fafc',
+            border: '1.5px solid #cbd5e1',
+            borderRadius: '16px',
+            padding: '24px',
+            textAlign: 'center',
+            margin: '0 auto',
+            maxWidth: '540px',
+          }}
+        >
+          <div style={{ fontSize: '32px', marginBottom: '8px' }}>👁️‍🗨️</div>
+          <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#334155', margin: '0 0 8px' }}>
+            قسم بايت آند بيت مخفي حالياً
+          </h3>
+          <p style={{ fontSize: '12.5px', color: '#64748b', margin: '0 0 16px', lineHeight: 1.5 }}>
+            تم ضبط رؤية هذا القسم على (مخفي) في جدول إعدادات النظام restaurant_section_settings.
+          </p>
+          <button
+            type="button"
+            onClick={onBackToAppHome}
+            style={{
+              background: '#f1f5f9',
+              color: '#0f172a',
+              border: '1px solid #cbd5e1',
+              padding: '8px 18px',
+              borderRadius: '10px',
+              fontSize: '12.5px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            ← العودة للرئيسية
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 4. Section Disabled Display Mode: 'hide'
+  if (isSectionHardDisabled && sectionSettings?.disabled_display_mode === 'hide') {
+    return (
+      <div className="bite-and-bait-scope" style={{ padding: '30px 20px' }}>
+        <div
+          style={{
+            background: '#fef2f2',
+            border: '1.5px solid #fca5a5',
+            borderRadius: '16px',
+            padding: '24px',
+            textAlign: 'center',
+            margin: '0 auto',
+            maxWidth: '540px',
+          }}
+        >
+          <div style={{ fontSize: '32px', marginBottom: '8px' }}>🔒</div>
+          <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#991b1b', margin: '0 0 8px' }}>
+            قسم بايت آند بيت مغلق حالياً
+          </h3>
+          <p style={{ fontSize: '12.5px', color: '#7f1d1d', margin: '0 0 16px', lineHeight: 1.5 }}>
+            {disabledNotice}
+          </p>
+          <button
+            type="button"
+            onClick={onBackToAppHome}
+            style={{
+              background: '#dc2626',
+              color: '#ffffff',
+              border: 'none',
+              padding: '8px 18px',
+              borderRadius: '10px',
+              fontSize: '12.5px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            ← العودة للرئيسية
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Determine Grayscale Mode styling if configured
+  const isGrayscaleMode = Boolean(
+    isSectionHardDisabled && sectionSettings?.disabled_display_mode === 'grayscale'
+  );
 
   return (
-    <div className="bite-and-bait-scope" style={{ position: 'relative', minHeight: '600px' }}>
+    <div
+      className="bite-and-bait-scope"
+      style={{
+        position: 'relative',
+        minHeight: '600px',
+        filter: isGrayscaleMode ? 'grayscale(100%)' : 'none',
+      }}
+    >
       {/* Read-Only Status & Database Integration Banner */}
       <div
         style={{

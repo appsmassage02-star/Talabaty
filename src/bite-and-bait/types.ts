@@ -81,9 +81,23 @@ export interface SpiceConfig {
 export type OrderCancellationStatus = 'none' | 'pending' | 'approved' | 'rejected';
 
 /**
- * Extended food order with cancellation lifecycle and rating data
+ * Status history entry from restaurant_order_status_history
+ */
+export interface BiteBaitOrderStatusHistoryItem {
+  id: string;
+  orderId: string;
+  oldStatus?: string | null;
+  newStatus: string;
+  changedBy?: string | null;
+  note?: string | null;
+  createdAt: string;
+}
+
+/**
+ * Extended food order with cancellation lifecycle, rating data, and authentic database status history
  */
 export interface BiteBaitFoodOrder extends FoodOrder {
+  rawStatus?: string;
   cancellationStatus?: OrderCancellationStatus;
   cancellationReason?: string;
   cancellationRequestedAt?: string;
@@ -91,6 +105,7 @@ export interface BiteBaitFoodOrder extends FoodOrder {
   cancellationReviewNote?: string;
   restaurantRating?: number;
   driverRating?: number;
+  statusHistory?: BiteBaitOrderStatusHistoryItem[];
 }
 
 /**

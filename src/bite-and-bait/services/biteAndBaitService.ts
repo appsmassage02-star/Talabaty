@@ -11,6 +11,7 @@ import type {
   RestaurantCategory,
   RestaurantSectionSettings,
   BiteBaitFoodOrder,
+  BiteBaitOrderStatusHistoryItem,
 } from '../types';
 
 export interface ServiceResult<T> {
@@ -43,18 +44,41 @@ const FALLBACK_RESTAURANT_IMG =
 const FALLBACK_MENU_IMG =
   'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80';
 
-const mapOrderStatus = (status?: string): FoodOrderStatus => {
-  switch (status) {
+/**
+ * Maps database restaurant_orders.status to application domain status.
+ * Covers at least:
+ * - pending
+ * - awaiting_restaurant_confirmation
+ * - accepted
+ * - preparing
+ * - ready
+ * - assigned_to_driver
+ * - picked_up
+ * - on_the_way
+ * - delivered
+ * - rejected
+ * - cancelled
+ *
+ * CRITICAL: Unknown statuses NEVER automatically fallback to pending.
+ */
+export const mapOrderStatus = (status?: string): FoodOrderStatus => {
+  const norm = (status || '').trim().toLowerCase();
+  switch (norm) {
     case 'pending':
+    case 'awaiting_restaurant_confirmation':
+    case 'pending_restaurant_confirmation':
       return 'pending_restaurant_confirmation';
     case 'accepted':
     case 'confirmed':
+    case 'restaurant_accepted':
       return 'restaurant_accepted';
     case 'preparing':
       return 'preparing';
     case 'ready':
     case 'ready_for_pickup':
       return 'ready_for_pickup';
+    case 'assigned_to_driver':
+    case 'picked_up':
     case 'out_for_delivery':
     case 'on_the_way':
       return 'out_for_delivery';
@@ -62,18 +86,23 @@ const mapOrderStatus = (status?: string): FoodOrderStatus => {
     case 'completed':
       return 'delivered';
     case 'rejected':
+    case 'rejected_by_restaurant':
       return 'rejected_by_restaurant';
     case 'cancelled':
       return 'cancelled';
     default:
-      return 'pending_restaurant_confirmation';
+      // Unknown statuses must be distinct and never impersonate pending orders
+      return 'unknown' as FoodOrderStatus;
   }
 };
 
-const mapDeliveryStatus = (status?: string): FoodDeliveryStatus => {
-  switch (status) {
+export const mapDeliveryStatus = (status?: string): FoodDeliveryStatus => {
+  const norm = (status || '').trim().toLowerCase();
+  switch (norm) {
+    case 'assigned_to_driver':
     case 'driver_assigned':
       return 'driver_assigned';
+    case 'picked_up':
     case 'driver_at_restaurant':
       return 'driver_at_restaurant';
     case 'out_for_delivery':
@@ -81,9 +110,15 @@ const mapDeliveryStatus = (status?: string): FoodDeliveryStatus => {
       return 'on_the_way';
     case 'arrived_customer':
       return 'arrived_customer';
-    case 'completed':
     case 'delivered':
+    case 'completed':
       return 'completed';
+    case 'pending':
+    case 'awaiting_restaurant_confirmation':
+    case 'accepted':
+    case 'preparing':
+    case 'ready':
+      return 'waiting_dispatch';
     default:
       return 'waiting_dispatch';
   }
@@ -223,6 +258,7 @@ export const biteAndBaitService = {
 
   // --------------------------------------------------------------------------
   // 3. Read Restaurants (restaurants, restaurant_categories, restaurant_category_links, restaurant_menu_categories)
+  // Checks all parallel queries strictly and does not ignore errors
   // --------------------------------------------------------------------------
   async getRestaurants(filters: RestaurantFilterParams = {}): Promise<ServiceResult<Restaurant[]>> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -275,7 +311,7 @@ export const biteAndBaitService = {
         };
       }
 
-      // 3.2 Fetch category links and categories in parallel
+      // 3.2 Fetch category links and categories in parallel and strictly verify all results
       const [linksRes, categoriesRes, menuCatsRes] = await Promise.all([
         supabase.from('restaurant_category_links').select('restaurant_id, category_id'),
         supabase.from('restaurant_categories').select('id, name, is_active').eq('is_active', true),
@@ -285,6 +321,33 @@ export const biteAndBaitService = {
           .eq('is_active', true)
           .order('sort_order', { ascending: true }),
       ]);
+
+      if (linksRes.error) {
+        return {
+          success: false,
+          data: [],
+          error: `خطأ في قراءة روابط تصنيفات المطاعم (restaurant_category_links): ${linksRes.error.message}`,
+          errorCode: linksRes.error.code,
+        };
+      }
+
+      if (categoriesRes.error) {
+        return {
+          success: false,
+          data: [],
+          error: `خطأ في قراءة تصنيفات المطاعم (restaurant_categories): ${categoriesRes.error.message}`,
+          errorCode: categoriesRes.error.code,
+        };
+      }
+
+      if (menuCatsRes.error) {
+        return {
+          success: false,
+          data: [],
+          error: `خطأ في قراءة تصنيفات قوائم المطاعم (restaurant_menu_categories): ${menuCatsRes.error.message}`,
+          errorCode: menuCatsRes.error.code,
+        };
+      }
 
       const catMap = new Map<string, string>();
       (categoriesRes.data || []).forEach((c: any) => {
@@ -323,9 +386,9 @@ export const biteAndBaitService = {
           logoUrl: img,
           bannerUrl: img,
           cuisineTypes,
-          rating: 0, // Zero invented ratings: actual rating not in DB
-          reviewsCount: 0, // Zero invented reviews: actual reviews not in DB
-          estimatedPrepTimeMinutes: 0, // Zero invented prep time: actual prep time not in DB
+          rating: 0, // Zero invented ratings
+          reviewsCount: 0, // Zero invented reviews
+          estimatedPrepTimeMinutes: 0, // Zero invented prep time
           deliveryFee,
           minOrderAmount: 0,
           isOpen,
@@ -334,7 +397,7 @@ export const biteAndBaitService = {
           governorate: '',
           phone: r.phone || '',
           deliveryChannel: 'direct_system',
-          distanceKm: 0, // Zero invented distance: actual distance not in DB
+          distanceKm: 0, // Zero invented distance
           menuCategories,
         };
       });
@@ -419,6 +482,24 @@ export const biteAndBaitService = {
           .order('sort_order', { ascending: true }),
       ]);
 
+      if (linksRes.error) {
+        return {
+          success: false,
+          data: null,
+          error: `خطأ في قراءة روابط تصنيفات المطعم: ${linksRes.error.message}`,
+          errorCode: linksRes.error.code,
+        };
+      }
+
+      if (menuCatsRes.error) {
+        return {
+          success: false,
+          data: null,
+          error: `خطأ في قراءة أقسام قائمة المطعم: ${menuCatsRes.error.message}`,
+          errorCode: menuCatsRes.error.code,
+        };
+      }
+
       const cuisineTypes = (linksRes.data || [])
         .map((l: any) => l.restaurant_categories?.name)
         .filter(Boolean);
@@ -457,7 +538,7 @@ export const biteAndBaitService = {
 
   // --------------------------------------------------------------------------
   // 5. Read Restaurant Menu ON-DEMAND (restaurant_menu_categories, restaurant_menu_items, restaurant_item_options, restaurant_item_option_values)
-  // Strictly loads only for the requested restaurant
+  // Strictly loads only for the requested restaurant and validates options queries
   // --------------------------------------------------------------------------
   async getRestaurantMenu(restaurantId: string): Promise<ServiceResult<MenuItem[]>> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -536,7 +617,12 @@ export const biteAndBaitService = {
         .order('sort_order', { ascending: true });
 
       if (optError) {
-        console.warn('[biteAndBaitService] Warning fetching options:', optError.message);
+        return {
+          success: false,
+          data: [],
+          error: `خطأ في قراءة خيارات الأصناف (restaurant_item_options): ${optError.message}`,
+          errorCode: optError.code,
+        };
       }
 
       const optionIds = (optionsData || []).map((o: any) => o.id);
@@ -551,10 +637,14 @@ export const biteAndBaitService = {
           .order('sort_order', { ascending: true });
 
         if (valError) {
-          console.warn('[biteAndBaitService] Warning fetching option values:', valError.message);
-        } else {
-          optionValuesData = vals || [];
+          return {
+            success: false,
+            data: [],
+            error: `خطأ في قراءة قيم خيارات الأصناف (restaurant_item_option_values): ${valError.message}`,
+            errorCode: valError.code,
+          };
         }
+        optionValuesData = vals || [];
       }
 
       // 5.4 Build options map: option_id -> MenuOptionItem[]
@@ -625,6 +715,7 @@ export const biteAndBaitService = {
 
   // --------------------------------------------------------------------------
   // 6. Read Offers (restaurant_offers)
+  // Checks restaurant join error strictly
   // --------------------------------------------------------------------------
   async getOffers(restaurantId?: string): Promise<ServiceResult<FoodOffer[]>> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -683,12 +774,21 @@ export const biteAndBaitService = {
         return { success: true, data: [] };
       }
 
-      // Fetch restaurant names for display
+      // Fetch restaurant names for display and strictly verify query error
       const restIds = Array.from(new Set(validOffers.map((o: any) => o.restaurant_id)));
-      const { data: restList } = await supabase
+      const { data: restList, error: restListErr } = await supabase
         .from('restaurants')
         .select('id, name, image_url')
         .in('id', restIds);
+
+      if (restListErr) {
+        return {
+          success: false,
+          data: [],
+          error: `خطأ في استرجاع بيانات المطاعم المرتبطة بالعروض (restaurants): ${restListErr.message}`,
+          errorCode: restListErr.code,
+        };
+      }
 
       const restNameMap = new Map<string, { name: string; img: string }>();
       (restList || []).forEach((r: any) => {
@@ -822,6 +922,7 @@ export const biteAndBaitService = {
 
   // --------------------------------------------------------------------------
   // 9. Read Customer Addresses (household_addresses)
+  // Preserves genuine coordinates and does NOT invent 0,0 locations
   // --------------------------------------------------------------------------
   async getHouseholdAddresses(
     providedHouseholdId?: string,
@@ -864,18 +965,36 @@ export const biteAndBaitService = {
         };
       }
 
-      const addresses: FoodCustomerAddress[] = (data || []).map((row: any) => ({
-        id: row.id,
-        label: row.address_label || 'عنوان التوصيل',
-        recipientName: row.full_name || '',
-        phone: row.phone || '',
-        governorate: row.governorate_name || '',
-        markaz: row.markaz_name || '',
-        detailedAddress: row.detailed_address || '',
-        latitude: row.latitude !== null && row.latitude !== undefined ? Number(row.latitude) : 0,
-        longitude: row.longitude !== null && row.longitude !== undefined ? Number(row.longitude) : 0,
-        isDefault: Boolean(row.is_default),
-      }));
+      const addresses: FoodCustomerAddress[] = (data || []).map((row: any) => {
+        // Do NOT convert missing GPS coordinates into 0,0
+        const lat =
+          row.latitude !== null &&
+          row.latitude !== undefined &&
+          !isNaN(Number(row.latitude)) &&
+          Number(row.latitude) !== 0
+            ? Number(row.latitude)
+            : undefined;
+        const lng =
+          row.longitude !== null &&
+          row.longitude !== undefined &&
+          !isNaN(Number(row.longitude)) &&
+          Number(row.longitude) !== 0
+            ? Number(row.longitude)
+            : undefined;
+
+        return {
+          id: row.id,
+          label: row.address_label || 'عنوان التوصيل',
+          recipientName: row.full_name || '',
+          phone: row.phone || '',
+          governorate: row.governorate_name || '',
+          markaz: row.markaz_name || '',
+          detailedAddress: row.detailed_address || '',
+          latitude: lat as number,
+          longitude: lng as number,
+          isDefault: Boolean(row.is_default),
+        };
+      });
 
       return {
         success: true,
@@ -892,6 +1011,7 @@ export const biteAndBaitService = {
 
   // --------------------------------------------------------------------------
   // 10. Read Customer Orders (restaurant_orders, restaurant_order_items, restaurant_order_item_options, restaurant_order_status_history)
+  // Strictly attaches statusHistory to orders and does not invent delivery times or GPS
   // --------------------------------------------------------------------------
   async getCustomerOrders(providedUserId?: string): Promise<ServiceResult<BiteBaitFoodOrder[]>> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -963,7 +1083,7 @@ export const biteAndBaitService = {
         };
       }
 
-      // Fetch status history for all customer orders
+      // Fetch status history for all customer orders and strictly verify error
       const orderIds = dbOrders.map((o: any) => o.id);
       let historyMap = new Map<string, RawDbOrderStatusHistory[]>();
 
@@ -975,8 +1095,15 @@ export const biteAndBaitService = {
           .order('created_at', { ascending: true });
 
         if (histErr) {
-          console.warn('[biteAndBaitService] Warning fetching status history:', histErr.message);
-        } else if (histData) {
+          return {
+            success: false,
+            data: [],
+            error: `خطأ في قراءة سجل حالات الطلبات (restaurant_order_status_history): ${histErr.message}`,
+            errorCode: histErr.code,
+          };
+        }
+
+        if (histData) {
           histData.forEach((h: RawDbOrderStatusHistory) => {
             const list = historyMap.get(h.order_id) || [];
             list.push(h);
@@ -1008,6 +1135,34 @@ export const biteAndBaitService = {
           cancellationStatus = 'approved';
         }
 
+        // Do NOT convert missing GPS coordinates to 0,0
+        const lat =
+          o.delivery_latitude !== null &&
+          o.delivery_latitude !== undefined &&
+          !isNaN(Number(o.delivery_latitude)) &&
+          Number(o.delivery_latitude) !== 0
+            ? Number(o.delivery_latitude)
+            : undefined;
+        const lng =
+          o.delivery_longitude !== null &&
+          o.delivery_longitude !== undefined &&
+          !isNaN(Number(o.delivery_longitude)) &&
+          Number(o.delivery_longitude) !== 0
+            ? Number(o.delivery_longitude)
+            : undefined;
+
+        // Map status history from restaurant_order_status_history
+        const rawHistory = historyMap.get(o.id) || [];
+        const statusHistory: BiteBaitOrderStatusHistoryItem[] = rawHistory.map((h) => ({
+          id: h.id,
+          orderId: h.order_id,
+          oldStatus: h.old_status,
+          newStatus: h.new_status,
+          changedBy: h.changed_by,
+          note: h.note,
+          createdAt: h.created_at,
+        }));
+
         return {
           id: o.id,
           restaurantId: o.restaurant_id,
@@ -1024,8 +1179,8 @@ export const biteAndBaitService = {
             governorate: o.delivery_governorate_name_snapshot || '',
             markaz: o.delivery_center_name_snapshot || '',
             detailedAddress: o.delivery_address || '',
-            latitude: Number(o.delivery_latitude) || 0,
-            longitude: Number(o.delivery_longitude) || 0,
+            latitude: lat as number,
+            longitude: lng as number,
             isDefault: false,
           },
           items,
@@ -1042,9 +1197,11 @@ export const biteAndBaitService = {
           invoiceNumber: o.order_number ? `ORD-${o.order_number}` : undefined,
           createdAt: o.created_at,
           updatedAt: o.updated_at || o.created_at,
-          estimatedDeliveryTime: 'خلال 35-45 دقيقة',
+          estimatedDeliveryTime: '', // Zero invented delivery time
+          rawStatus: o.status || '',
           cancellationStatus,
           cancellationReason: o.cancellation_reason || undefined,
+          statusHistory,
         };
       });
 

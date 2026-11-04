@@ -97,6 +97,25 @@ export const BiteBaitFavoritesView: React.FC<BiteBaitFavoritesViewProps> = ({
         </div>
       </div>
 
+      {/* Read-Only Status & Local Modification Notice */}
+      <div
+        style={{
+          background: '#eff6ff',
+          border: '1.5px solid #bfdbfe',
+          borderRadius: '14px',
+          padding: '12px 16px',
+          marginBottom: '18px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+        }}
+      >
+        <span style={{ fontSize: '20px' }}>ℹ️</span>
+        <div style={{ fontSize: '12px', color: '#1e40af', lineHeight: 1.5 }}>
+          <b>تنبيه مرحلة القراءة فقط:</b> يتم استرجاع قائمة المفضلة الحالية من جداول قاعدة البيانات الفعلية. بينما أي تعديل بالضغط على علامة القلب (إضافة أو إزالة) هو تعديل محلي ومؤقت في جلسة العمل الحالية، ولن يُحفظ في Supabase حتى تفعيل تصاريح الكتابة في المراحل اللاحقة.
+        </div>
+      </div>
+
       {/* Render Active Tab */}
       {activeTab === 'restaurants' && (
         <div>
