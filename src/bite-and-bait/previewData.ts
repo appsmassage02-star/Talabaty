@@ -414,7 +414,7 @@ export const PREVIEW_PROMO_SLIDES: Array<{
   },
 ];
 
-export const PREVIEW_ORDERS: FoodOrder[] = [
+export const PREVIEW_ORDERS: Array<import('./types').BiteBaitFoodOrder> = [
   {
     id: 'demo_ord_1',
     restaurantId: 'rest_اصيل',
@@ -436,6 +436,7 @@ export const PREVIEW_ORDERS: FoodOrder[] = [
     createdAt: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
     updatedAt: new Date().toISOString(),
     estimatedDeliveryTime: '30 دقيقة',
+    cancellationStatus: 'none',
     items: [
       {
         menuItemId: 'food_1',
@@ -467,6 +468,7 @@ export const PREVIEW_ORDERS: FoodOrder[] = [
     createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     updatedAt: new Date().toISOString(),
     estimatedDeliveryTime: '25 دقيقة',
+    cancellationStatus: 'none',
     items: [
       {
         menuItemId: 'food_3',
@@ -474,6 +476,38 @@ export const PREVIEW_ORDERS: FoodOrder[] = [
         unitPrice: 195,
         quantity: 1,
         totalPrice: 195,
+      },
+    ],
+  },
+  {
+    id: 'demo_ord_3',
+    restaurantId: 'rest_شاورما',
+    restaurantName: 'شاورما سيتي الشام',
+    restaurantPhone: '01234567890',
+    restaurantAddress: 'شارع عباس العقاد، مدينة نصر',
+    customerName: 'محمد أحمد (حساب تجريبي)',
+    customerPhone: '01012345678',
+    address: PREVIEW_SAVED_ADDRESSES[0],
+    subtotal: 140,
+    discount: 0,
+    deliveryFee: 12,
+    totalAmount: 152,
+    orderStatus: 'preparing',
+    deliveryStatus: 'waiting_dispatch',
+    paymentMethod: 'cash_on_delivery',
+    deliveryChannel: 'direct_system',
+    invoiceIssued: false,
+    createdAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    updatedAt: new Date().toISOString(),
+    estimatedDeliveryTime: '20 دقيقة',
+    cancellationStatus: 'none',
+    items: [
+      {
+        menuItemId: 'food_5',
+        name: 'وجبة عربي شاورما فراخ سوبر دبل',
+        unitPrice: 140,
+        quantity: 1,
+        totalPrice: 140,
       },
     ],
   },

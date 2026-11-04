@@ -9,6 +9,10 @@ import type {
   FoodCartSelectedOption,
   BiteBaitView,
   BiteBaitRatingPayload,
+  BiteBaitFoodOrder,
+  BiteBaitComplaintTicket,
+  BiteBaitMissingItemReport,
+  BiteBaitPriceChangeProposal,
 } from './types';
 import './styles/bite-and-bait.css';
 
@@ -125,7 +129,24 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     },
   ]);
 
-  const [localOrders, setLocalOrders] = useState<FoodOrder[]>(PREVIEW_ORDERS);
+  const [localOrders, setLocalOrders] = useState<BiteBaitFoodOrder[]>(PREVIEW_ORDERS);
+
+  // Coordinator-owned state for Complaints, Missing Items, and Price Proposals (Persists throughout session)
+  const [complaintTickets, setComplaintTickets] = useState<BiteBaitComplaintTicket[]>([]);
+  const [missingReports, setMissingReports] = useState<BiteBaitMissingItemReport[]>([]);
+  const [priceChangeProposals, setPriceChangeProposals] = useState<Record<string, BiteBaitPriceChangeProposal>>({
+    demo_ord_1: {
+      id: 'prop_demo_1',
+      orderId: 'demo_ord_1',
+      restaurantName: 'كبابجي ومطعم الأصيل',
+      originalTotal: 355,
+      newTotal: 370,
+      priceDifference: 15,
+      reason: 'زيادة في وزن الكباب المشوي بعد التسوية والتقطيع.',
+      createdAt: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+      status: 'pending',
+    },
+  });
 
   // Determine whether preview mode is active
   const isPreview = forcePreviewMode || propRestaurants.length === 0;
@@ -136,7 +157,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   const activeCategories = isPreview ? PREVIEW_CATEGORIES : propCategories;
   const activeAddresses = isPreview ? PREVIEW_SAVED_ADDRESSES : propAddresses;
   const activeCartItems = isPreview ? localCart : (propCartItems || []);
-  const activeOrders = isPreview ? localOrders : propOrders;
+  const activeOrders = (isPreview ? localOrders : (propOrders as BiteBaitFoodOrder[])) || [];
 
   // Show a temporary preview toast banner
   const triggerPreviewAlert = (msg: string) => {
@@ -415,7 +436,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         const discountAmount = details.discount || 0;
         const finalAmount = Math.max(0, checkoutGroup.subtotal - discountAmount + checkoutGroup.deliveryFee);
 
-        const simulatedOrder: FoodOrder = {
+        const simulatedOrder: BiteBaitFoodOrder = {
           id: `ord_sim_${Date.now()}`,
           invoiceNumber: `INV-${Math.floor(100000 + Math.random() * 900000)}`,
           restaurantId: checkoutGroup.restaurantId,
@@ -457,6 +478,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           estimatedDeliveryTime: '30-40 دقيقة',
+          cancellationStatus: 'none',
         };
 
         // 1. Add order to localOrders
@@ -509,21 +531,146 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     }
   };
 
-  // Cancel order in local state
-  const handleCancelOrder = (orderId: string, reason: string) => {
+  // Step 1: Client submits cancellation request (Keeps original orderStatus unchanged!)
+  const handleRequestOrderCancellation = (orderId: string, reason: string) => {
+    const targetOrder = localOrders.find((o) => o.id === orderId);
+    if (!targetOrder) return;
+
+    if (targetOrder.cancellationStatus === 'pending') {
+      triggerPreviewAlert('⚠️ يوجد بالفعل طلب إلغاء معلق لهذا الطلب وهو قيد المراجعة.');
+      return;
+    }
+
+    if (
+      targetOrder.orderStatus === 'delivered' ||
+      targetOrder.orderStatus === 'cancelled' ||
+      targetOrder.orderStatus === 'rejected_by_restaurant'
+    ) {
+      triggerPreviewAlert('⚠️ لا يمكن تقديم طلب إلغاء لهذا الطلب نظراً لحالته الحالية.');
+      return;
+    }
+
     setLocalOrders((prev) =>
       prev.map((o) =>
         o.id === orderId
           ? {
               ...o,
-              orderStatus: 'cancelled',
-              cancelReason: reason,
+              // Original orderStatus is intentionally kept unchanged!
+              cancellationStatus: 'pending',
+              cancellationReason: reason,
+              cancellationRequestedAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
             }
           : o
       )
     );
-    triggerPreviewAlert(`تم تسجيل طلب إلغاء الطلب بنجاح محلياً.`);
+
+    triggerPreviewAlert('تم إرسال طلب الإلغاء، وهو قيد المراجعة لدى المطعم / الإدارة.');
+  };
+
+  // Step 2: Testing simulation of review decision (Approve or Reject)
+  const handleSimulateCancellationReview = (
+    orderId: string,
+    decision: 'approve' | 'reject',
+    reviewNote?: string
+  ) => {
+    setLocalOrders((prev) =>
+      prev.map((o) => {
+        if (o.id !== orderId) return o;
+
+        if (decision === 'approve') {
+          return {
+            ...o,
+            orderStatus: 'cancelled', // Only changed to cancelled upon explicit approval!
+            cancellationStatus: 'approved',
+            cancellationReviewedAt: new Date().toISOString(),
+            cancellationReviewNote: reviewNote || 'تمت الموافقة على طلب الإلغاء من قبل المطعم/الإدارة',
+            updatedAt: new Date().toISOString(),
+          };
+        } else {
+          return {
+            ...o,
+            // Original orderStatus remains intact!
+            cancellationStatus: 'rejected',
+            cancellationReviewedAt: new Date().toISOString(),
+            cancellationReviewNote: reviewNote || 'عذراً، الوجبة قيد التحضير بالفعل في المطبخ ولا يمكن قبول الإلغاء',
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      })
+    );
+
+    if (decision === 'approve') {
+      triggerPreviewAlert('✅ تمت الموافقة على طلب الإلغاء واعتماده كملغى في محاكاة الاختبار.');
+    } else {
+      triggerPreviewAlert('❌ تم رفض طلب الإلغاء ويستمر الطلب سارياً بحالته الأصلية.');
+    }
+  };
+
+  // Coordinator handler: Submit customer complaint
+  const handleSubmitComplaint = (
+    ticketData: Omit<BiteBaitComplaintTicket, 'id' | 'createdAt'>
+  ) => {
+    const newTicket: BiteBaitComplaintTicket = {
+      id: `cmp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      createdAt: new Date().toISOString(),
+      ...ticketData,
+    };
+    setComplaintTickets((prev) => [newTicket, ...prev]);
+    triggerPreviewAlert('تم تسجيل الشكوى محلياً بنجاح، وستظل محفوظة طوال الجلسة.');
+  };
+
+  // Coordinator handler: Submit missing items report
+  const handleSubmitMissingReport = (
+    reportData: Omit<BiteBaitMissingItemReport, 'id' | 'createdAt'>
+  ) => {
+    const newReport: BiteBaitMissingItemReport = {
+      id: `rep_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      createdAt: new Date().toISOString(),
+      ...reportData,
+    };
+    setMissingReports((prev) => [newReport, ...prev]);
+    triggerPreviewAlert('تم تسجيل بلاغ النقص محلياً بنجاح، وسيظل محفوظاً طوال الجلسة.');
+  };
+
+  // Coordinator handler: Respond to price change proposal
+  const handleRespondPriceChange = (orderId: string, accept: boolean) => {
+    const proposal = priceChangeProposals[orderId];
+    if (!proposal || proposal.status !== 'pending') return;
+
+    setPriceChangeProposals((prev) => ({
+      ...prev,
+      [orderId]: {
+        ...proposal,
+        status: accept ? 'accepted' : 'rejected',
+      },
+    }));
+
+    if (accept) {
+      setLocalOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? { ...o, totalAmount: proposal.newTotal } : o))
+      );
+      triggerPreviewAlert(`✓ تم قبول تعديل السعر واعتماد الإجمالي الجديد (${proposal.newTotal} ج.م).`);
+    } else {
+      triggerPreviewAlert(`✕ تم رفض تعديل السعر والإبقاء على الحساب الأصلي (${proposal.originalTotal} ج.م).`);
+    }
+  };
+
+  // Coordinator handler: Create price change proposal (for testing purposes)
+  const handleCreatePriceChangeProposal = (newProposal: BiteBaitPriceChangeProposal) => {
+    if (priceChangeProposals[newProposal.orderId]?.status === 'pending') {
+      triggerPreviewAlert('⚠️ يوجد بالفعل اقتراح تعديل سعر معلق لهذا الطلب.');
+      return;
+    }
+    setPriceChangeProposals((prev) => ({
+      ...prev,
+      [newProposal.orderId]: {
+        ...newProposal,
+        id: newProposal.id || `prop_${Date.now()}`,
+        createdAt: newProposal.createdAt || new Date().toISOString(),
+      },
+    }));
+    triggerPreviewAlert(`تم إنشاء اقتراح تعديل سعر تجريبي لطلب #${newProposal.orderId.slice(0, 8)}.`);
   };
 
   // If section is administratively disabled
@@ -888,9 +1035,17 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
       {currentView === 'orders' && (
         <BiteBaitOrdersView
           orders={activeOrders}
+          complaintTickets={complaintTickets}
+          missingReports={missingReports}
+          priceChangeProposals={priceChangeProposals}
           onNavigateToHome={() => setCurrentView('home')}
           onSubmitRating={handleRatingSubmit}
-          onCancelOrder={handleCancelOrder}
+          onRequestCancellation={handleRequestOrderCancellation}
+          onSimulateCancellationReview={handleSimulateCancellationReview}
+          onSubmitComplaint={handleSubmitComplaint}
+          onSubmitMissingReport={handleSubmitMissingReport}
+          onRespondPriceChange={handleRespondPriceChange}
+          onCreatePriceChangeProposal={handleCreatePriceChangeProposal}
         />
       )}
 

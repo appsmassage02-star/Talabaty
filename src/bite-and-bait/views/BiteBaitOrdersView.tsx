@@ -1,21 +1,34 @@
 import React, { useState } from 'react';
 import type {
-  FoodOrder,
+  BiteBaitFoodOrder,
   FoodOrderStatus,
   BiteBaitRatingPayload,
   BiteBaitComplaintTicket,
   BiteBaitMissingItemReport,
   BiteBaitPriceChangeProposal,
+  OrderCancellationStatus,
 } from '../types';
 import { biteBaitAssets } from '../assets';
 import { BiteBaitEmptyState } from '../components/BiteBaitEmptyState';
 import { BiteBaitRatingModal } from '../components/BiteBaitRatingModal';
 
 interface BiteBaitOrdersViewProps {
-  orders: FoodOrder[];
+  orders: BiteBaitFoodOrder[];
+  complaintTickets: BiteBaitComplaintTicket[];
+  missingReports: BiteBaitMissingItemReport[];
+  priceChangeProposals: Record<string, BiteBaitPriceChangeProposal>;
   onNavigateToHome: () => void;
   onSubmitRating?: (payload: BiteBaitRatingPayload) => Promise<void>;
-  onCancelOrder?: (orderId: string, reason: string) => void;
+  onRequestCancellation: (orderId: string, reason: string) => void;
+  onSimulateCancellationReview?: (
+    orderId: string,
+    decision: 'approve' | 'reject',
+    reviewNote?: string
+  ) => void;
+  onSubmitComplaint: (ticket: Omit<BiteBaitComplaintTicket, 'id' | 'createdAt'>) => void;
+  onSubmitMissingReport: (report: Omit<BiteBaitMissingItemReport, 'id' | 'createdAt'>) => void;
+  onRespondPriceChange: (orderId: string, accept: boolean) => void;
+  onCreatePriceChangeProposal?: (proposal: BiteBaitPriceChangeProposal) => void;
 }
 
 const STATUS_CONFIG: Record<
@@ -73,51 +86,38 @@ const STATUS_CONFIG: Record<
 };
 
 export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
-  orders: initialOrders,
+  orders,
+  complaintTickets,
+  missingReports,
+  priceChangeProposals,
   onNavigateToHome,
   onSubmitRating,
-  onCancelOrder,
+  onRequestCancellation,
+  onSimulateCancellationReview,
+  onSubmitComplaint,
+  onSubmitMissingReport,
+  onRespondPriceChange,
+  onCreatePriceChangeProposal,
 }) => {
-  const [orders, setOrders] = useState<FoodOrder[]>(initialOrders);
   const [filterType, setFilterType] = useState<'all' | 'active' | 'completed' | 'complaints'>('all');
-  const [ratingOrder, setRatingOrder] = useState<FoodOrder | null>(null);
-  const [trackingOrder, setTrackingOrder] = useState<FoodOrder | null>(null);
+  const [ratingOrder, setRatingOrder] = useState<BiteBaitFoodOrder | null>(null);
 
   // Modals state
-  const [cancellingOrder, setCancellingOrder] = useState<FoodOrder | null>(null);
-  const [cancelReason, setCancelReason] = useState('تأخر في التوصيل');
+  const [cancellingOrder, setCancellingOrder] = useState<BiteBaitFoodOrder | null>(null);
+  const [cancelReason, setCancelReason] = useState('تأخر في التوصيل عن الموعد');
   const [cancelFeedback, setCancelFeedback] = useState<string | null>(null);
 
-  const [missingReportOrder, setMissingReportOrder] = useState<FoodOrder | null>(null);
+  const [missingReportOrder, setMissingReportOrder] = useState<BiteBaitFoodOrder | null>(null);
   const [selectedMissingItems, setSelectedMissingItems] = useState<string[]>([]);
   const [missingNotes, setMissingNotes] = useState('');
 
-  const [complaintOrder, setComplaintOrder] = useState<FoodOrder | null>(null);
-  const [complaintCategory, setComplaintCategory] = useState<'delay' | 'food_quality' | 'packaging' | 'driver_attitude' | 'other'>('delay');
+  const [complaintOrder, setComplaintOrder] = useState<BiteBaitFoodOrder | null>(null);
+  const [complaintCategory, setComplaintCategory] = useState<
+    'delay' | 'food_quality' | 'packaging' | 'driver_attitude' | 'other'
+  >('delay');
   const [complaintDetails, setComplaintDetails] = useState('');
 
-  // Local lists for tickets & proposals
-  const [complaintTickets, setComplaintTickets] = useState<BiteBaitComplaintTicket[]>([]);
-  const [missingReports, setMissingReports] = useState<BiteBaitMissingItemReport[]>([]);
-
-  // Sample local price change proposals
-  const [priceChangeProposals, setPriceChangeProposals] = useState<Record<string, BiteBaitPriceChangeProposal>>({
-    demo_ord_1: {
-      orderId: 'demo_ord_1',
-      restaurantName: 'كبابجي ومطعم الأصيل',
-      originalTotal: 355,
-      newTotal: 370,
-      priceDifference: 15,
-      reason: 'زيادة في وزن الكباب المشوي بعد التسوية والتقطيع.',
-      status: 'pending',
-    },
-  });
-
-  // Keep orders synced with prop when prop changes
-  React.useEffect(() => {
-    setOrders(initialOrders);
-  }, [initialOrders]);
-
+  // Filter orders
   const filteredOrders = orders.filter((o) => {
     const isCompleted =
       o.orderStatus === 'delivered' ||
@@ -129,35 +129,25 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
     return true;
   });
 
-  // Handle Order Cancellation locally
-  const handleConfirmCancel = () => {
+  // Handle client requesting cancellation
+  const handleClientRequestCancellation = () => {
     if (!cancellingOrder) return;
 
-    if (
-      cancellingOrder.orderStatus === 'out_for_delivery' ||
-      cancellingOrder.orderStatus === 'delivered'
-    ) {
-      setCancelFeedback('لا يمكن إلغاء الطلب في هذه المرحلة لأن المندوب قد استلم الوجبة بالفعل أو تم تسليمها.');
+    if (cancellingOrder.cancellationStatus === 'pending') {
+      setCancelFeedback('يوجد طلب إلغاء معلق بالفعل قيد المراجعة لهذا الطلب.');
       return;
     }
 
-    setOrders((prev) =>
-      prev.map((o) =>
-        o.id === cancellingOrder.id
-          ? {
-              ...o,
-              orderStatus: 'cancelled',
-              cancelReason: cancelReason,
-              updatedAt: new Date().toISOString(),
-            }
-          : o
-      )
-    );
-
-    if (onCancelOrder) {
-      onCancelOrder(cancellingOrder.id, cancelReason);
+    if (
+      cancellingOrder.orderStatus === 'delivered' ||
+      cancellingOrder.orderStatus === 'cancelled' ||
+      cancellingOrder.orderStatus === 'rejected_by_restaurant'
+    ) {
+      setCancelFeedback('لا يمكن تقديم طلب إلغاء لهذا الطلب نظراً لحالته الحالية.');
+      return;
     }
 
+    onRequestCancellation(cancellingOrder.id, cancelReason);
     setCancellingOrder(null);
     setCancelFeedback(null);
   };
@@ -166,17 +156,14 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
   const handleSubmitMissingReport = () => {
     if (!missingReportOrder || selectedMissingItems.length === 0) return;
 
-    const newReport: BiteBaitMissingItemReport = {
-      id: `rep_${Date.now()}`,
+    onSubmitMissingReport({
       orderId: missingReportOrder.id,
       restaurantName: missingReportOrder.restaurantName,
       missingItems: selectedMissingItems,
       notes: missingNotes.trim(),
       status: 'under_review',
-      createdAt: new Date().toISOString(),
-    };
+    });
 
-    setMissingReports((prev) => [newReport, ...prev]);
     setMissingReportOrder(null);
     setSelectedMissingItems([]);
     setMissingNotes('');
@@ -186,50 +173,32 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
   const handleSubmitComplaint = () => {
     if (!complaintOrder || !complaintDetails.trim()) return;
 
-    const newTicket: BiteBaitComplaintTicket = {
-      id: `cmp_${Date.now()}`,
+    onSubmitComplaint({
       orderId: complaintOrder.id,
       restaurantName: complaintOrder.restaurantName,
       category: complaintCategory,
       details: complaintDetails.trim(),
       status: 'pending',
-      createdAt: new Date().toISOString(),
-      responseNote: 'تم استلام الشكوى وجاري مراجعة المطبخ والمندوب لمعالجة المشكلة.',
-    };
-
-    setComplaintTickets((prev) => [newTicket, ...prev]);
-    setComplaintOrder(null);
-    setComplaintDetails('');
-  };
-
-  // Handle Price Change Response
-  const handleRespondPriceChange = (orderId: string, accept: boolean) => {
-    setPriceChangeProposals((prev) => {
-      const prop = prev[orderId];
-      if (!prop) return prev;
-      return {
-        ...prev,
-        [orderId]: {
-          ...prop,
-          status: accept ? 'accepted' : 'rejected',
-        },
-      };
+      responseNote: 'تم استلام الشكوى محلياً في وضع المعاينة وجاري مراجعتها مع قسم المطبخ.',
     });
 
-    if (accept) {
-      const prop = priceChangeProposals[orderId];
-      if (prop) {
-        setOrders((prev) =>
-          prev.map((o) => (o.id === orderId ? { ...o, totalAmount: prop.newTotal } : o))
-        );
-      }
-    }
+    setComplaintOrder(null);
+    setComplaintDetails('');
   };
 
   return (
     <div className="bite-and-bait-scope">
       {/* Top Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '20px',
+          flexWrap: 'wrap',
+          gap: '10px',
+        }}
+      >
         <button
           type="button"
           onClick={onNavigateToHome}
@@ -327,6 +296,19 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
       {/* Complaints & Reports Tab View */}
       {filterType === 'complaints' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div
+            style={{
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              borderRadius: '12px',
+              padding: '10px 14px',
+              fontSize: '12px',
+              color: '#64748b',
+            }}
+          >
+            💡 يتم الاحتفاظ بجميع الشكاوى وبلاغات النواقص في الذاكرة المشتركة للمنسق الرئيسي طوال الجلسة المحلية (وضع المعاينة التجريبي).
+          </div>
+
           {complaintTickets.length === 0 && missingReports.length === 0 ? (
             <BiteBaitEmptyState
               icon="🛡️"
@@ -343,6 +325,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                     borderRadius: '16px',
                     border: '1.5px solid #fed7aa',
                     padding: '16px',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
@@ -359,10 +342,10 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                         fontWeight: 700,
                       }}
                     >
-                      قيد المراجعة مع المطعم 🔍
+                      {rep.status === 'under_review' ? 'قيد المراجعة مع المطعم 🔍' : rep.status}
                     </span>
                   </div>
-                  <div style={{ fontSize: '12px', color: '#334155', marginBottom: '4px' }}>
+                  <div style={{ fontSize: '12.5px', color: '#334155', marginBottom: '4px' }}>
                     الأصناف المبلغ عنها: <b>{rep.missingItems.join(', ')}</b>
                   </div>
                   {rep.notes && (
@@ -370,6 +353,9 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                       ملاحظة العميل: {rep.notes}
                     </div>
                   )}
+                  <div style={{ fontSize: '10.5px', color: '#94a3b8', marginTop: '6px' }}>
+                    تاريخ البلاغ: {new Date(rep.createdAt).toLocaleString('ar-EG')}
+                  </div>
                 </div>
               ))}
 
@@ -381,6 +367,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                     borderRadius: '16px',
                     border: '1.5px solid #fecaca',
                     padding: '16px',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
@@ -397,7 +384,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                         fontWeight: 700,
                       }}
                     >
-                      {cmp.status === 'pending' ? 'تم الاستلام وبانتظار المشرف ⏳' : 'تم الرد'}
+                      {cmp.status === 'pending' ? 'تم الاستلام وبانتظار المشرف ⏳' : 'تمت المعالجة'}
                     </span>
                   </div>
                   <div style={{ fontSize: '12.5px', color: '#334155', marginBottom: '6px' }}>
@@ -417,6 +404,9 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                       رد الدعم الفني: {cmp.responseNote}
                     </div>
                   )}
+                  <div style={{ fontSize: '10.5px', color: '#94a3b8', marginTop: '6px' }}>
+                    تاريخ التقديم: {new Date(cmp.createdAt).toLocaleString('ar-EG')}
+                  </div>
                 </div>
               ))}
             </>
@@ -446,6 +436,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                 };
 
                 const priceProposal = priceChangeProposals[order.id];
+                const cancellationStatus: OrderCancellationStatus = order.cancellationStatus || 'none';
 
                 return (
                   <div
@@ -461,8 +452,16 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                       gap: '14px',
                     }}
                   >
-                    {/* Header Row: Restaurant Name, Date & Status */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                    {/* Header Row: Restaurant Name, Date & Order Status */}
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: '10px',
+                      }}
+                    >
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <img
                           src={biteBaitAssets.parcel_icon}
@@ -485,7 +484,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                         </div>
                       </div>
 
-                      {/* Status Badge */}
+                      {/* Main Order Status Badge */}
                       <span
                         style={{
                           background: statusConfig.bg,
@@ -501,7 +500,129 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                       </span>
                     </div>
 
-                    {/* Visual 4-Step Order Progress Stepper */}
+                    {/* Cancellation Status Banner (Independent Lifecycle State) */}
+                    {cancellationStatus === 'pending' && (
+                      <div
+                        style={{
+                          background: '#fffbeb',
+                          border: '1.5px solid #fde68a',
+                          borderRadius: '12px',
+                          padding: '12px 14px',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ fontSize: '16px' }}>⏳</span>
+                            <span style={{ fontSize: '12.5px', fontWeight: 800, color: '#92400e' }}>
+                              طلب الإلغاء قيد المراجعة لدى المطعم / الإدارة
+                            </span>
+                          </div>
+                          <span style={{ fontSize: '11px', color: '#b45309' }}>
+                            سبب الإلغاء: {order.cancellationReason || 'طلب العميل'}
+                          </span>
+                        </div>
+                        <p style={{ fontSize: '11.5px', color: '#78350f', margin: '4px 0 8px' }}>
+                          تنويه: يظل الطلب بحالته الأصلية ({statusConfig.label}) ولا يتم اعتماده كملغى إلا بموافقة صريحة من جهة المراجعة.
+                        </p>
+
+                        {/* Testing Simulation Control (Clearly Separated for Preview Testing) */}
+                        {onSimulateCancellationReview && (
+                          <div
+                            style={{
+                              background: '#ffffff',
+                              borderRadius: '8px',
+                              padding: '8px 10px',
+                              border: '1px dashed #f59e0b',
+                              marginTop: '6px',
+                            }}
+                          >
+                            <span style={{ fontSize: '11px', fontWeight: 800, color: '#b45309', display: 'block', marginBottom: '4px' }}>
+                              🧪 محاكاة نتيجة مراجعة المطعم (لأغراض الاختبار والتجربة فقط):
+                            </span>
+                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onSimulateCancellationReview(
+                                    order.id,
+                                    'approve',
+                                    'تم قبول الإلغاء من المطعم لعدم بدء الطهي بعد'
+                                  )
+                                }
+                                style={{
+                                  background: '#16a34a',
+                                  color: '#ffffff',
+                                  border: 'none',
+                                  padding: '4px 10px',
+                                  borderRadius: '6px',
+                                  fontSize: '11px',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                [محاكاة: موافقة المطعم على الإلغاء]
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onSimulateCancellationReview(
+                                    order.id,
+                                    'reject',
+                                    'تم رفض الإلغاء لأن الوجبة تم طهيها بالفعل'
+                                  )
+                                }
+                                style={{
+                                  background: '#dc2626',
+                                  color: '#ffffff',
+                                  border: 'none',
+                                  padding: '4px 10px',
+                                  borderRadius: '6px',
+                                  fontSize: '11px',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                [محاكاة: رفض المطعم للإلغاء]
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {cancellationStatus === 'approved' && (
+                      <div
+                        style={{
+                          background: '#fef2f2',
+                          border: '1.5px solid #fecaca',
+                          borderRadius: '12px',
+                          padding: '10px 14px',
+                          fontSize: '12px',
+                          color: '#991b1b',
+                          fontWeight: 700,
+                        }}
+                      >
+                        ✓ تمت الموافقة على طلب الإلغاء واعتماد إلغاء الطلب رسمياً ({order.cancellationReviewNote || 'بناءً على طلب العميل'})
+                      </div>
+                    )}
+
+                    {cancellationStatus === 'rejected' && (
+                      <div
+                        style={{
+                          background: '#fff7ed',
+                          border: '1.5px solid #fed7aa',
+                          borderRadius: '12px',
+                          padding: '10px 14px',
+                          fontSize: '12px',
+                          color: '#9a3412',
+                          fontWeight: 700,
+                        }}
+                      >
+                        ✕ تم رفض طلب الإلغاء ({order.cancellationReviewNote || 'تعذر الإلغاء'}) — الطلب مستمر في مساره الفعلي بحالته الأصلية: ({statusConfig.label}).
+                      </div>
+                    )}
+
+                    {/* Visual 4-Step Stepper */}
                     {order.orderStatus !== 'cancelled' && order.orderStatus !== 'rejected_by_restaurant' && (
                       <div
                         style={{
@@ -566,78 +687,86 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                       </div>
                     )}
 
-                    {/* Price Change Proposal Dialog (Local Simulation) */}
-                    {priceProposal && priceProposal.status === 'pending' && (
+                    {/* Price Change Proposal Dialog (Maintained by Coordinator) */}
+                    {priceProposal && (
                       <div
                         style={{
-                          background: '#fffbeb',
-                          border: '1.5px solid #fde68a',
+                          background: priceProposal.status === 'pending' ? '#fffbeb' : priceProposal.status === 'accepted' ? '#f0fdf4' : '#fef2f2',
+                          border: `1.5px solid ${priceProposal.status === 'pending' ? '#fde68a' : priceProposal.status === 'accepted' ? '#bbf7d0' : '#fecaca'}`,
                           borderRadius: '14px',
                           padding: '12px 16px',
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                          <span style={{ fontSize: '18px' }}>⚠️</span>
-                          <span style={{ fontSize: '13px', fontWeight: 800, color: '#92400e' }}>
-                            طلب موافقة العميل على تعديل السعر من المطعم
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+                            💰 اقتراح تعديل سعر من مطعم {order.restaurantName}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              padding: '2px 8px',
+                              borderRadius: '50px',
+                              background: priceProposal.status === 'pending' ? '#fef3c7' : priceProposal.status === 'accepted' ? '#dcfce7' : '#fee2e2',
+                              color: priceProposal.status === 'pending' ? '#92400e' : priceProposal.status === 'accepted' ? '#166534' : '#991b1b',
+                            }}
+                          >
+                            {priceProposal.status === 'pending'
+                              ? 'بانتظار قرارك ⏳'
+                              : priceProposal.status === 'accepted'
+                              ? 'تمت موافقتك ✓'
+                              : 'تم رفضك ✕'}
                           </span>
                         </div>
-                        <p style={{ fontSize: '12px', color: '#78350f', margin: '0 0 10px' }}>
-                          أخطر المطعم بتعديل الحساب الإجمالي بمقدار <b>+{priceProposal.priceDifference} ج.م</b> (الإجمالي الجديد: <b>{priceProposal.newTotal} ج.م</b>).
-                          السبب: {priceProposal.reason}
-                        </p>
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <button
-                            type="button"
-                            onClick={() => handleRespondPriceChange(order.id, true)}
-                            style={{
-                              background: '#16a34a',
-                              color: '#ffffff',
-                              border: 'none',
-                              padding: '6px 14px',
-                              borderRadius: '8px',
-                              fontSize: '12px',
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            موافقة على التعديل ✓
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleRespondPriceChange(order.id, false)}
-                            style={{
-                              background: '#dc2626',
-                              color: '#ffffff',
-                              border: 'none',
-                              padding: '6px 14px',
-                              borderRadius: '8px',
-                              fontSize: '12px',
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            رفض التعديل ✕
-                          </button>
-                        </div>
-                      </div>
-                    )}
 
-                    {priceProposal && priceProposal.status !== 'pending' && (
-                      <div
-                        style={{
-                          background: priceProposal.status === 'accepted' ? '#f0fdf4' : '#fef2f2',
-                          border: `1px solid ${priceProposal.status === 'accepted' ? '#bbf7d0' : '#fecaca'}`,
-                          borderRadius: '10px',
-                          padding: '8px 12px',
-                          fontSize: '11.5px',
-                          color: priceProposal.status === 'accepted' ? '#166534' : '#991b1b',
-                          fontWeight: 700,
-                        }}
-                      >
-                        {priceProposal.status === 'accepted'
-                          ? `✓ تم قبول تعديل السعر الجديد (${priceProposal.newTotal} ج.م)`
-                          : '✕ تم رفض تعديل السعر والإبقاء على الحساب الأصلي'}
+                        <div style={{ fontSize: '12.5px', color: '#334155', lineHeight: 1.5, marginBottom: '8px' }}>
+                          <div>• الإجمالي الأصلي للطلب: <b>{priceProposal.originalTotal} ج.م</b></div>
+                          <div>• الإجمالي المقترح بعد التعديل: <b>{priceProposal.newTotal} ج.م</b> ({priceProposal.priceDifference > 0 ? `+${priceProposal.priceDifference}` : priceProposal.priceDifference} ج.م)</div>
+                          <div>• سبب التعديل من المطعم: <b>{priceProposal.reason}</b></div>
+                        </div>
+
+                        {priceProposal.status === 'pending' ? (
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <button
+                              type="button"
+                              onClick={() => onRespondPriceChange(order.id, true)}
+                              style={{
+                                background: '#16a34a',
+                                color: '#ffffff',
+                                border: 'none',
+                                padding: '6px 14px',
+                                borderRadius: '8px',
+                                fontSize: '12px',
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              موافقة على التعديل ✓
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onRespondPriceChange(order.id, false)}
+                              style={{
+                                background: '#dc2626',
+                                color: '#ffffff',
+                                border: 'none',
+                                padding: '6px 14px',
+                                borderRadius: '8px',
+                                fontSize: '12px',
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              رفض التعديل ✕
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '11.5px', color: priceProposal.status === 'accepted' ? '#166534' : '#991b1b', fontWeight: 700 }}>
+                            {priceProposal.status === 'accepted'
+                              ? `تم اعتماد الإجمالي الجديد (${order.totalAmount} ج.م).`
+                              : `تم رفض الاقتراح وبقي الإجمالي المعتمد (${order.totalAmount} ج.م).`}
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -679,7 +808,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                         ))}
                     </div>
 
-                    {/* Bottom Row: Total & Local Interactive Action Buttons */}
+                    {/* Bottom Row: Total & Action Buttons */}
                     <div
                       style={{
                         display: 'flex',
@@ -691,11 +820,12 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                       }}
                     >
                       <div style={{ fontSize: '13.5px', color: '#0f172a' }}>
-                        الإجمالي المطلوب: <b style={{ color: '#ea580c', fontSize: '16px' }}>{order.totalAmount} ج.م</b>
+                        الإجمالي المعتمد:{' '}
+                        <b style={{ color: '#ea580c', fontSize: '16px' }}>{order.totalAmount} ج.م</b>
                       </div>
 
                       {/* Interactive local actions */}
-                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
                         {/* Rating button */}
                         {order.orderStatus === 'delivered' && (
                           <button
@@ -761,26 +891,61 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                           تقديم شكوى ⚠️
                         </button>
 
-                        {/* Cancel Order Button */}
-                        {order.orderStatus !== 'cancelled' && order.orderStatus !== 'delivered' && order.orderStatus !== 'rejected_by_restaurant' && (
+                        {/* Request Cancellation Button */}
+                        {order.orderStatus !== 'delivered' &&
+                          order.orderStatus !== 'cancelled' &&
+                          order.orderStatus !== 'rejected_by_restaurant' &&
+                          cancellationStatus !== 'pending' &&
+                          cancellationStatus !== 'approved' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCancellingOrder(order);
+                                setCancelFeedback(null);
+                              }}
+                              style={{
+                                background: '#fee2e2',
+                                color: '#b91c1c',
+                                border: '1px solid #fecaca',
+                                padding: '6px 12px',
+                                borderRadius: '8px',
+                                fontSize: '12px',
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              طلب إلغاء الطلب ✕
+                            </button>
+                          )}
+
+                        {/* Simulation helper: create price proposal for testing if none exists */}
+                        {!priceProposal && onCreatePriceChangeProposal && (
                           <button
                             type="button"
-                            onClick={() => {
-                              setCancellingOrder(order);
-                              setCancelFeedback(null);
-                            }}
+                            onClick={() =>
+                              onCreatePriceChangeProposal({
+                                orderId: order.id,
+                                restaurantName: order.restaurantName,
+                                originalTotal: order.totalAmount,
+                                newTotal: order.totalAmount + 20,
+                                priceDifference: 20,
+                                reason: 'إضافة صوصات ومقبلات خاصة بالمطعم بناءً على تحضير الشيف.',
+                                createdAt: new Date().toISOString(),
+                                status: 'pending',
+                              })
+                            }
                             style={{
-                              background: '#fee2e2',
-                              color: '#b91c1c',
-                              border: '1px solid #fecaca',
-                              padding: '6px 12px',
+                              background: '#f1f5f9',
+                              color: '#475569',
+                              border: '1px dashed #cbd5e1',
+                              padding: '5px 10px',
                               borderRadius: '8px',
-                              fontSize: '12px',
-                              fontWeight: 700,
+                              fontSize: '11px',
+                              fontWeight: 600,
                               cursor: 'pointer',
                             }}
                           >
-                            طلب إلغاء الطلب ✕
+                            [تجربة: اقتراح تعديل سعر]
                           </button>
                         )}
                       </div>
@@ -806,15 +971,19 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
         />
       )}
 
-      {/* Modal 2: Cancel Order Modal */}
+      {/* Modal 2: Client Request Cancellation Modal */}
       {cancellingOrder && (
         <div className="bnb-modal-overlay" onClick={() => setCancellingOrder(null)}>
-          <div className="bnb-modal-box" onClick={(e) => e.stopPropagation()} style={{ padding: '22px', maxWidth: '440px' }}>
+          <div
+            className="bnb-modal-box"
+            onClick={(e) => e.stopPropagation()}
+            style={{ padding: '22px', maxWidth: '440px' }}
+          >
             <h3 style={{ fontSize: '16.5px', fontWeight: 800, color: '#991b1b', margin: '0 0 10px' }}>
-              طلب إلغاء طلب: {cancellingOrder.restaurantName}
+              تقديم طلب إلغاء لطلب: {cancellingOrder.restaurantName}
             </h3>
             <p style={{ fontSize: '12.5px', color: '#475569', lineHeight: 1.5, margin: '0 0 14px' }}>
-              هل ترغب بالتأكيد في إلغاء هذا الطلب؟ يرجى تحديد سبب الإلغاء لمساعدة المطعم في تحسين الخدمة:
+              سيتم إرسال طلبك إلى المطعم وقسم المتابعة لمراجعته. يرجى اختيار سبب الإلغاء:
             </p>
 
             <select
@@ -830,14 +999,24 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                 outline: 'none',
               }}
             >
-              <option value="تأخر في التوصيل">تأخر في التوصيل عن الموعد المقدر</option>
+              <option value="تأخر في التوصيل عن الموعد">تأخر في التوصيل عن الموعد المقدر</option>
               <option value="خطأ في اختيار الأصناف">خطأ في اختيار الأصناف</option>
               <option value="تغيير خطة الوجبة">تغيير خطة الوجبة أو عدم الحاجة</option>
               <option value="أخرى">سبب آخر</option>
             </select>
 
             {cancelFeedback && (
-              <div style={{ background: '#fee2e2', color: '#b91c1c', padding: '10px', borderRadius: '10px', fontSize: '12px', fontWeight: 700, marginBottom: '14px' }}>
+              <div
+                style={{
+                  background: '#fee2e2',
+                  color: '#b91c1c',
+                  padding: '10px',
+                  borderRadius: '10px',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  marginBottom: '14px',
+                }}
+              >
                 ⚠️ {cancelFeedback}
               </div>
             )}
@@ -862,7 +1041,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={handleConfirmCancel}
+                onClick={handleClientRequestCancellation}
                 style={{
                   flex: 1,
                   padding: '10px',
@@ -875,7 +1054,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                   cursor: 'pointer',
                 }}
               >
-                تأكيد الإلغاء محلياً
+                إرسال طلب الإلغاء للمراجعة
               </button>
             </div>
           </div>
@@ -885,12 +1064,16 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
       {/* Modal 3: Report Missing Items */}
       {missingReportOrder && (
         <div className="bnb-modal-overlay" onClick={() => setMissingReportOrder(null)}>
-          <div className="bnb-modal-box" onClick={(e) => e.stopPropagation()} style={{ padding: '22px', maxWidth: '440px' }}>
+          <div
+            className="bnb-modal-box"
+            onClick={(e) => e.stopPropagation()}
+            style={{ padding: '22px', maxWidth: '440px' }}
+          >
             <h3 style={{ fontSize: '16.5px', fontWeight: 800, color: '#0f172a', margin: '0 0 10px' }}>
               📋 الإبلاغ عن أصناف ناقصة أو غير مطابقة
             </h3>
             <p style={{ fontSize: '12px', color: '#64748b', margin: '0 0 14px' }}>
-              حدد الأصناف التي لم تصلك أو بها تلف من مطعم {missingReportOrder.restaurantName}:
+              حدد الأصناف التي لم تصلك من مطعم {missingReportOrder.restaurantName}:
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' }}>
@@ -923,7 +1106,9 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                         }
                       }}
                     />
-                    <span>{it.quantity} × {it.name}</span>
+                    <span>
+                      {it.quantity} × {it.name}
+                    </span>
                   </label>
                 );
               })}
@@ -991,7 +1176,11 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
       {/* Modal 4: File Complaint */}
       {complaintOrder && (
         <div className="bnb-modal-overlay" onClick={() => setComplaintOrder(null)}>
-          <div className="bnb-modal-box" onClick={(e) => e.stopPropagation()} style={{ padding: '22px', maxWidth: '440px' }}>
+          <div
+            className="bnb-modal-box"
+            onClick={(e) => e.stopPropagation()}
+            style={{ padding: '22px', maxWidth: '440px' }}
+          >
             <h3 style={{ fontSize: '16.5px', fontWeight: 800, color: '#0f172a', margin: '0 0 10px' }}>
               ⚠️ تقديم شكوى على طلب #{complaintOrder.id.slice(0, 8)}
             </h3>
@@ -1028,7 +1217,7 @@ export const BiteBaitOrdersView: React.FC<BiteBaitOrdersViewProps> = ({
                 rows={3}
                 value={complaintDetails}
                 onChange={(e) => setComplaintDetails(e.target.value)}
-                placeholder="اشرح المشكلة بالتفصيل لمساعدتنا في حلها..."
+                placeholder="اشرح المشكلة بالتفصيل لمساعدتنا في معالجتها..."
                 style={{
                   width: '100%',
                   padding: '9px 12px',

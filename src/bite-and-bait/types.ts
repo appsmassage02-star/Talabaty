@@ -70,6 +70,28 @@ export interface SpiceConfig {
 }
 
 /**
+ * Order cancellation lifecycle status
+ * 'none': No cancellation requested
+ * 'pending': Customer submitted cancellation request, pending restaurant/admin review
+ * 'approved': Request approved by review, order marked cancelled
+ * 'rejected': Request rejected by review, order continues in original status
+ */
+export type OrderCancellationStatus = 'none' | 'pending' | 'approved' | 'rejected';
+
+/**
+ * Extended food order with cancellation lifecycle and rating data
+ */
+export interface BiteBaitFoodOrder extends FoodOrder {
+  cancellationStatus?: OrderCancellationStatus;
+  cancellationReason?: string;
+  cancellationRequestedAt?: string;
+  cancellationReviewedAt?: string;
+  cancellationReviewNote?: string;
+  restaurantRating?: number;
+  driverRating?: number;
+}
+
+/**
  * Star-only rating submission payload (Strictly stars only, no text comments)
  */
 export interface BiteBaitRatingPayload {
@@ -102,7 +124,7 @@ export interface BiteBaitMissingItemReport {
   restaurantName: string;
   missingItems: string[];
   notes: string;
-  status: 'submitted' | 'under_review' | 'refund_approved';
+  status: 'under_review' | 'refund_approved' | 'rejected';
   createdAt: string;
 }
 
@@ -110,12 +132,14 @@ export interface BiteBaitMissingItemReport {
  * Price change consent proposal (local simulation)
  */
 export interface BiteBaitPriceChangeProposal {
+  id?: string;
   orderId: string;
   restaurantName: string;
   originalTotal: number;
   newTotal: number;
   priceDifference: number;
   reason: string;
+  createdAt?: string;
   status: 'pending' | 'accepted' | 'rejected';
 }
 
