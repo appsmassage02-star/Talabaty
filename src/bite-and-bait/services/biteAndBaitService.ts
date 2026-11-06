@@ -12,6 +12,9 @@ import type {
   RestaurantSectionSettings,
   BiteBaitFoodOrder,
   BiteBaitOrderStatusHistoryItem,
+  CreateBiteBaitOrderItemPayload,
+  CreateBiteBaitOrderParams,
+  CreateBiteBaitOrderResult,
 } from '../types';
 
 export interface ServiceResult<T> {
@@ -878,22 +881,15 @@ export const biteAndBaitService = {
 
   // --------------------------------------------------------------------------
   // 8. Helper to resolve user's authoritative Household ID
+  // Rule 3: Do NOT query profiles.household_id as it does not exist in the database.
+  // Extract household strictly from household_members, falling back to households.admin_id.
   // --------------------------------------------------------------------------
   async getUserHouseholdId(userId: string): Promise<string | null> {
     if (!isSupabaseConfigured() || !supabase || !userId) return null;
 
     try {
-      // 1. Check profiles
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('household_id')
-        .eq('id', userId)
-        .maybeSingle();
-
-      if (profile?.household_id) return profile.household_id;
-
-      // 2. Check household_members
-      const { data: member } = await supabase
+      // 1. Primary: Check authoritative household_members table
+      const { data: member, error: memErr } = await supabase
         .from('household_members')
         .select('household_id')
         .eq('user_id', userId)
@@ -901,21 +897,33 @@ export const biteAndBaitService = {
         .limit(1)
         .maybeSingle();
 
-      if (member?.household_id) return member.household_id;
+      if (memErr) {
+        console.warn('[biteAndBaitService] household_members query error:', memErr);
+      }
 
-      // 3. Check households as admin
-      const { data: hh } = await supabase
+      if (member?.household_id) {
+        return member.household_id;
+      }
+
+      // 2. Secondary fallback: Check households where the user is admin_id
+      const { data: hh, error: hhErr } = await supabase
         .from('households')
         .select('id')
         .eq('admin_id', userId)
         .limit(1)
         .maybeSingle();
 
-      if (hh?.id) return hh.id;
+      if (hhErr) {
+        console.warn('[biteAndBaitService] households admin query error:', hhErr);
+      }
+
+      if (hh?.id) {
+        return hh.id;
+      }
 
       return null;
     } catch (err) {
-      console.warn('[biteAndBaitService] Error resolving household ID:', err);
+      console.warn('[biteAndBaitService] Exception resolving household ID:', err);
       return null;
     }
   },
@@ -1256,6 +1264,153 @@ export const biteAndBaitService = {
         success: false,
         data: [],
         error: err?.message || 'استثناء أثناء قراءة سجل الحالات.',
+      };
+    }
+  },
+
+  // --------------------------------------------------------------------------
+  // 12. Create Ready-Made Food Order via RPC: public.create_bite_bait_order
+  // Real DB execution connecting checkout to backend logic.
+  // --------------------------------------------------------------------------
+  async createBiteBaitOrder(
+    params: CreateBiteBaitOrderParams
+  ): Promise<ServiceResult<CreateBiteBaitOrderResult>> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return {
+        success: false,
+        data: { orderId: '', orderNumber: '' },
+        error: 'قاعدة بيانات Supabase غير متصلة. يرجى التحقق من اتصال الإنترنت.',
+        isConfigError: true,
+      };
+    }
+
+    try {
+      // 1. Mandatory Parameters Validation
+      if (!params.householdId) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'تعذر تحديد معرف الأسرة للطلب. يلزم أن يكون المستخدم عضواً في أسرة مسجلة.',
+        };
+      }
+      if (!params.restaurantId) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'معرف المطعم غير محدد.',
+        };
+      }
+      if (
+        !params.deliveryLatitude ||
+        !params.deliveryLongitude ||
+        params.deliveryLatitude === 0 ||
+        params.deliveryLongitude === 0 ||
+        isNaN(params.deliveryLatitude) ||
+        isNaN(params.deliveryLongitude)
+      ) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'إحداثيات الموقع الجغرافي (GPS) غير صالحة أو مفقودة. يلزم توفير إحداثيات موقع حقيقية لإرسال الطلب للمطعم والمندوب.',
+        };
+      }
+      if (!params.items || params.items.length === 0) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'سلة الطلب فارغة، لا يمكن إرسال طلب بدون أصناف.',
+        };
+      }
+      if (!params.idempotencyKey) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'مفتاح منع التكرار (idempotency key) مفقود.',
+        };
+      }
+
+      // 2. Prepare payload with EXACT parameter names as defined in public.create_bite_bait_order
+      const rpcPayload = {
+        p_household_id: params.householdId,
+        p_restaurant_id: params.restaurantId,
+        p_address_id: params.addressId || null,
+        p_customer_name: params.customerName.trim(),
+        p_customer_phone: params.customerPhone.trim(),
+        p_delivery_address: params.deliveryAddress.trim(),
+        p_delivery_latitude: params.deliveryLatitude,
+        p_delivery_longitude: params.deliveryLongitude,
+        p_items: params.items,
+        p_idempotency_key: params.idempotencyKey,
+      };
+
+      const { data, error } = await supabase.rpc('create_bite_bait_order', rpcPayload);
+
+      if (error) {
+        const isDuplicateErr =
+          error.code === '23505' ||
+          error.message?.toLowerCase().includes('duplicate') ||
+          error.message?.toLowerCase().includes('idempotency');
+
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: isDuplicateErr
+            ? 'تم إرسال هذا الطلب بالفعل مسبقاً بنفس المفتاح. يمكنك مراجعة تفاصيله في سجل طلباتك.'
+            : (error.message || 'حدث خطأ أثناء تسجيل الطلب في قاعدة البيانات'),
+          errorCode: error.code,
+        };
+      }
+
+      // 3. Parse RPC response safely
+      let parsed: any = data;
+      if (typeof data === 'string') {
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          parsed = data;
+        }
+      }
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        parsed = parsed[0];
+      }
+
+      const isDuplicate = Boolean(
+        parsed?.status === 'duplicate' ||
+        parsed?.is_duplicate === true ||
+        parsed?.duplicate === true
+      );
+
+      const orderId = parsed?.order_id || parsed?.id || parsed?.orderId || '';
+      const orderNumber = parsed?.order_number ?? parsed?.orderNumber ?? parsed?.invoice_number ?? '';
+      const totalAmount =
+        Number(parsed?.total_amount ?? parsed?.customer_total ?? parsed?.total) || undefined;
+
+      if (!orderId && !orderNumber) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '', rawResponse: parsed },
+          error:
+            parsed?.message ||
+            parsed?.error ||
+            'تعذر استخراج رقم الطلب من استجابة قاعدة البيانات.',
+        };
+      }
+
+      return {
+        success: true,
+        data: {
+          orderId: String(orderId),
+          orderNumber: String(orderNumber),
+          totalAmount,
+          isDuplicate,
+          rawResponse: parsed,
+        },
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        data: { orderId: '', orderNumber: '' },
+        error: err?.message || 'استثناء غير متوقع أثناء استدعاء create_bite_bait_order.',
       };
     }
   },

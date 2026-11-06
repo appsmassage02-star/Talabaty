@@ -15,6 +15,7 @@ import type {
   BiteBaitMissingItemReport,
   BiteBaitPriceChangeProposal,
   RestaurantSectionSettings,
+  CreateBiteBaitOrderItemPayload,
 } from './types';
 import './styles/bite-and-bait.css';
 
@@ -582,30 +583,129 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   };
 
   // --------------------------------------------------------------------------
-  // Order Submission & Read-Only Policy Handling
+  // Order Submission via Real RPC: public.create_bite_bait_order
   // --------------------------------------------------------------------------
   const handleOrderSubmit = async (details: {
     customerName: string;
     customerPhone: string;
     address: string;
+    addressId: string | null;
+    latitude: number;
+    longitude: number;
+    idempotencyKey: string;
     notes?: string;
-  }) => {
+  }): Promise<{ success: boolean; message?: string }> => {
+    if (!checkoutGroup) {
+      triggerNotification('⚠️ لم يتم العثور على مجموعة أصناف المطعم المطلوب.');
+      return { success: false, message: 'أصناف المطعم مفقودة.' };
+    }
+
+    if (isSubmittingOrder) {
+      return { success: false, message: 'جاري تسجيل الطلب بالفعل، يرجى الانتظار...' };
+    }
+
     setIsSubmittingOrder(true);
 
-    // Rule 10 & Section 6: This phase is STRICTLY READ-ONLY.
-    // Zero insert / update / delete to Supabase tables.
-    setTimeout(() => {
-      setIsSubmittingOrder(false);
-      triggerNotification(
-        'ℹ️ تم استلام تفاصيل الطلب بنجاح. تنبيه: مرحلة الربط الحالية مخصصة للقراءة فقط، ولم يتم تفعيل عمليات الحفظ في قاعدة البيانات بعد وفق تعليمات المرحلة.'
-      );
-      setCurrentView('orders');
-    }, 900);
+    try {
+      // 1. Authoritative Household ID Resolution
+      // Rule 3: Do NOT query profiles.household_id as it does not exist in the database.
+      // Extract household from household_members using current user, falling back to households.admin_id.
+      const currentUserId = supabaseUser?.id || (supabaseProfile as any)?.id || '';
+      let resolvedHouseholdId = household?.id || '';
 
-    return {
-      success: true,
-      message: 'تم التحقق من بيانات الطلب محلياً (وضع القراءة فقط).',
-    };
+      if (currentUserId) {
+        const dbHhId = await biteAndBaitService.getUserHouseholdId(currentUserId);
+        if (dbHhId) {
+          resolvedHouseholdId = dbHhId;
+        }
+      }
+
+      if (!resolvedHouseholdId) {
+        setIsSubmittingOrder(false);
+        const err = 'تعذر تحديد الأسرة المرتبطة بحسابك في النظام. يلزم أن يكون المستخدم عضواً في أسرة صالحة لتسجيل الطلب.';
+        triggerNotification(`⚠️ ${err}`);
+        return { success: false, message: err };
+      }
+
+      // 2. Format items according to RPC specification:
+      // { menu_item_id, quantity, selected_options: [{ group_id, option_id }] }
+      const rpcItems: CreateBiteBaitOrderItemPayload[] = checkoutGroup.items
+        .filter((item) => item.menuItemId && item.quantity > 0)
+        .map((item) => ({
+          menu_item_id: item.menuItemId,
+          quantity: Math.max(1, Math.floor(item.quantity)),
+          selected_options: (item.selectedOptions || [])
+            .filter((opt) => opt.groupId && opt.optionId)
+            .map((opt) => ({
+              group_id: opt.groupId,
+              option_id: opt.optionId,
+            })),
+        }));
+
+      if (rpcItems.length === 0) {
+        setIsSubmittingOrder(false);
+        const err = 'لا توجد أصناف صالحة للإرسال في هذا الطلب.';
+        triggerNotification(`⚠️ ${err}`);
+        return { success: false, message: err };
+      }
+
+      // 3. Invoke real RPC: public.create_bite_bait_order
+      const res = await biteAndBaitService.createBiteBaitOrder({
+        householdId: resolvedHouseholdId,
+        restaurantId: checkoutGroup.restaurantId,
+        addressId: details.addressId,
+        customerName: details.customerName,
+        customerPhone: details.customerPhone,
+        deliveryAddress: details.address,
+        deliveryLatitude: details.latitude,
+        deliveryLongitude: details.longitude,
+        items: rpcItems,
+        idempotencyKey: details.idempotencyKey,
+      });
+
+      setIsSubmittingOrder(false);
+
+      if (!res.success || !res.data) {
+        const err = res.error || 'فشل تسجيل الطلب في قاعدة البيانات.';
+        triggerNotification(`⚠️ ${err}`);
+        return {
+          success: false,
+          message: err,
+        };
+      }
+
+      // 4. On RPC Success:
+      const { orderNumber, isDuplicate } = res.data;
+
+      // Clear items of the ordered restaurant ONLY from multi-restaurant cart
+      setLocalCart((prev) => prev.filter((item) => item.restaurantId !== checkoutGroup.restaurantId));
+
+      // Refresh customer orders history from database
+      await loadOrders();
+
+      const successNotice = isDuplicate
+        ? `طلب مكرر معتمد: تم فتح تفاصيل الطلب رقم #${orderNumber} بنجاح ✅`
+        : `تم تأكيد وتسجيل الطلب رقم #${orderNumber} لدى مطعم ${checkoutGroup.restaurantName} بنجاح! 🚀`;
+
+      triggerNotification(successNotice);
+
+      // Reset checkout restaurant and navigate to orders view
+      setCheckoutRestaurantId(null);
+      setCurrentView('orders');
+
+      return {
+        success: true,
+        message: successNotice,
+      };
+    } catch (err: any) {
+      setIsSubmittingOrder(false);
+      const errMsg = err?.message || 'حدث خطأ غير متوقع أثناء إرسال الطلب.';
+      triggerNotification(`⚠️ ${errMsg}`);
+      return {
+        success: false,
+        message: errMsg,
+      };
+    }
   };
 
   const handleRatingSubmit = async (payload: BiteBaitRatingPayload) => {
@@ -921,13 +1021,13 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '18px' }}>📡</span>
+          <span style={{ fontSize: '18px' }}>🚀</span>
           <div>
             <div style={{ fontSize: '13px', fontWeight: 800, color: '#065f46' }}>
-              قسم بايت آند بيت – ربط قاعدة بيانات Supabase (مرحلة القراءة فقط)
+              قسم بايت آند بيت – ربط إنشاء الطلبات بقاعدة البيانات الفعلية (RPC: create_bite_bait_order)
             </div>
             <div style={{ fontSize: '11px', color: '#047857' }}>
-              تم ربط الـ 15 جدولاً بنجاح للقراءة الفعلية؛ القوائم والعروض والطلبات والمطاعم مسترجعة مباشرة من قاعدة البيانات.
+              يتم تسجيل وتوثيق الطلبات رسمياً في Supabase مع التحقق من عضوية الأسرة والـ GPS ومنع التكرار.
             </div>
           </div>
         </div>
@@ -942,7 +1042,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             borderRadius: '50px',
           }}
         >
-          قراءة البيانات فقط ✅
+          إنشاء الطلبات مفعل ✅
         </span>
       </div>
 

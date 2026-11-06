@@ -175,3 +175,43 @@ export interface BiteBaitPromoSlide {
   discountTag?: string;
   backgroundColor: string;
 }
+
+/**
+ * RPC create_bite_bait_order item payload
+ */
+export interface CreateBiteBaitOrderItemPayload {
+  menu_item_id: string;
+  quantity: number;
+  selected_options: {
+    group_id: string;
+    option_id: string;
+  }[];
+}
+
+/**
+ * RPC create_bite_bait_order request parameters
+ */
+export interface CreateBiteBaitOrderParams {
+  householdId: string;
+  restaurantId: string;
+  addressId: string | null;
+  customerName: string;
+  customerPhone: string;
+  deliveryAddress: string;
+  deliveryLatitude: number;
+  deliveryLongitude: number;
+  items: CreateBiteBaitOrderItemPayload[];
+  idempotencyKey: string;
+}
+
+/**
+ * RPC create_bite_bait_order response result
+ */
+export interface CreateBiteBaitOrderResult {
+  orderId: string;
+  orderNumber: string | number;
+  totalAmount?: number;
+  isDuplicate?: boolean;
+  rawResponse?: any;
+}
+
