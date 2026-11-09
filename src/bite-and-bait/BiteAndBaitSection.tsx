@@ -138,8 +138,45 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   const [favoriteRestaurantIds, setFavoriteRestaurantIds] = useState<string[]>([]);
   const [favoriteFoodIds, setFavoriteFoodIds] = useState<string[]>([]);
 
-  // Cart state: Starts genuinely clean/empty (React state only)
-  const [localCart, setLocalCart] = useState<FoodCartItem[]>([]);
+  // Cart state: Loaded from localStorage key 'talabaty_food_cart_v1' without data loss
+  const [localCart, setLocalCart] = useState<FoodCartItem[]>(() => {
+    if (typeof window === 'undefined') return propCartItems || [];
+    try {
+      const saved = localStorage.getItem('talabaty_food_cart_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const validated = parsed.filter(
+            (item: any) =>
+              item &&
+              typeof item.cartItemId === 'string' &&
+              typeof item.menuItemId === 'string' &&
+              typeof item.restaurantId === 'string' &&
+              typeof item.name === 'string' &&
+              typeof item.quantity === 'number' &&
+              item.quantity > 0
+          );
+          if (validated.length > 0) {
+            return validated;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[BiteAndBait] Error reading cart from localStorage:', e);
+    }
+    return propCartItems || [];
+  });
+
+  // Keep localStorage in sync with localCart changes
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('talabaty_food_cart_v1', JSON.stringify(localCart));
+      } catch (e) {
+        console.warn('[BiteAndBait] Error saving cart to localStorage:', e);
+      }
+    }
+  }, [localCart]);
 
   // Coordinator tickets state (local simulation for this stage)
   const [complaintTickets, setComplaintTickets] = useState<BiteBaitComplaintTicket[]>([]);

@@ -23,7 +23,6 @@ import { RecurringOrdersModal } from "./components/RecurringOrdersModal";
 import { GovernorateSettingsModal } from "./components/GovernorateSettingsModal";
 import { AdminNotificationManagerModal } from "./components/AdminNotificationManagerModal";
 import { PharmacySection } from "./components/pharmacy/PharmacySection";
-import { FoodSection } from "./food/components/FoodSection";
 import { BiteAndBaitSection } from "./bite-and-bait/BiteAndBaitSection";
 
 import {
@@ -61,8 +60,6 @@ const MainContent: React.FC = () => {
     isEndMonthModalOpen,
     setIsEndMonthModalOpen,
   } = useApp();
-
-  const [foodSectionMode, setFoodSectionMode] = React.useState<'bite_and_bait' | 'original'>('bite_and_bait');
 
   // 1. Error state handling
   if (authStatus === "ERROR") {
@@ -213,53 +210,12 @@ const MainContent: React.FC = () => {
           </div>
         ) : activeTab === "food" ? (
           <div className="space-y-4 animate-in fade-in duration-150">
-            {/* Top Switcher Bar between Bite & Bait and Original Ready Food */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-2.5 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-2.5 text-right" dir="rtl">
-              <div className="flex items-center space-x-2 space-x-reverse text-xs font-bold text-slate-700">
-                <span className="text-base">🍱</span>
-                <span>اختر واجهة عرض قسم الأكلات والمطاعم:</span>
-              </div>
-              <div className="flex items-center space-x-1.5 space-x-reverse bg-slate-100 p-1 rounded-xl w-full sm:w-auto">
-                <button
-                  type="button"
-                  onClick={() => setFoodSectionMode('bite_and_bait')}
-                  className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                    foodSectionMode === 'bite_and_bait'
-                      ? 'bg-amber-500 text-amber-950 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  🍔 بايت آند بيت (Bite & Bait)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFoodSectionMode('original')}
-                  className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                    foodSectionMode === 'original'
-                      ? 'bg-emerald-600 text-white shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  🍲 الأكلات الجاهزة الأصلية (FoodSection)
-                </button>
-              </div>
-            </div>
-
-            {foodSectionMode === 'bite_and_bait' ? (
-              <BiteAndBaitSection
-                onBackToAppHome={() => {
-                  setSelectedCategory(null);
-                  setActiveTab("categories");
-                }}
-              />
-            ) : (
-              <FoodSection
-                onBackToHome={() => {
-                  setSelectedCategory(null);
-                  setActiveTab("categories");
-                }}
-              />
-            )}
+            <BiteAndBaitSection
+              onBackToAppHome={() => {
+                setSelectedCategory(null);
+                setActiveTab("categories");
+              }}
+            />
           </div>
         ) : activeTab === "settings" ? (
           activeRole === "admin" ? (

@@ -10,6 +10,7 @@ import type {
   FoodDeliveryStatus,
   RestaurantCategory,
   RestaurantSectionSettings,
+  GeographicVerificationResult,
   BiteBaitFoodOrder,
   BiteBaitOrderStatusHistoryItem,
   CreateBiteBaitOrderItemPayload,
@@ -128,6 +129,21 @@ export const mapDeliveryStatus = (status?: string): FoodDeliveryStatus => {
 };
 
 /**
+ * Normalizes Arabic text for flexible name matching
+ */
+export function normalizeArabicText(text?: string | null): string {
+  if (!text) return '';
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, '') // remove diacritics
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[\s\-_]+/g, ' ');
+}
+
+/**
  * Bite & Bait Service Layer
  * Strictly read-only operations connecting to Supabase tables.
  * Follows strict error preservation, zero fake metrics, and on-demand menu fetching.
@@ -205,6 +221,336 @@ export const biteAndBaitService = {
         data: null,
         error: err?.message || 'استثناء غير متوقع أثناء فحص إعدادات قسم المطاعم.',
       };
+    }
+  },
+
+  // --------------------------------------------------------------------------
+  // 1.1 Verify Geographic Service Area Scope (restaurant_section_service_areas, food_governorates, food_centers, food_areas)
+  // --------------------------------------------------------------------------
+  async verifyGeographicScope(
+    address?: FoodCustomerAddress | null,
+    providedHouseholdId?: string,
+    providedUserId?: string
+  ): Promise<GeographicVerificationResult> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return {
+        isServiceable: false,
+        reason: 'قاعدة بيانات Supabase غير مهيأة للتحقق من النطاق الجغرافي.',
+      };
+    }
+
+    try {
+      // Step A: Fetch active service areas from restaurant_section_service_areas
+      const { data: activeServiceAreas, error: saError } = await supabase
+        .from('restaurant_section_service_areas')
+        .select('id, governorate_id, center_id, area_id, is_active')
+        .eq('is_active', true);
+
+      if (saError) {
+        return {
+          isServiceable: false,
+          reason: `تعذر التحقق من نطاقات الخدمة في قاعدة البيانات: ${saError.message}`,
+        };
+      }
+
+      // Rule: Absence of active service areas is NOT permission (strict denial)
+      if (!activeServiceAreas || activeServiceAreas.length === 0) {
+        return {
+          isServiceable: false,
+          reason: 'لا يوجد نطاق جغرافي مفعّل لقسم المطاعم في قاعدة البيانات حالياً.',
+        };
+      }
+
+      // If address is not provided directly, attempt to resolve user's saved/default address
+      let targetAddress = address;
+      if (!targetAddress) {
+        const addrRes = await this.getHouseholdAddresses(providedHouseholdId, providedUserId);
+        const savedAddresses = addrRes.success ? addrRes.data : [];
+        targetAddress = savedAddresses.find((a) => a.isDefault) || savedAddresses[0] || null;
+      }
+
+      // If still no address is available (e.g. general visitor checking section visibility),
+      // since active service areas exist, allow general entrance view but require address verification before ordering
+      if (!targetAddress) {
+        return {
+          isServiceable: true,
+          reason: 'يوجد نطاق جغرافي مفعّل لقسم المطاعم؛ يلزم تحديد عنوان معتمد للتحقق عند الطلب.',
+        };
+      }
+
+      // Validate required address hierarchy fields
+      if (!targetAddress.governorate?.trim() || !targetAddress.markaz?.trim()) {
+        return {
+          isServiceable: false,
+          reason: 'بيانات العنوان المختار غير مكتملة (المحافظة أو المركز مفقود). يرجى اختيار أو تحديث العنوان.',
+        };
+      }
+
+      // Step B: Fetch food_governorates and verify active status
+      const { data: govs, error: govError } = await supabase
+        .from('food_governorates')
+        .select('id, name_ar, name_en, is_active');
+
+      if (govError || !govs || govs.length === 0) {
+        return {
+          isServiceable: false,
+          reason: 'تعذر التحقق من قائمة المحافظات المعتمدة في النظام.',
+        };
+      }
+
+      let matchedGov: any = null;
+      if (targetAddress.governorateId) {
+        matchedGov = govs.find((g: any) => g.id === targetAddress.governorateId);
+      }
+      if (!matchedGov) {
+        const normAddressGov = normalizeArabicText(targetAddress.governorate);
+        matchedGov = govs.find((g: any) => {
+          const nameArNorm = normalizeArabicText(g.name_ar);
+          const nameEn = (g.name_en || '').toLowerCase();
+          return (
+            nameArNorm === normAddressGov ||
+            nameEn === targetAddress.governorate.trim().toLowerCase() ||
+            nameArNorm.includes(normAddressGov) ||
+            normAddressGov.includes(nameArNorm)
+          );
+        });
+      }
+
+      if (!matchedGov) {
+        return {
+          isServiceable: false,
+          reason: `محافظة العنوان (${targetAddress.governorate}) غير مطابقة لأي محافظة معتمدة في قاعدة البيانات.`,
+        };
+      }
+
+      if (!matchedGov.is_active) {
+        return {
+          isServiceable: false,
+          reason: `محافظة (${matchedGov.name_ar}) غير مفعّلة في خدمة التوصيل حالياً.`,
+          governorateId: matchedGov.id,
+        };
+      }
+
+      // Step C: Fetch food_centers for this governorate and verify active status
+      const { data: centers, error: centerError } = await supabase
+        .from('food_centers')
+        .select('id, governorate_id, name_ar, name_en, is_active')
+        .eq('governorate_id', matchedGov.id);
+
+      if (centerError || !centers || centers.length === 0) {
+        return {
+          isServiceable: false,
+          reason: `لا توجد مراكز أو مدن مسجلة تابعة لمحافظة (${matchedGov.name_ar}).`,
+          governorateId: matchedGov.id,
+        };
+      }
+
+      let matchedCenter: any = null;
+      if (targetAddress.centerId) {
+        matchedCenter = centers.find((c: any) => c.id === targetAddress.centerId);
+      }
+      if (!matchedCenter) {
+        const normAddressMarkaz = normalizeArabicText(targetAddress.markaz);
+        matchedCenter = centers.find((c: any) => {
+          const nameArNorm = normalizeArabicText(c.name_ar);
+          const nameEn = (c.name_en || '').toLowerCase();
+          return (
+            nameArNorm === normAddressMarkaz ||
+            nameEn === targetAddress.markaz.trim().toLowerCase() ||
+            nameArNorm.includes(normAddressMarkaz) ||
+            normAddressMarkaz.includes(nameArNorm)
+          );
+        });
+      }
+
+      if (!matchedCenter) {
+        return {
+          isServiceable: false,
+          reason: `المركز/المدينة (${targetAddress.markaz}) غير مطابق للمراكز المعتمدة التابعة لمحافظة (${matchedGov.name_ar}).`,
+          governorateId: matchedGov.id,
+        };
+      }
+
+      if (!matchedCenter.is_active) {
+        return {
+          isServiceable: false,
+          reason: `مركز/مدينة (${matchedCenter.name_ar}) غير مفعّل في خدمة التوصيل حالياً.`,
+          governorateId: matchedGov.id,
+          centerId: matchedCenter.id,
+        };
+      }
+
+      // Step D: Fetch food_areas for this center strictly using authoritative selection (NO text guessing from street/detailedAddress)
+      let matchedArea: any = null;
+      if (targetAddress.areaId || targetAddress.area) {
+        const { data: areas } = await supabase
+          .from('food_areas')
+          .select('id, center_id, name_ar, name_en, is_active')
+          .eq('center_id', matchedCenter.id);
+
+        if (areas && areas.length > 0) {
+          if (targetAddress.areaId) {
+            matchedArea = areas.find((a: any) => a.id === targetAddress.areaId);
+          } else if (targetAddress.area) {
+            const normArea = normalizeArabicText(targetAddress.area);
+            matchedArea = areas.find((a: any) => normalizeArabicText(a.name_ar) === normArea);
+          }
+        }
+      }
+
+      // Step E: Hierarchical Scope Matching in restaurant_section_service_areas
+      // Priority 1: Area level (if area was explicitly selected and configured)
+      if (matchedArea) {
+        const areaScope = activeServiceAreas.find((sa: any) => sa.area_id === matchedArea.id);
+        if (areaScope) {
+          if (!matchedArea.is_active) {
+            return {
+              isServiceable: false,
+              reason: `منطقة (${matchedArea.name_ar}) غير مفعّلة في خدمة التوصيل حالياً.`,
+              governorateId: matchedGov.id,
+              centerId: matchedCenter.id,
+              areaId: matchedArea.id,
+            };
+          }
+          return {
+            isServiceable: true,
+            matchedLevel: 'area',
+            governorateId: matchedGov.id,
+            centerId: matchedCenter.id,
+            areaId: matchedArea.id,
+          };
+        }
+      }
+
+      // Priority 2: Center level (center_id matches, area_id is null)
+      const centerScope = activeServiceAreas.find(
+        (sa: any) => sa.center_id === matchedCenter.id && !sa.area_id
+      );
+      if (centerScope) {
+        return {
+          isServiceable: true,
+          matchedLevel: 'center',
+          governorateId: matchedGov.id,
+          centerId: matchedCenter.id,
+          areaId: matchedArea?.id,
+        };
+      }
+
+      // Priority 3: Governorate level (governorate_id matches, center_id is null, area_id is null)
+      const govScope = activeServiceAreas.find(
+        (sa: any) => sa.governorate_id === matchedGov.id && !sa.center_id && !sa.area_id
+      );
+      if (govScope) {
+        return {
+          isServiceable: true,
+          matchedLevel: 'governorate',
+          governorateId: matchedGov.id,
+          centerId: matchedCenter.id,
+          areaId: matchedArea?.id,
+        };
+      }
+
+      // Out of active service area scope
+      return {
+        isServiceable: false,
+        reason: `العنوان (${targetAddress.markaz} - ${targetAddress.governorate}) يقع خارج النطاق الجغرافي المخدوم حالياً بقسم المطاعم.`,
+        governorateId: matchedGov.id,
+        centerId: matchedCenter.id,
+        areaId: matchedArea?.id,
+      };
+    } catch (err: any) {
+      return {
+        isServiceable: false,
+        reason: err?.message || 'استثناء أثناء التحقق من النطاق الجغرافي.',
+      };
+    }
+  },
+
+  // --------------------------------------------------------------------------
+  // 1.2 Resolve Restaurant Delivery Fee with Area Priority and Coverage Check
+  // --------------------------------------------------------------------------
+  async resolveDeliveryFee(
+    restaurantId: string,
+    address?: FoodCustomerAddress | null,
+    defaultRestaurantFee: number = 15
+  ): Promise<{ fee: number; isCovered: boolean; reason?: string }> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return { fee: defaultRestaurantFee, isCovered: true };
+    }
+    try {
+      // 1. Fetch active area delivery fees for this restaurant
+      const { data: areaFees } = await supabase
+        .from('restaurant_area_delivery_fees')
+        .select('id, restaurant_id, area_id, delivery_fee, is_active')
+        .eq('restaurant_id', restaurantId)
+        .eq('is_active', true);
+
+      // 2. Fetch active service areas for this restaurant
+      const { data: serviceAreas } = await supabase
+        .from('restaurant_service_areas')
+        .select('id, restaurant_id, governorate_id, center_id, area_id, is_active')
+        .eq('restaurant_id', restaurantId)
+        .eq('is_active', true);
+
+      if (!address) {
+        return { fee: defaultRestaurantFee, isCovered: true };
+      }
+
+      // Priority 1: Exact area_id match in restaurant_area_delivery_fees
+      if (address.areaId && areaFees && areaFees.length > 0) {
+        const exactFeeRow = areaFees.find((f: any) => f.area_id === address.areaId);
+        if (exactFeeRow && exactFeeRow.delivery_fee !== null && exactFeeRow.delivery_fee !== undefined) {
+          return { fee: Number(exactFeeRow.delivery_fee), isCovered: true };
+        }
+      }
+
+      // Priority 2: If address.area is given without areaId, look up areaId from food_areas for this center
+      let resolvedAreaId = address.areaId;
+      if (!resolvedAreaId && address.area && address.centerId) {
+        const { data: aList } = await supabase
+          .from('food_areas')
+          .select('id, name_ar')
+          .eq('center_id', address.centerId)
+          .eq('is_active', true);
+        const norm = normalizeArabicText(address.area);
+        const matched = (aList || []).find((a: any) => normalizeArabicText(a.name_ar) === norm);
+        if (matched) {
+          resolvedAreaId = matched.id;
+          if (areaFees && areaFees.length > 0) {
+            const exactFeeRow = areaFees.find((f: any) => f.area_id === matched.id);
+            if (exactFeeRow && exactFeeRow.delivery_fee !== null && exactFeeRow.delivery_fee !== undefined) {
+              return { fee: Number(exactFeeRow.delivery_fee), isCovered: true };
+            }
+          }
+        }
+      }
+
+      // Priority 3: Check if restaurant covers this center or governorate in restaurant_service_areas
+      if (serviceAreas && serviceAreas.length > 0) {
+        const coversArea = resolvedAreaId
+          ? serviceAreas.some((sa: any) => sa.area_id === resolvedAreaId)
+          : false;
+        const coversCenter = address.centerId
+          ? serviceAreas.some((sa: any) => sa.center_id === address.centerId)
+          : false;
+        const coversGov = address.governorateId
+          ? serviceAreas.some((sa: any) => sa.governorate_id === address.governorateId)
+          : false;
+
+        if (coversArea || coversCenter || coversGov) {
+          return { fee: defaultRestaurantFee, isCovered: true };
+        } else {
+          return {
+            fee: defaultRestaurantFee,
+            isCovered: false,
+            reason: `المطعم لا يغطي المركز أو المنطقة المحددة (${address.area || address.markaz || address.governorate}) حالياً.`,
+          };
+        }
+      }
+
+      return { fee: defaultRestaurantFee, isCovered: true };
+    } catch (err) {
+      return { fee: defaultRestaurantFee, isCovered: true };
     }
   },
 

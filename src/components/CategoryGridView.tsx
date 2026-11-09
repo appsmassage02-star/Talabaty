@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { useApp } from "../context/AppContext";
 import { usePharmacy } from "../lib/usePharmacy";
-import { foodService } from "../food/services/foodService";
-import { RestaurantSectionSettings, GeographicVerificationResult } from "../food/types/foodTypes";
+import { biteAndBaitService } from "../bite-and-bait/services/biteAndBaitService";
+import { RestaurantSectionSettings, GeographicVerificationResult } from "../bite-and-bait/types";
 import { CATEGORY_IMAGE_PRESETS } from "../data/categories";
 import {
   ChevronLeft,
@@ -46,12 +46,12 @@ export const CategoryGridView: React.FC = () => {
     let isMounted = true;
     setIsLoadingFoodSettings(true);
     Promise.all([
-      foodService.getSectionSettings(),
-      foodService.verifyGeographicScope(),
+      biteAndBaitService.getSectionSettings(),
+      biteAndBaitService.verifyGeographicScope(),
     ])
-      .then(([settings, geoRes]) => {
+      .then(([settingsRes, geoRes]) => {
         if (isMounted) {
-          setFoodSettings(settings);
+          setFoodSettings(settingsRes.success ? settingsRes.data : null);
           setFoodGeoScope(geoRes);
         }
       })
