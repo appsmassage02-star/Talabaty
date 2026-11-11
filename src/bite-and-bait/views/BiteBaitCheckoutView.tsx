@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import type { FoodCartItem, FoodCustomerAddress } from '../types';
+import { biteAndBaitService } from '../services/biteAndBaitService';
 
 interface BiteBaitCheckoutViewProps {
   cartItems: FoodCartItem[];
@@ -7,6 +8,10 @@ interface BiteBaitCheckoutViewProps {
   deliveryFee: number;
   totalPrice: number;
   restaurantName: string;
+  restaurantId: string;
+  baseRestaurantDeliveryFee?: number;
+  householdId?: string;
+  userId?: string;
   savedAddresses?: FoodCustomerAddress[];
   defaultCustomerName?: string;
   defaultCustomerPhone?: string;
@@ -27,9 +32,13 @@ interface BiteBaitCheckoutViewProps {
 export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
   cartItems,
   subtotal,
-  deliveryFee,
+  deliveryFee: initialDeliveryFee,
   totalPrice: initialTotalPrice,
   restaurantName,
+  restaurantId,
+  baseRestaurantDeliveryFee,
+  householdId,
+  userId,
   savedAddresses = [],
   defaultCustomerName = '',
   defaultCustomerPhone = '',
@@ -64,6 +73,12 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
   const [couponNotice, setCouponNotice] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  // Dynamic Geographic Coverage & Delivery Fee state
+  const [currentDeliveryFee, setCurrentDeliveryFee] = useState<number>(initialDeliveryFee);
+  const [isAddressCovered, setIsAddressCovered] = useState<boolean>(true);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
+  const [isCheckingCoverage, setIsCheckingCoverage] = useState<boolean>(false);
+
   // GPS Coordinates and Location Acquisition State
   const [customGpsCoords, setCustomGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [isAcquiringGps, setIsAcquiringGps] = useState<boolean>(false);
@@ -77,7 +92,52 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
     return 'bnb_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now();
   });
 
-  // When selectedAddressId changes, update fields
+  // Verify coverage & resolve delivery fee dynamically
+  const verifyCoverageAndFee = useCallback(
+    async (targetAddr: FoodCustomerAddress | null) => {
+      if (!targetAddr) {
+        setIsAddressCovered(true);
+        setCoverageError(null);
+        setCurrentDeliveryFee(baseRestaurantDeliveryFee ?? initialDeliveryFee);
+        return;
+      }
+
+      setIsCheckingCoverage(true);
+      try {
+        // 1. Verify general geographic serviceability (governorate, center, area)
+        const scopeRes = await biteAndBaitService.verifyGeographicScope(targetAddr, householdId, userId);
+        if (!scopeRes.isServiceable) {
+          setIsAddressCovered(false);
+          setCoverageError(scopeRes.reason || 'المنطقة المحددة تقع خارج النطاق الجغرافي المخدوم حالياً لقسم المطاعم.');
+          setIsCheckingCoverage(false);
+          return;
+        }
+
+        // 2. Resolve restaurant-specific area delivery fee & coverage
+        const feeRes = await biteAndBaitService.resolveDeliveryFee(
+          restaurantId,
+          targetAddr,
+          baseRestaurantDeliveryFee ?? initialDeliveryFee
+        );
+
+        if (!feeRes.isCovered) {
+          setIsAddressCovered(false);
+          setCoverageError(feeRes.reason || `المطعم (${restaurantName}) لا يغطي هذه المنطقة حالياً.`);
+        } else {
+          setIsAddressCovered(true);
+          setCoverageError(null);
+          setCurrentDeliveryFee(feeRes.fee);
+        }
+      } catch (err: any) {
+        console.warn('[BiteBaitCheckoutView] Error checking coverage and fee:', err);
+      } finally {
+        setIsCheckingCoverage(false);
+      }
+    },
+    [restaurantId, restaurantName, baseRestaurantDeliveryFee, initialDeliveryFee, householdId, userId]
+  );
+
+  // When selectedAddressId changes, update fields and re-verify coverage
   const handleSelectAddress = (addrId: string | null) => {
     setSelectedAddressId(addrId);
     setValidationError(null);
@@ -108,18 +168,23 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
         } else {
           setGpsStatusMessage('⚠️ هذا العنوان المسجل لا يحتوي على إحداثيات GPS. يلزم الضغط على "تحديد موقعي الآن" لتأكيد التوصيل.');
         }
+
+        // Run coverage and fee verification
+        verifyCoverageAndFee(addr);
       }
     } else {
       // New / custom address chosen
       setAddressText('');
       setCustomGpsCoords(null);
       setGpsStatusMessage('يرجى كتابة العنوان والضغط على "تحديد موقعي الآن" لقراءة إحداثيات الـ GPS بدقة.');
+      verifyCoverageAndFee(null);
     }
   };
 
-  // Check initial GPS status on load
+  // Check initial coverage and GPS status on load
   useEffect(() => {
     if (defaultSavedAddr) {
+      verifyCoverageAndFee(defaultSavedAddr);
       const hasGps = Boolean(
         defaultSavedAddr.latitude &&
           defaultSavedAddr.longitude &&
@@ -136,7 +201,7 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
         setGpsStatusMessage('⚠️ هذا العنوان المسجل لا يحتوي على إحداثيات GPS. يرجى قراءة الموقع الحالي.');
       }
     }
-  }, [defaultSavedAddr]);
+  }, [defaultSavedAddr, verifyCoverageAndFee]);
 
   // Browser Geolocation Acquisition
   const handleAcquireGps = () => {
@@ -192,6 +257,14 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
     e.preventDefault();
     if (isSubmitting) return; // Prevent multi-click while in transit
     setValidationError(null);
+
+    // Enforcement: Restaurant Coverage & Geographic Scope Verification
+    if (!isAddressCovered) {
+      setValidationError(
+        coverageError || 'لا يمكن إتمام الطلب لأن المطعم المختار لا يغطي منطقة عنوان التوصيل.'
+      );
+      return;
+    }
 
     // Basic Input Validations
     if (!customerName.trim()) {
@@ -671,10 +744,32 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
               </div>
             </div>
 
-            {/* Order Confirmation CTA Button with Multi-click Prevention */}
+            {/* Coverage Error Banner if restaurant does not deliver to this address */}
+            {(!isAddressCovered || coverageError) && (
+              <div
+                style={{
+                  background: '#fef2f2',
+                  border: '1.5px solid #f87171',
+                  borderRadius: '12px',
+                  padding: '12px 14px',
+                  marginTop: '12px',
+                  color: '#991b1b',
+                  fontSize: '12.5px',
+                  fontWeight: 700,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <span style={{ fontSize: '18px' }}>🚫</span>
+                <span>{coverageError || 'المطعم المختار لا يغطي منطقة عنوان التوصيل.'}</span>
+              </div>
+            )}
+
+            {/* Order Confirmation CTA Button with Multi-click Prevention & Coverage Enforcement */}
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !isAddressCovered || isCheckingCoverage}
               className="bnb-header-cta"
               style={{
                 width: '100%',
@@ -683,15 +778,20 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
                 justifyContent: 'center',
                 marginTop: '12px',
                 boxSizing: 'border-box',
-                opacity: isSubmitting ? 0.65 : 1,
-                cursor: isSubmitting ? 'not-allowed' : 'pointer',
+                opacity: isSubmitting || !isAddressCovered || isCheckingCoverage ? 0.65 : 1,
+                cursor: isSubmitting || !isAddressCovered || isCheckingCoverage ? 'not-allowed' : 'pointer',
                 pointerEvents: isSubmitting ? 'none' : 'auto',
+                background: !isAddressCovered ? '#94a3b8' : undefined,
               }}
             >
               {isSubmitting ? (
                 <span>جاري تسجيل الطلب لدى المطعم في قاعدة البيانات... ⏳</span>
+              ) : isCheckingCoverage ? (
+                <span>جاري التحقق من نطاق التغطية والرسوم... 🔍</span>
+              ) : !isAddressCovered ? (
+                <span>المطعم لا يغطي هذا العنوان (يرجى اختيار عنوان آخر) 🚫</span>
               ) : (
-                <span>تأكيد طلب {restaurantName} الآن 🚀 ({initialTotalPrice} ج.م تقديري)</span>
+                <span>تأكيد طلب {restaurantName} الآن 🚀 ({subtotal + (isAddressCovered ? currentDeliveryFee : 0)} ج.م)</span>
               )}
             </button>
           </form>
@@ -755,15 +855,25 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#475569', marginBottom: '8px' }}>
-            <span>رسوم التوصيل المقدرة:</span>
-            <span>{deliveryFee > 0 ? `${deliveryFee} ج.م` : 'مجاني'}</span>
+            <span>رسوم التوصيل:</span>
+            <span style={{ fontWeight: 700, color: currentDeliveryFee === 0 ? '#16a34a' : '#0f172a' }}>
+              {!isAddressCovered
+                ? 'خارج التغطية'
+                : isCheckingCoverage
+                ? 'جاري الحساب...'
+                : currentDeliveryFee > 0
+                ? `${currentDeliveryFee} ج.م`
+                : 'مجاني 0 ج.م'}
+            </span>
           </div>
 
           <div style={{ height: '1px', background: '#e2e8f0', margin: '12px 0' }} />
 
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '15px', fontWeight: 800, color: '#0f172a' }}>
-            <span>الإجمالي التقديري:</span>
-            <span style={{ color: '#ea580c' }}>{initialTotalPrice} ج.م</span>
+            <span>الإجمالي:</span>
+            <span style={{ color: '#ea580c' }}>
+              {subtotal + (isAddressCovered ? currentDeliveryFee : 0)} ج.م
+            </span>
           </div>
 
           <div style={{ fontSize: '11px', color: '#64748b', marginTop: '10px', lineHeight: 1.4 }}>

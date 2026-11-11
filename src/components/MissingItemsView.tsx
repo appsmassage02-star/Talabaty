@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useApp } from "../context/AppContext";
-import { MissingItem } from "../types";
+import { MissingItem, HouseholdAddress, InvoiceProduct } from "../types";
+import { deliveryService } from "../lib/deliveryService";
+import { DeliveryOrderModal } from "./DeliveryOrderModal";
 import {
   ClipboardList,
   CheckCircle2,
@@ -17,10 +19,13 @@ import {
   WifiOff,
   Plus,
   Minus,
+  Truck,
 } from "lucide-react";
 
 export const MissingItemsView: React.FC = () => {
   const {
+    household,
+    supabaseUser,
     missingItems,
     toggleItemCompletion,
     deleteMissingItem,
@@ -89,6 +94,77 @@ export const MissingItemsView: React.FC = () => {
     activeRole === "admin" || homePermissions.canUseAiAssistant;
   const canAddInvoice =
     activeRole === "admin" || homePermissions.canAddInvoice;
+
+  // Household Delivery Order State
+  const [isDeliveryModalOpen, setIsDeliveryModalOpen] = useState(false);
+  const [deliveryFeedback, setDeliveryFeedback] = useState<string | null>(null);
+  const [isSubmittingDeliveryOrder, setIsSubmittingDeliveryOrder] = useState(false);
+
+  const deliveryProducts: InvoiceProduct[] = useMemo(() => {
+    return activeItems.map((item) => ({
+      id: item.id,
+      missingItemId: item.id,
+      name: item.name,
+      quantity: item.quantity || "١",
+      price: 0,
+      category: item.category,
+      categoryArabic: item.categoryArabic,
+    }));
+  }, [activeItems]);
+
+  const handleConfirmDeliveryOrder = async (deliveryData: {
+    addressId: string;
+    deliveryNotes: string;
+    deliveryFee: number;
+    addressSnapshot: HouseholdAddress;
+  }): Promise<{ success: boolean; message?: string }> => {
+    if (!household?.id) {
+      return { success: false, message: "لم يتم العثور على الأسرة الحالية في النظام" };
+    }
+
+    if (deliveryProducts.length === 0) {
+      return { success: false, message: "لا توجد أغراض نشطة في قائمة النواقص لإرسالها" };
+    }
+
+    if (isSubmittingDeliveryOrder) {
+      return { success: false, message: "جاري إرسال الطلب بالفعل، يرجى الانتظار..." };
+    }
+
+    try {
+      setIsSubmittingDeliveryOrder(true);
+      const res = await deliveryService.createOrder({
+        householdId: household.id,
+        addressId: deliveryData.addressId,
+        addressSnapshot: deliveryData.addressSnapshot,
+        deliveryNotes: deliveryData.deliveryNotes,
+        items: deliveryProducts.map((p) => ({
+          product_id: p.missingItemId || null,
+          product_name: p.name,
+          category_id: p.category || null,
+          category_name: p.categoryArabic || null,
+          quantity: p.quantity || "١",
+          unit_price: 0,
+          total_price: 0,
+        })),
+        userId: supabaseUser?.id,
+      });
+
+      setIsSubmittingDeliveryOrder(false);
+
+      if (!res.success) {
+        return { success: false, message: res.message || "تعذر تسجيل طلب التوصيل" };
+      }
+
+      setIsDeliveryModalOpen(false);
+      setDeliveryFeedback("تم تسجيل طلب التوصيل بنجاح 🛵 يمكنك متابعته مباشرة من قسم طلباتي");
+      setTimeout(() => setDeliveryFeedback(null), 4500);
+      window.dispatchEvent(new CustomEvent("delivery-order-created"));
+      return { success: true, message: "تم تسجيل طلب التوصيل بنجاح 🛵" };
+    } catch (err: any) {
+      setIsSubmittingDeliveryOrder(false);
+      return { success: false, message: err?.message || "حدث خطأ أثناء إرسال طلب التوصيل" };
+    }
+  };
 
   const handleUrgentRing = () => {
     sendHomeAttentionAlert();
@@ -172,6 +248,23 @@ export const MissingItemsView: React.FC = () => {
               <span>تسجيل فاتورة شراء</span>
             </button>
           )}
+
+          {/* Household Delivery Order Button */}
+          <button
+            id="btn-order-household-delivery"
+            onClick={() => {
+              if (activeItems.length === 0) {
+                alert("لا توجد أغراض نشطة في قائمة النواقص لإرسالها للطلب");
+                return;
+              }
+              setIsDeliveryModalOpen(true);
+            }}
+            disabled={activeItems.length === 0}
+            className="flex items-center justify-center space-x-1.5 space-x-reverse px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-xs transition-colors cursor-pointer"
+          >
+            <Truck className="w-4 h-4 ml-1" />
+            <span>طلب توصيل للمنزل</span>
+          </button>
         </div>
       </div>
 
@@ -454,6 +547,22 @@ export const MissingItemsView: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* Toast Feedback */}
+      {deliveryFeedback && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-emerald-800 text-white px-5 py-3 rounded-2xl shadow-xl text-xs font-bold border border-emerald-700 animate-in fade-in slide-in-from-bottom-2">
+          {deliveryFeedback}
+        </div>
+      )}
+
+      {/* Household Delivery Order Modal */}
+      <DeliveryOrderModal
+        isOpen={isDeliveryModalOpen}
+        onClose={() => setIsDeliveryModalOpen(false)}
+        products={deliveryProducts}
+        subtotal={0}
+        onConfirm={handleConfirmDeliveryOrder}
+      />
     </div>
   );
 };

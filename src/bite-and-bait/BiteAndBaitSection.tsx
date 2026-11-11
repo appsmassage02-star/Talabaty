@@ -400,6 +400,50 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     }, 4500);
   };
 
+  // Dynamic Geographic Delivery Fee Resolution for Restaurants based on Default Address
+  const [restaurantDeliveryFees, setRestaurantDeliveryFees] = useState<Record<string, number>>({});
+  const [restaurantCoverageMap, setRestaurantCoverageMap] = useState<Record<string, boolean>>({});
+
+  const defaultCustomerAddress = useMemo(() => {
+    return activeAddresses.find((a) => a.isDefault) || activeAddresses[0] || null;
+  }, [activeAddresses]);
+
+  useEffect(() => {
+    if (!defaultCustomerAddress || activeRestaurants.length === 0 || forcePreviewMode) return;
+    let isMounted = true;
+
+    const resolveAllFees = async () => {
+      const feeMap: Record<string, number> = {};
+      const covMap: Record<string, boolean> = {};
+
+      for (const rest of activeRestaurants) {
+        try {
+          const res = await biteAndBaitService.resolveDeliveryFee(
+            rest.id,
+            defaultCustomerAddress,
+            rest.deliveryFee
+          );
+          feeMap[rest.id] = res.fee;
+          covMap[rest.id] = res.isCovered;
+        } catch {
+          feeMap[rest.id] = rest.deliveryFee ?? 0;
+          covMap[rest.id] = true;
+        }
+      }
+
+      if (isMounted) {
+        setRestaurantDeliveryFees(feeMap);
+        setRestaurantCoverageMap(covMap);
+      }
+    };
+
+    resolveAllFees();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [defaultCustomerAddress, activeRestaurants, forcePreviewMode]);
+
   // MULTI-RESTAURANT CART: Group items strictly by restaurantId
   const restaurantGroups = useMemo<RestaurantCartGroup[]>(() => {
     const map: Record<string, RestaurantCartGroup> = {};
@@ -407,13 +451,17 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     activeCartItems.forEach((item) => {
       if (!map[item.restaurantId]) {
         const rest = activeRestaurants.find((r) => r.id === item.restaurantId);
+        const resolvedFee = restaurantDeliveryFees[item.restaurantId] !== undefined
+          ? restaurantDeliveryFees[item.restaurantId]
+          : (rest?.deliveryFee ?? 0);
+
         map[item.restaurantId] = {
           restaurantId: item.restaurantId,
           restaurantName: item.restaurantName || rest?.name || 'مطعم معتمد',
           restaurant: rest,
           items: [],
           subtotal: 0,
-          deliveryFee: rest?.deliveryFee ?? 0,
+          deliveryFee: resolvedFee,
           total: 0,
           isOpen: rest?.isOpen ?? true,
           nextOpeningTime: rest?.nextOpeningTime,
@@ -430,7 +478,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     });
 
     return Object.values(map);
-  }, [activeCartItems, activeRestaurants]);
+  }, [activeCartItems, activeRestaurants, restaurantDeliveryFees]);
 
   // Overall Cart Aggregate Totals across all restaurants
   const overallSubtotal = useMemo(() => {
@@ -614,6 +662,12 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         `المطعم (${group.restaurantName}) مغلق حالياً. يرجى انتظار موعد الفتح (${group.nextOpeningTime || 'لاحقاً'}) لإتمام الطلب.`
       );
       return;
+    }
+    const isCovered = restaurantCoverageMap[restaurantId];
+    if (isCovered === false) {
+      triggerNotification(
+        `تنبيه: المطعم (${group.restaurantName}) قد لا يغطي عنوانك الافتراضي الحالي. يرجى التأكد من اختيار عنوان مشمول في شاشة إتمام الطلب.`
+      );
     }
     setCheckoutRestaurantId(restaurantId);
     setCurrentView('checkout');
@@ -1459,6 +1513,10 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             deliveryFee={checkoutGroup.deliveryFee}
             totalPrice={checkoutGroup.total}
             restaurantName={checkoutGroup.restaurantName}
+            restaurantId={checkoutGroup.restaurantId}
+            baseRestaurantDeliveryFee={checkoutGroup.restaurant?.deliveryFee ?? 0}
+            householdId={household?.id}
+            userId={supabaseUser?.id || (supabaseProfile as any)?.id}
             savedAddresses={activeAddresses}
             defaultCustomerName={currentCustomerName}
             defaultCustomerPhone={currentCustomerPhone}

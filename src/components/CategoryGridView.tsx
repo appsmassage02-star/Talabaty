@@ -282,9 +282,15 @@ export const CategoryGridView: React.FC = () => {
                       <UtensilsCrossed className="w-3.5 h-3.5 text-amber-600" />
                       <span>مشويات، بيتزا، برجر، شاورما، أكلات شرقية وحلويات</span>
                     </div>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-50 text-amber-800 border border-amber-200">
-                      وضع المعاينة النشط 🧪
-                    </span>
+                    {isFoodOperational ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-200">
+                        متاح للطلب 🟢
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-50 text-amber-800 border border-amber-200">
+                        الخدمة معطلة مؤقتاً
+                      </span>
+                    )}
                   </div>
                   <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
                     قسم الأكلات الجاهزة والمطاعم المعتمدة: تصفح الوجبات وقوائم الطعام واطلب مباشرة مع تجربة واجهة بايت آند بيت الحديثة.

@@ -16,6 +16,11 @@ import {
   MinusCircle,
   X,
   ShoppingBag,
+  Eye,
+  Info,
+  AlertCircle,
+  ShoppingCart,
+  Minus,
 } from "lucide-react";
 
 export const CategoryProductsView: React.FC = () => {
@@ -85,6 +90,12 @@ export const CategoryProductsView: React.FC = () => {
   const [customItemName, setCustomItemName] = useState("");
   const [customQuantity, setCustomQuantity] = useState("١");
   const [customUrgency, setCustomUrgency] = useState<"high" | "normal">("normal");
+
+  // State for Product Details Modal (Part III.3)
+  const [productForDetails, setProductForDetails] = useState<CatalogProduct | null>(null);
+  const [detailQuantity, setDetailQuantity] = useState<number>(1);
+  const [detailUrgency, setDetailUrgency] = useState<"high" | "normal">("normal");
+  const [detailNotes, setDetailNotes] = useState<string>("");
 
   const category = categories.find((c) => c.id === selectedCategory);
 
@@ -192,6 +203,56 @@ export const CategoryProductsView: React.FC = () => {
       showToast(`تمت إضافة "${prod.name_ar}" إلى قائمة النواقص`);
     }
     setActiveProductMenu(null);
+  };
+
+  // Open Product Details Modal (Part III.3)
+  const handleOpenProductDetails = (prod: CatalogProduct) => {
+    setProductForDetails(prod);
+    const existing = getMissingItemForProduct(prod.name_ar);
+    if (existing) {
+      const q = parseInt(existing.quantity, 10);
+      setDetailQuantity(isNaN(q) || q <= 0 ? 1 : q);
+      setDetailUrgency(existing.urgency === "high" ? "high" : "normal");
+      setDetailNotes(existing.notes || "");
+    } else {
+      const defaultQ = parseInt(prod.quantity || prod.default_quantity || "1", 10);
+      setDetailQuantity(isNaN(defaultQ) || defaultQ <= 0 ? 1 : defaultQ);
+      setDetailUrgency("normal");
+      setDetailNotes("");
+    }
+  };
+
+  // Save / Add from Product Details Modal
+  const handleSaveProductFromDetailModal = () => {
+    if (!productForDetails) return;
+    if (productForDetails.is_active === false) {
+      showToast("عذراً، هذا الصنف غير متوفر حالياً في الكتالوج ولا يمكن طلبه.");
+      return;
+    }
+    if (!canAdd) {
+      showToast("ليس لديك صلاحية تعديل قائمة النواقص");
+      return;
+    }
+
+    const existing = getMissingItemForProduct(productForDetails.name_ar);
+    if (existing) {
+      deleteMissingItem(existing.id);
+    }
+
+    addMissingItem({
+      name: productForDetails.name_ar,
+      category: category.id,
+      categoryArabic: category.nameAr,
+      quantity: detailQuantity > 0 ? String(detailQuantity) : "١",
+      urgency: detailUrgency,
+      notes: detailNotes.trim() || undefined,
+      addedBy: activeRole === "admin" ? "admin" : "home",
+      addedByName: activeRole === "admin" ? "المسؤول" : "هاتف المنزل",
+      productId: productForDetails.id,
+    });
+
+    showToast(`تمت إضافة "${productForDetails.name_ar}" (${detailQuantity} ${productForDetails.unit || productForDetails.default_unit || 'قطعة'}) إلى النواقص 🛒`);
+    setProductForDetails(null);
   };
 
   // Action 2 from 3-dots Menu: Open Edit Product Modal
@@ -430,7 +491,14 @@ export const CategoryProductsView: React.FC = () => {
         }`}
       >
         {/* Product Image: Uses prod.image_url first with fallback to /app-logo.png */}
-        <div className="w-11 h-11 rounded-xl bg-slate-50 border border-slate-200/80 p-0.5 shrink-0 flex items-center justify-center shadow-2xs group-hover:scale-105 transition-transform pointer-events-none overflow-hidden">
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            handleOpenProductDetails(prod);
+          }}
+          className="w-11 h-11 rounded-xl bg-slate-50 border border-slate-200/80 p-0.5 shrink-0 flex items-center justify-center shadow-2xs group-hover:scale-105 transition-transform overflow-hidden cursor-pointer relative"
+          title="انقر لعرض تفاصيل الصنف بالكامل"
+        >
           {prod.image_url ? (
             <img
               src={prod.image_url}
@@ -447,6 +515,9 @@ export const CategoryProductsView: React.FC = () => {
               className="w-full h-full object-contain pointer-events-none p-1"
             />
           )}
+          <div className="absolute inset-0 bg-slate-900/0 hover:bg-slate-900/20 transition-colors flex items-center justify-center text-white opacity-0 hover:opacity-100 rounded-lg">
+            <Eye className="w-3.5 h-3.5 drop-shadow" />
+          </div>
         </div>
 
         {/* Product Details */}
@@ -946,8 +1017,29 @@ export const CategoryProductsView: React.FC = () => {
               </button>
             </div>
 
-            {/* The 3 Required Options */}
+            {/* The Options */}
             <div className="space-y-2">
+              {/* Option 0: Product Details */}
+              <button
+                type="button"
+                onClick={() => {
+                  const prod = activeProductMenu.product;
+                  setActiveProductMenu(null);
+                  handleOpenProductDetails(prod);
+                }}
+                className="w-full p-3 rounded-2xl bg-indigo-50 hover:bg-indigo-100 text-indigo-950 border border-indigo-200 text-xs font-bold flex items-center space-x-2.5 space-x-reverse transition-colors cursor-pointer text-right"
+              >
+                <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                  <Info className="w-4 h-4" />
+                </div>
+                <div className="flex-1">
+                  <span className="block font-bold text-indigo-950">تفاصيل ومواصفات الصنف</span>
+                  <span className="text-[10px] text-indigo-700 font-normal">
+                    عرض السعر التقديري، الوحدة، وتحديد كمية مخصصة
+                  </span>
+                </div>
+              </button>
+
               {/* Option 1: Add to / Remove from Missing */}
               {isItemMissing(activeProductMenu.product.name_ar) ? (
                 <button
@@ -1246,6 +1338,237 @@ export const CategoryProductsView: React.FC = () => {
               >
                 <Trash2 className="w-4 h-4" />
                 <span>تأكيد الحذف</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================== */}
+      {/* MODAL 5: PRODUCT DETAILS MODAL (Part III.3)                */}
+      {/* ========================================================== */}
+      {productForDetails && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-md w-full border border-slate-200 shadow-2xl space-y-4 animate-in zoom-in-95 text-right max-h-[92vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center space-x-2 space-x-reverse">
+                <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center">
+                  <Info className="w-4 h-4" />
+                </div>
+                <h3 className="text-sm sm:text-base font-bold text-slate-900">
+                  تفاصيل ومواصفات المنتج
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProductForDetails(null)}
+                className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center text-xs font-bold cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Product Image & Main Info */}
+            <div className="flex items-start space-x-3.5 space-x-reverse">
+              <div className="w-20 h-20 rounded-2xl bg-slate-50 border border-slate-200/90 p-1 shrink-0 flex items-center justify-center shadow-2xs overflow-hidden">
+                {productForDetails.image_url ? (
+                  <img
+                    src={productForDetails.image_url}
+                    alt={productForDetails.name_ar}
+                    className="w-full h-full object-cover rounded-xl"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).src = "/app-logo.png";
+                    }}
+                  />
+                ) : (
+                  <img
+                    src="/app-logo.png"
+                    alt="أيقونة"
+                    className="w-full h-full object-contain p-2"
+                  />
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0 space-y-1">
+                <h4 className="text-base font-bold text-slate-900 leading-snug">
+                  {productForDetails.name_ar}
+                </h4>
+                {productForDetails.name_en && (
+                  <div className="text-xs text-slate-400 font-medium">
+                    {productForDetails.name_en}
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-md text-[10px] font-bold">
+                    {category.nameAr}
+                  </span>
+                  {findSubcategoryForProduct(productForDetails) && (
+                    <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md text-[10px] font-medium">
+                      {findSubcategoryForProduct(productForDetails)?.nameAr}
+                    </span>
+                  )}
+                  {productForDetails.is_active !== false ? (
+                    <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md text-[10px] font-bold inline-flex items-center space-x-1 space-x-reverse">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block ml-1" />
+                      <span>متاح للطلب</span>
+                    </span>
+                  ) : (
+                    <span className="bg-rose-100 text-rose-800 px-2 py-0.5 rounded-md text-[10px] font-bold inline-flex items-center space-x-1 space-x-reverse">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-600 inline-block ml-1" />
+                      <span>غير متوفر حالياً</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Price & Unit Details Grid */}
+            <div className="grid grid-cols-2 gap-2.5 bg-slate-50 p-3 rounded-2xl border border-slate-200/80 text-xs">
+              <div>
+                <span className="text-slate-400 block text-[10px]">السعر التقديري</span>
+                {productForDetails.estimated_price !== undefined && productForDetails.estimated_price > 0 ? (
+                  <span className="font-bold text-slate-900 text-sm">
+                    ~{productForDetails.estimated_price} ج.م
+                  </span>
+                ) : (
+                  <span className="text-amber-700 font-medium text-[11px]">
+                    غير محدد مسبقاً
+                  </span>
+                )}
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[10px]">الوحدة القياسية</span>
+                <span className="font-bold text-slate-800 text-sm">
+                  {productForDetails.unit || productForDetails.default_unit || "قطعة"}
+                </span>
+              </div>
+            </div>
+
+            {/* Inactive Warning Alert */}
+            {productForDetails.is_active === false && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl flex items-start space-x-2 space-x-reverse text-xs text-rose-800">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
+                <span>
+                  هذا الصنف تم تعطيله مؤقتاً في الكتالوج، ولذلك لا يمكن إضافته إلى طلبات الشراء أو النواقص في الوقت الحالي.
+                </span>
+              </div>
+            )}
+
+            {/* Quantity Stepper Control */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                تحديد الكمية المطلوبة
+              </label>
+              <div className="flex items-center justify-between bg-slate-50 p-2 rounded-2xl border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setDetailQuantity((prev) => Math.max(1, prev - 1))}
+                  disabled={detailQuantity <= 1 || productForDetails.is_active === false}
+                  className="w-9 h-9 rounded-xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center font-bold text-base transition-colors shadow-2xs"
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+
+                <div className="text-center">
+                  <span className="text-lg font-bold text-slate-900 block">
+                    {detailQuantity}
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    {productForDetails.unit || productForDetails.default_unit || "قطعة"}
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setDetailQuantity((prev) => prev + 1)}
+                  disabled={productForDetails.is_active === false}
+                  className="w-9 h-9 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white flex items-center justify-center font-bold text-base transition-colors shadow-2xs"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Estimated Total Calculation */}
+              {productForDetails.estimated_price !== undefined && productForDetails.estimated_price > 0 && (
+                <div className="text-[11px] text-slate-500 flex items-center justify-between px-1">
+                  <span>إجمالي التكلفة التقديرية:</span>
+                  <span className="font-bold text-emerald-700">
+                    {(detailQuantity * productForDetails.estimated_price).toFixed(1)} ج.م
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Urgency Selector */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                مستوى الاستعجال والأولوية
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDetailUrgency("normal")}
+                  disabled={productForDetails.is_active === false}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all border ${
+                    detailUrgency === "normal"
+                      ? "bg-emerald-50 text-emerald-900 border-emerald-300 shadow-2xs"
+                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  عادي 🛒
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailUrgency("high")}
+                  disabled={productForDetails.is_active === false}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-all border ${
+                    detailUrgency === "high"
+                      ? "bg-rose-50 text-rose-900 border-rose-300 shadow-2xs"
+                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  مستعجل 🚨
+                </button>
+              </div>
+            </div>
+
+            {/* Custom Notes */}
+            <div className="space-y-1">
+              <label className="text-[11px] font-bold text-slate-700 block">
+                ملاحظات إضافية للصنف (اختياري)
+              </label>
+              <input
+                type="text"
+                value={detailNotes}
+                onChange={(e) => setDetailNotes(e.target.value)}
+                placeholder="مثال: ماركة معينة، بدون سكر، حجم كبير..."
+                disabled={productForDetails.is_active === false}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:border-emerald-500 focus:bg-white disabled:opacity-50"
+              />
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center space-x-2 space-x-reverse pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setProductForDetails(null)}
+                className="w-1/3 py-2.5 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold hover:bg-slate-200 cursor-pointer"
+              >
+                إغلاق
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveProductFromDetailModal}
+                disabled={productForDetails.is_active === false}
+                className="w-2/3 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-xs flex items-center justify-center space-x-1.5 space-x-reverse cursor-pointer"
+              >
+                <ShoppingCart className="w-4 h-4" />
+                <span>
+                  {getMissingItemForProduct(productForDetails.name_ar)
+                    ? "تحديث الصنف في النواقص"
+                    : "إضافة للنواقص / السلة"}
+                </span>
               </button>
             </div>
           </div>
