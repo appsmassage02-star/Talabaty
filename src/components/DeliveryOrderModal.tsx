@@ -60,8 +60,8 @@ export const DeliveryOrderModal: React.FC<Props> = ({
   const [newLabel, setNewLabel] = useState<string>('عنوان التوصيل');
   const [newName, setNewName] = useState<string>('');
   const [newPhone, setNewPhone] = useState<string>('');
-  const [selectedGovCode, setSelectedGovCode] = useState<string>('cairo');
-  const [selectedGovName, setSelectedGovName] = useState<string>('القاهرة');
+  const [selectedGovCode, setSelectedGovCode] = useState<string>('');
+  const [selectedGovName, setSelectedGovName] = useState<string>('');
   const [selectedMarkazName, setSelectedMarkazName] = useState<string>('');
   const [newDetailedAddress, setNewDetailedAddress] = useState<string>('');
   const [newIsDefault, setNewIsDefault] = useState<boolean>(false);
@@ -124,6 +124,15 @@ export const DeliveryOrderModal: React.FC<Props> = ({
         if (addressesData.length > 0) {
           const defaultAddr = addressesData.find((a) => a.is_default) || addressesData[0];
           setSelectedAddressId(defaultAddr.id);
+          if (defaultAddr.governorate_code) {
+            setSelectedGovCode(defaultAddr.governorate_code);
+          }
+          if (defaultAddr.governorate_name) {
+            setSelectedGovName(defaultAddr.governorate_name);
+          }
+          if (defaultAddr.markaz_name) {
+            setSelectedMarkazName(defaultAddr.markaz_name);
+          }
         } else {
           // Open address form automatically if no address exists
           setIsAddingNewAddress(true);
@@ -143,14 +152,18 @@ export const DeliveryOrderModal: React.FC<Props> = ({
   }, [isOpen, household?.id, supabaseUser?.id]);
 
   // Update markaz list when governorate changes
-  const currentGov = EGYPT_GOVERNORATES.find((g) => g.code === selectedGovCode) || EGYPT_GOVERNORATES[0];
+  const currentGov = selectedGovCode
+    ? EGYPT_GOVERNORATES.find((g) => g.code === selectedGovCode) || null
+    : null;
   const marakezList = currentGov?.marakez || [];
 
   useEffect(() => {
-    if (marakezList.length > 0 && !marakezList.includes(selectedMarkazName)) {
-      setSelectedMarkazName(marakezList[0]);
+    if (selectedGovCode && marakezList.length > 0 && !marakezList.includes(selectedMarkazName)) {
+      setSelectedMarkazName(marakezList[0] || '');
+    } else if (!selectedGovCode) {
+      setSelectedMarkazName('');
     }
-  }, [selectedGovCode, marakezList]);
+  }, [selectedGovCode, marakezList, selectedMarkazName]);
 
   // Governorate Delivery Fee resolution state
   const [resolvedGovFee, setResolvedGovFee] = useState<{
@@ -489,10 +502,14 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                         if (gov) {
                           setSelectedGovName(gov.nameAr);
                           setSelectedMarkazName(gov.marakez[0] || '');
+                        } else {
+                          setSelectedGovName('');
+                          setSelectedMarkazName('');
                         }
                       }}
                       className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
+                      <option value="">-- اختر المحافظة --</option>
                       {EGYPT_GOVERNORATES.map((gov) => (
                         <option key={gov.code} value={gov.code}>
                           {gov.nameAr}
@@ -510,6 +527,12 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                       onChange={(e) => setSelectedMarkazName(e.target.value)}
                       className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                     >
+                      {!selectedGovCode && (
+                        <option value="">-- اختر المحافظة أولاً --</option>
+                      )}
+                      {selectedGovCode && marakezList.length === 0 && (
+                        <option value="">-- لا توجد مراكز مسجلة --</option>
+                      )}
                       {marakezList.map((m) => (
                         <option key={m} value={m}>
                           {m}

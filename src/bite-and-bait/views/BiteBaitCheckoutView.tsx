@@ -259,9 +259,19 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
     setValidationError(null);
 
     // Enforcement: Restaurant Coverage & Geographic Scope Verification
-    if (!isAddressCovered) {
+    const currentTargetAddr = selectedAddressId
+      ? savedAddresses.find((a) => a.id === selectedAddressId) || null
+      : null;
+    const freshCheck = await biteAndBaitService.resolveDeliveryFee(
+      restaurantId,
+      currentTargetAddr,
+      baseRestaurantDeliveryFee ?? initialDeliveryFee
+    );
+    if (!freshCheck.isCovered) {
+      setIsAddressCovered(false);
+      setCoverageError(freshCheck.reason || 'لا يمكن إتمام الطلب لأن المطعم المختار لا يغطي منطقة عنوان التوصيل.');
       setValidationError(
-        coverageError || 'لا يمكن إتمام الطلب لأن المطعم المختار لا يغطي منطقة عنوان التوصيل.'
+        freshCheck.reason || 'لا يمكن إتمام الطلب لأن المطعم المختار لا يغطي منطقة عنوان التوصيل.'
       );
       return;
     }

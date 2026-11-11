@@ -282,7 +282,11 @@ export const CategoryGridView: React.FC = () => {
                       <UtensilsCrossed className="w-3.5 h-3.5 text-amber-600" />
                       <span>مشويات، بيتزا، برجر، شاورما، أكلات شرقية وحلويات</span>
                     </div>
-                    {isFoodOperational ? (
+                    {isLoadingFoodSettings ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                        جاري التحقق... ⏳
+                      </span>
+                    ) : isFoodOperational ? (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-200">
                         متاح للطلب 🟢
                       </span>

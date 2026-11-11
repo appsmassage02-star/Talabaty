@@ -1148,9 +1148,15 @@ class PharmacyService {
       }
 
       // Authoritative RPC public.pharmacy_create_order validates governorate and center
-      const rpcGovernorateName = "سوهاج";
-      const rpcCenterName = "سوهاج";
-      const rpcGovernorateCode = "EG-SHG";
+      const rawMarkaz = resolvedAddress.markaz_name?.trim() || "";
+      if (!rawMarkaz) {
+        throw new Error(
+          "اسم المركز / المدينة غير محدد في عنوان التوصيل المختار. يرجى تعديل العنوان واختيار المركز التابع له (مثل: أخميم، طهطا، جرجا، سوهاج، المراغة، إلخ) لإتمام الطلب."
+        );
+      }
+      const rpcCenterName = rawMarkaz;
+      const rpcGovernorateName = resolvedAddress.governorate_name?.trim() || "سوهاج";
+      const rpcGovernorateCode = resolvedAddress.governorate_code?.trim() || "EG-SHG";
 
       // 3. Upload images in parallel to Supabase Storage before submission (max 4 images)
       const rawImages = (params.images || []).slice(0, 4);
@@ -1205,7 +1211,7 @@ class PharmacyService {
         }
       }
 
-      // 4. Prepare files payload (up to 4 images)
+      // 4. Prepare files payload strictly containing user prescription attachments
       const filesPayload = uploadedFiles.map((img, idx) => ({
         storage_path: img.url,
         mime_type: img.mimeType,
@@ -1224,11 +1230,13 @@ class PharmacyService {
       const itemsList = params.items || [];
 
       // 5. Prepare items payload for database with required structure
+      // Strictly separates items from files and preserves notes
       const itemsPayload = itemsList.map((it, idx) => ({
         item_name: it.name.trim(),
         unit: it.unit || "علبة",
         requested_quantity: Math.max(1, Number(it.quantity) || 1),
         sort_order: idx + 1,
+        driver_note: it.notes?.trim() || null,
       }));
 
       // Log diagnostics without sensitive info
@@ -1242,18 +1250,6 @@ class PharmacyService {
           sort_order: it.sort_order,
         }))
       );
-
-      // Ensure at least 1 prescription file exists if user submitted text medicines without photos
-      if (filesPayload.length === 0 && itemsList.length > 0) {
-        const digitalCard = generateDigitalPrescriptionSvg(title, pharmacyName, itemsList);
-        filesPayload.push({
-          storage_path: digitalCard,
-          mime_type: "image/svg+xml",
-          file_type: "prescription",
-          display_order: 1,
-          driver_note: null,
-        });
-      }
 
       // 6. Build authoritative PharmacyOrder object
       const shortNum = orderId.replace(/-/g, "").substring(0, 4).toUpperCase();
