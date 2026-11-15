@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, RefreshCw, MapPinned } from 'lucide-react';
 import {
   getActiveAreas,
@@ -54,6 +54,13 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
   // Selected root area vs sub-area (parent_area_id hierarchy)
   const [selectedPrimaryAreaId, setSelectedPrimaryAreaId] = useState<string>('');
 
+  // Keep refs synchronized to prevent stale closures inside async cascade effects
+  const valueRef = useRef<GeoSelectionValue>(value);
+  valueRef.current = value;
+
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
   // Reset legacy prefill flag if editing a different record
   useEffect(() => {
     setLegacyApplied(false);
@@ -77,7 +84,7 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
       .catch((err: any) => {
         if (!active) return;
         setGovernorates([]);
-        setGeoError(err?.message || 'تعذر تحميل المحافظات من النظام المركزي');
+        setGeoError(err?.message || 'تعذر تحميل المحافظات من النظام الجغرافي المركزي');
       })
       .finally(() => {
         if (active) setLoadingGovs(false);
@@ -106,9 +113,9 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
         normalizeArabicName(g.name_en) === normTarget
     );
 
+    setLegacyApplied(true);
     if (matched) {
-      setLegacyApplied(true);
-      onChange({
+      onChangeRef.current({
         governorateId: matched.id,
         governorateName: matched.name_ar,
         centerId: '',
@@ -116,31 +123,57 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
         areaId: '',
         areaName: '',
       });
-    } else {
-      setLegacyApplied(true);
     }
-  }, [governorates, value.governorateId, initialLegacyNames, legacyApplied, onChange]);
+  }, [governorates, value.governorateId, initialLegacyNames, legacyApplied]);
 
   // 3) Load centers whenever governorateId changes
   useEffect(() => {
     let active = true;
-    if (!value.governorateId) {
+    const requestedGovId = value.governorateId;
+
+    if (!requestedGovId) {
       setCenters([]);
       setAreas([]);
       setSelectedPrimaryAreaId('');
+      setLoadingCenters(false);
       return;
     }
 
+    setCenters([]);
+    setAreas([]);
+    setSelectedPrimaryAreaId('');
     setLoadingCenters(true);
     setGeoError(null);
 
-    getActiveCenters(value.governorateId)
+    getActiveCenters(requestedGovId)
       .then((list) => {
-        if (!active) return;
+        if (!active || valueRef.current.governorateId !== requestedGovId) return;
         setCenters(list);
 
+        const currentVal = valueRef.current;
+
+        // If an existing centerId is selected, verify it belongs to active centers of this governorate
+        if (currentVal.centerId) {
+          const validCenter = list.find((c) => c.id === currentVal.centerId);
+          if (!validCenter) {
+            onChangeRef.current({
+              ...currentVal,
+              centerId: '',
+              centerName: '',
+              areaId: '',
+              areaName: '',
+            });
+          } else if (currentVal.centerName !== validCenter.name_ar) {
+            onChangeRef.current({
+              ...currentVal,
+              centerName: validCenter.name_ar,
+            });
+          }
+          return;
+        }
+
         // One-time pre-match for legacy center name
-        if (!value.centerId && initialLegacyNames?.centerName && list.length > 0) {
+        if (!currentVal.centerId && initialLegacyNames?.centerName && list.length > 0) {
           const normTarget = normalizeArabicName(initialLegacyNames.centerName);
           const matchedCenter = list.find(
             (c) =>
@@ -148,8 +181,8 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
               normalizeArabicName(c.name_en) === normTarget
           );
           if (matchedCenter) {
-            onChange({
-              ...value,
+            onChangeRef.current({
+              ...currentVal,
               centerId: matchedCenter.id,
               centerName: matchedCenter.name_ar,
               areaId: '',
@@ -159,9 +192,9 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
         }
       })
       .catch((err: any) => {
-        if (!active) return;
+        if (!active || valueRef.current.governorateId !== requestedGovId) return;
         setCenters([]);
-        setGeoError(err?.message || 'تعذر تحميل المراكز من النظام المركزي');
+        setGeoError(err?.message || 'تعذر تحميل المراكز من النظام الجغرافي المركزي');
       })
       .finally(() => {
         if (active) setLoadingCenters(false);
@@ -170,33 +203,61 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
     return () => {
       active = false;
     };
-  }, [value.governorateId, reloadNonce]);
+  }, [value.governorateId, reloadNonce, initialLegacyNames?.centerName]);
 
   // 4) Load areas whenever centerId changes
   useEffect(() => {
     let active = true;
-    if (!value.governorateId || !value.centerId) {
+    const requestedGovId = value.governorateId;
+    const requestedCenterId = value.centerId;
+
+    if (!requestedGovId || !requestedCenterId) {
       setAreas([]);
       setSelectedPrimaryAreaId('');
+      setLoadingAreas(false);
       return;
     }
 
+    setAreas([]);
+    setSelectedPrimaryAreaId('');
     setLoadingAreas(true);
     setGeoError(null);
 
-    getActiveAreas(value.governorateId, value.centerId)
+    getActiveAreas(requestedGovId, requestedCenterId)
       .then((list) => {
-        if (!active) return;
+        if (
+          !active ||
+          valueRef.current.governorateId !== requestedGovId ||
+          valueRef.current.centerId !== requestedCenterId
+        ) {
+          return;
+        }
         setAreas(list);
 
-        if (value.areaId) {
-          const currentArea = list.find((a) => a.id === value.areaId);
-          if (currentArea?.parent_area_id) {
-            setSelectedPrimaryAreaId(currentArea.parent_area_id);
-          } else if (currentArea) {
-            setSelectedPrimaryAreaId(currentArea.id);
+        const currentVal = valueRef.current;
+
+        if (currentVal.areaId) {
+          const currentArea = list.find((a) => a.id === currentVal.areaId);
+          if (!currentArea) {
+            setSelectedPrimaryAreaId('');
+            onChangeRef.current({
+              ...currentVal,
+              areaId: '',
+              areaName: '',
+            });
+            return;
           }
-        } else if (initialLegacyNames?.areaName && list.length > 0) {
+          setSelectedPrimaryAreaId(currentArea.parent_area_id || currentArea.id);
+          if (currentVal.areaName !== currentArea.name_ar) {
+            onChangeRef.current({
+              ...currentVal,
+              areaName: currentArea.name_ar,
+            });
+          }
+          return;
+        }
+
+        if (initialLegacyNames?.areaName && list.length > 0) {
           const normTarget = normalizeArabicName(initialLegacyNames.areaName);
           const matchedArea = list.find(
             (a) =>
@@ -205,8 +266,8 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
           );
           if (matchedArea) {
             setSelectedPrimaryAreaId(matchedArea.parent_area_id || matchedArea.id);
-            onChange({
-              ...value,
+            onChangeRef.current({
+              ...currentVal,
               areaId: matchedArea.id,
               areaName: matchedArea.name_ar,
             });
@@ -214,9 +275,15 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
         }
       })
       .catch((err: any) => {
-        if (!active) return;
+        if (
+          !active ||
+          valueRef.current.governorateId !== requestedGovId ||
+          valueRef.current.centerId !== requestedCenterId
+        ) {
+          return;
+        }
         setAreas([]);
-        setGeoError(err?.message || 'تعذر تحميل المناطق من النظام المركزي');
+        setGeoError(err?.message || 'تعذر تحميل المناطق من النظام الجغرافي المركزي');
       })
       .finally(() => {
         if (active) setLoadingAreas(false);
@@ -225,7 +292,7 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
     return () => {
       active = false;
     };
-  }, [value.governorateId, value.centerId, reloadNonce]);
+  }, [value.governorateId, value.centerId, reloadNonce, initialLegacyNames?.areaName]);
 
   const primaryAreas = useMemo(
     () => areas.filter((a) => !a.parent_area_id),
@@ -272,6 +339,8 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
             onChange={(e) => {
               const nextId = e.target.value;
               const gov = governorates.find((g) => g.id === nextId);
+              setCenters([]);
+              setAreas([]);
               setSelectedPrimaryAreaId('');
               onChange({
                 governorateId: nextId,
@@ -312,6 +381,7 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
             onChange={(e) => {
               const nextId = e.target.value;
               const center = centers.find((c) => c.id === nextId);
+              setAreas([]);
               setSelectedPrimaryAreaId('');
               onChange({
                 ...value,

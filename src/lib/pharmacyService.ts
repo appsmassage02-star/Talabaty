@@ -1236,10 +1236,7 @@ class PharmacyService {
       }
       const rpcCenterName = rawMarkaz;
       const rpcGovernorateName = resolvedAddress.governorate_name?.trim() || "";
-      const rpcGovernorateCode =
-        resolvedAddress.governorate_code?.trim() ||
-        resolvedAddress.governorate_id ||
-        "";
+      const rpcGovernorateCode = resolvedAddress.governorate_code?.trim() || "";
 
       // 3. Upload images in parallel to Supabase Storage before submission (max 4 images)
       const rawImages = (params.images || []).slice(0, 4);
@@ -1337,8 +1334,9 @@ class PharmacyService {
       // 6. Build authoritative PharmacyOrder object
       const shortNum = orderId.replace(/-/g, "").substring(0, 4).toUpperCase();
       const detailedAddressString = [
-        resolvedAddress.governorate_name || "سوهاج",
-        resolvedAddress.markaz_name ? resolvedAddress.markaz_name : null,
+        resolvedAddress.governorate_name || null,
+        resolvedAddress.markaz_name || null,
+        resolvedAddress.area_name || null,
         resolvedAddress.detailed_address,
       ].filter(Boolean).join(" - ");
 

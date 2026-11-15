@@ -239,10 +239,8 @@ export const deliveryService = {
       phone: address.phone.trim(),
       country: 'مصر',
       governorate_id: address.governorate_id,
-      governorate_code: address.governorate_code || address.governorate_id,
       governorate_name: address.governorate_name.trim(),
       center_id: address.center_id,
-      markaz_code: address.markaz_code || address.center_id,
       markaz_name: address.markaz_name.trim(),
       area_id: address.area_id,
       area_name: address.area_name?.trim() || null,
@@ -255,11 +253,18 @@ export const deliveryService = {
           : null,
       gps_source: address.gps_source || 'map_pin',
       gps_captured_at: address.gps_captured_at || new Date().toISOString(),
+      ...(address.location !== undefined ? { location: address.location } : {}),
       is_default: !!address.is_default,
       updated_at: new Date().toISOString(),
     };
 
-    const OPTIONAL_TELEMETRY_COLS = new Set(['gps_accuracy_m', 'gps_source', 'gps_captured_at', 'area_name']);
+    const OPTIONAL_TELEMETRY_COLS = new Set([
+      'gps_accuracy_m',
+      'gps_source',
+      'gps_captured_at',
+      'area_name',
+      'location',
+    ]);
 
     const executeWrite = async (isUpdate: boolean): Promise<HouseholdAddress> => {
       let attemptPayload = { ...payload };

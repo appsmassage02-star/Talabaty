@@ -69,6 +69,11 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
   const [gpsAccuracyM, setGpsAccuracyM] = useState<number | null>(null);
   const [gpsSource, setGpsSource] = useState<'gps' | 'map_pin' | null>(null);
   const [gpsCapturedAt, setGpsCapturedAt] = useState<string | null>(null);
+  const [editingLocationSnapshot, setEditingLocationSnapshot] = useState<{
+    location: unknown;
+    latitude: number | null;
+    longitude: number | null;
+  } | null>(null);
   const [isLocating, setIsLocating] = useState<boolean>(false);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [isMapPickerOpen, setIsMapPickerOpen] = useState<boolean>(false);
@@ -172,6 +177,7 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
     setGpsAccuracyM(null);
     setGpsSource(null);
     setGpsCapturedAt(null);
+    setEditingLocationSnapshot(null);
     setLocationError(null);
     setIsFormOpen(false);
   };
@@ -209,12 +215,22 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       setGpsAccuracyM(addr.gps_accuracy_m ?? null);
       setGpsSource((addr.gps_source as 'gps' | 'map_pin') || 'map_pin');
       setGpsCapturedAt(addr.gps_captured_at || null);
+      setEditingLocationSnapshot(
+        addr.location !== undefined
+          ? {
+              location: addr.location,
+              latitude: gpsCheck.latitude,
+              longitude: gpsCheck.longitude,
+            }
+          : null
+      );
     } else {
       setLatitude(null);
       setLongitude(null);
       setGpsAccuracyM(null);
       setGpsSource(null);
       setGpsCapturedAt(null);
+      setEditingLocationSnapshot(null);
     }
 
     setLocationError(null);
@@ -273,6 +289,11 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       return;
     }
 
+    const shouldPreserveLocation =
+      editingLocationSnapshot &&
+      editingLocationSnapshot.latitude === gpsCheck.latitude &&
+      editingLocationSnapshot.longitude === gpsCheck.longitude;
+
     setIsSaving(true);
     try {
       const result = await deliveryService.saveAddress(
@@ -284,10 +305,8 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
           phone: phone.trim(),
           country: 'مصر',
           governorate_id: geoSelection.governorateId,
-          governorate_code: geoSelection.governorateId,
           governorate_name: geoSelection.governorateName,
           center_id: geoSelection.centerId,
-          markaz_code: geoSelection.centerId,
           markaz_name: geoSelection.centerName,
           area_id: geoSelection.areaId,
           area_name: geoSelection.areaName,
@@ -297,6 +316,7 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
           gps_accuracy_m: gpsAccuracyM,
           gps_source: gpsSource || 'map_pin',
           gps_captured_at: gpsCapturedAt || new Date().toISOString(),
+          ...(shouldPreserveLocation ? { location: editingLocationSnapshot.location } : {}),
           is_default: isDefault || addresses.length === 0,
         },
         supabaseUser?.id

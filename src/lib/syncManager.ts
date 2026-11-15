@@ -1107,7 +1107,7 @@ class SyncManager {
                 governorate_name: payload.governorate_name || payload.governorateName,
                 governorate_code: payload.governorate_code || payload.governorateCode,
                 is_active: Boolean(payload.is_active ?? payload.isActive ?? true),
-                delivery_fee: Number(payload.delivery_fee || payload.deliveryFee) || 15,
+                delivery_fee: Number(payload.delivery_fee || payload.deliveryFee) || 0,
                 updated_by: actorUserId || null,
                 updated_at: new Date().toISOString(),
               },

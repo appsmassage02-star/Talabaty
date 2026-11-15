@@ -220,6 +220,7 @@ export interface HouseholdAddress {
   gps_accuracy_m?: number | null;
   gps_source?: 'gps' | 'map_pin' | string | null;
   gps_captured_at?: string | null;
+  location?: unknown;
   is_default: boolean;
   created_at?: string;
   updated_at?: string;

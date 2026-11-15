@@ -701,7 +701,10 @@ export const RecurringOrdersModal: React.FC = () => {
                       >
                         {userAddresses.map((addr) => (
                           <option key={addr.id} value={addr.id}>
-                            {addr.label || addr.street_address} - {addr.governorate}
+                            {addr.address_label || addr.detailed_address || 'عنوان محفوظ'} -{' '}
+                            {[addr.governorate_name, addr.markaz_name, addr.area_name]
+                              .filter(Boolean)
+                              .join(' / ')}
                           </option>
                         ))}
                       </select>

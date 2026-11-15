@@ -5,9 +5,8 @@ export interface GeoGovernorate {
   id: string;
   name_ar: string;
   name_en?: string | null;
-  code?: string | null;
-  is_active: boolean;
-  sort_order: number;
+  is_active?: boolean;
+  sort_order?: number;
 }
 
 export interface GeoCenter {
@@ -15,9 +14,8 @@ export interface GeoCenter {
   governorate_id: string;
   name_ar: string;
   name_en?: string | null;
-  code?: string | null;
-  is_active: boolean;
-  sort_order: number;
+  is_active?: boolean;
+  sort_order?: number;
 }
 
 export interface GeoArea {
@@ -27,9 +25,8 @@ export interface GeoArea {
   parent_area_id?: string | null;
   name_ar: string;
   name_en?: string | null;
-  code?: string | null;
-  is_active: boolean;
-  sort_order: number;
+  is_active?: boolean;
+  sort_order?: number;
 }
 
 export type ServiceCategoryType = 'household' | 'pharmacy' | 'restaurant';
@@ -88,6 +85,62 @@ const SERVICE_TYPE_CANDIDATES: Record<ServiceCategoryType, string[]> = {
   pharmacy: ['pharmacy', 'pharmacy_delivery'],
   restaurant: ['restaurant', 'restaurants', 'food', 'bite_and_bait'],
 };
+
+function getClient(client?: SupabaseClient): SupabaseClient {
+  const c = client || supabase;
+  if (!c) {
+    throw new Error('عميل قاعدة بيانات Supabase غير مهيأ.');
+  }
+  return c;
+}
+
+function isMissingOptionalColumnError(
+  error: { code?: string; message?: string } | null | undefined,
+  columnName: string
+): boolean {
+  if (!error) return false;
+  const msg = String(error.message || '');
+  const isColErr = error.code === '42703' || error.code === 'PGRST204';
+  if (!isColErr) return false;
+  return new RegExp(`\\b${columnName}\\b`, 'i').test(msg);
+}
+
+function formatGeoQueryError(
+  tableLabel: string,
+  error: { code?: string; message?: string; details?: string }
+): Error {
+  const msg = String(error.message || 'خطأ غير معروف');
+  const code = error.code ? ` (${error.code})` : '';
+
+  if (error.code === '42501' || /permission denied|row-level security/i.test(msg)) {
+    const err = new Error(
+      `صلاحية القراءة (RLS) على جدول ${tableLabel} مرفوضة من قاعدة البيانات${code}: ${msg}`
+    );
+    (err as any).code = error.code || '42501';
+    return err;
+  }
+
+  if (error.code === '42P01' || /relation .* does not exist/i.test(msg)) {
+    const err = new Error(
+      `جدول النظام الجغرافي المركزي ${tableLabel} غير موجود في قاعدة البيانات${code}: ${msg}`
+    );
+    (err as any).code = error.code || '42P01';
+    return err;
+  }
+
+  const err = new Error(`فشل تحميل بيانات ${tableLabel} من النظام الجغرافي المركزي${code}: ${msg}`);
+  (err as any).code = error.code;
+  return err;
+}
+
+function sortGeoRows<T extends { name_ar?: string | null; sort_order?: number | null }>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => {
+    const sa = Number(a.sort_order ?? 0);
+    const sb = Number(b.sort_order ?? 0);
+    if (sa !== sb) return sa - sb;
+    return String(a.name_ar || '').localeCompare(String(b.name_ar || ''), 'ar');
+  });
+}
 
 /**
  * Validates non-zero finite GPS coordinates within Earth latitude/longitude bounds.
@@ -164,35 +217,43 @@ export function normalizeArabicName(input?: string | null): string {
     .replace(/\s+/g, ' ');
 }
 
-function getClient(client?: SupabaseClient): SupabaseClient {
-  const c = client || supabase;
-  if (!c) {
-    throw new Error('عميل قاعدة بيانات Supabase غير مهيأ.');
-  }
-  return c;
-}
-
 /**
  * Resolves active governorates strictly from central `geo_governorates` table.
+ * Never selects `code` or unverified columns; handles optional `is_active`/`sort_order` cleanly.
  */
 export async function getActiveGovernorates(client?: SupabaseClient): Promise<GeoGovernorate[]> {
   const db = getClient(client);
-  const { data, error } = await db
+  let { data, error } = await db
     .from('geo_governorates')
-    .select('id, name_ar, name_en, code, is_active, sort_order')
-    .eq('is_active', true)
-    .order('sort_order', { ascending: true })
-    .order('name_ar', { ascending: true });
+    .select('*')
+    .eq('is_active', true);
 
-  if (error) {
-    throw new Error(`فشل تحميل المحافظات من النظام الجغرافي المركزي: ${error.message}`);
+  if (isMissingOptionalColumnError(error, 'is_active')) {
+    const fallbackRes = await db.from('geo_governorates').select('*');
+    data = fallbackRes.data;
+    error = fallbackRes.error;
   }
 
-  return (data || []) as GeoGovernorate[];
+  if (error) {
+    throw formatGeoQueryError('geo_governorates', error);
+  }
+
+  const normalized = ((data || []) as Array<Record<string, any>>)
+    .filter((row) => row && row.id && row.name_ar && row.is_active !== false)
+    .map((row) => ({
+      id: String(row.id),
+      name_ar: String(row.name_ar),
+      name_en: row.name_en ?? null,
+      is_active: row.is_active !== false,
+      sort_order: typeof row.sort_order === 'number' ? row.sort_order : Number(row.sort_order) || 0,
+    }));
+
+  return sortGeoRows(normalized);
 }
 
 /**
  * Resolves active centers strictly from central `geo_centers` filtered by `governorate_id`.
+ * Never selects `geo_centers.code` or any unverified column.
  */
 export async function getActiveCenters(
   governorateId: string,
@@ -200,23 +261,50 @@ export async function getActiveCenters(
 ): Promise<GeoCenter[]> {
   if (!governorateId) return [];
   const db = getClient(client);
-  const { data, error } = await db
-    .from('geo_centers')
-    .select('id, governorate_id, name_ar, name_en, code, is_active, sort_order')
-    .eq('governorate_id', governorateId)
-    .eq('is_active', true)
-    .order('sort_order', { ascending: true })
-    .order('name_ar', { ascending: true });
 
-  if (error) {
-    throw new Error(`فشل تحميل المراكز والمدن من النظام الجغرافي المركزي: ${error.message}`);
+  let { data, error } = await db
+    .from('geo_centers')
+    .select('*')
+    .eq('governorate_id', governorateId)
+    .eq('is_active', true);
+
+  if (isMissingOptionalColumnError(error, 'is_active')) {
+    const fallbackRes = await db
+      .from('geo_centers')
+      .select('*')
+      .eq('governorate_id', governorateId);
+    data = fallbackRes.data;
+    error = fallbackRes.error;
   }
 
-  return (data || []) as GeoCenter[];
+  if (error) {
+    throw formatGeoQueryError('geo_centers', error);
+  }
+
+  const normalized = ((data || []) as Array<Record<string, any>>)
+    .filter(
+      (row) =>
+        row &&
+        row.id &&
+        row.name_ar &&
+        row.governorate_id === governorateId &&
+        row.is_active !== false
+    )
+    .map((row) => ({
+      id: String(row.id),
+      governorate_id: String(row.governorate_id),
+      name_ar: String(row.name_ar),
+      name_en: row.name_en ?? null,
+      is_active: row.is_active !== false,
+      sort_order: typeof row.sort_order === 'number' ? row.sort_order : Number(row.sort_order) || 0,
+    }));
+
+  return sortGeoRows(normalized);
 }
 
 /**
  * Resolves active areas strictly from central `geo_areas` filtered by `governorate_id` and `center_id`.
+ * Never selects unverified columns such as `code`.
  */
 export async function getActiveAreas(
   governorateId: string,
@@ -225,20 +313,50 @@ export async function getActiveAreas(
 ): Promise<GeoArea[]> {
   if (!governorateId || !centerId) return [];
   const db = getClient(client);
-  const { data, error } = await db
+
+  let { data, error } = await db
     .from('geo_areas')
-    .select('id, governorate_id, center_id, parent_area_id, name_ar, name_en, code, is_active, sort_order')
+    .select('*')
     .eq('governorate_id', governorateId)
     .eq('center_id', centerId)
-    .eq('is_active', true)
-    .order('sort_order', { ascending: true })
-    .order('name_ar', { ascending: true });
+    .eq('is_active', true);
 
-  if (error) {
-    throw new Error(`فشل تحميل المناطق والأحياء من النظام الجغرافي المركزي: ${error.message}`);
+  if (isMissingOptionalColumnError(error, 'is_active')) {
+    const fallbackRes = await db
+      .from('geo_areas')
+      .select('*')
+      .eq('governorate_id', governorateId)
+      .eq('center_id', centerId);
+    data = fallbackRes.data;
+    error = fallbackRes.error;
   }
 
-  return (data || []) as GeoArea[];
+  if (error) {
+    throw formatGeoQueryError('geo_areas', error);
+  }
+
+  const normalized = ((data || []) as Array<Record<string, any>>)
+    .filter(
+      (row) =>
+        row &&
+        row.id &&
+        row.name_ar &&
+        row.center_id === centerId &&
+        (!row.governorate_id || row.governorate_id === governorateId) &&
+        row.is_active !== false
+    )
+    .map((row) => ({
+      id: String(row.id),
+      governorate_id: String(row.governorate_id || governorateId),
+      center_id: String(row.center_id),
+      parent_area_id: row.parent_area_id ? String(row.parent_area_id) : null,
+      name_ar: String(row.name_ar),
+      name_en: row.name_en ?? null,
+      is_active: row.is_active !== false,
+      sort_order: typeof row.sort_order === 'number' ? row.sort_order : Number(row.sort_order) || 0,
+    }));
+
+  return sortGeoRows(normalized);
 }
 
 /**
@@ -261,12 +379,12 @@ async function resolveAreaAncestorIds(
 
     const { data, error } = await db
       .from('geo_areas')
-      .select('id, parent_area_id')
+      .select('*')
       .eq('id', currentId)
       .maybeSingle();
 
     if (error || !data) break;
-    currentId = (data as { parent_area_id?: string | null }).parent_area_id || null;
+    currentId = (data as Record<string, any>).parent_area_id || null;
   }
 
   return chain;
@@ -298,6 +416,7 @@ function pickMostSpecificTariff(
     if (t.restaurant_id && restaurantId && t.restaurant_id !== restaurantId) return false;
     if (t.restaurant_id && !restaurantId) return false;
     if (t.governorate_id && t.governorate_id !== governorateId) return false;
+    if (t.center_id && t.center_id !== centerId) return false;
     return true;
   });
 
@@ -340,7 +459,7 @@ function pickMostSpecificTariff(
 /**
  * Resolves central delivery tariff from `delivery_area_tariffs`.
  * Never reads or computes `admin_commission` or `driver_net_fee` on the client.
- * Never returns a hardcoded fallback delivery fee (e.g., 15) when covered tariff is missing.
+ * Never returns a hardcoded fallback delivery fee when covered tariff is missing.
  */
 export async function resolveCentralTariff(params: {
   serviceType: ServiceCategoryType;

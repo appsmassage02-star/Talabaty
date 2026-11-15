@@ -29,38 +29,6 @@ interface Props {
   title?: string;
 }
 
-// Approximate coordinate centers for Egyptian governorates
-const GOVERNORATE_COORDINATES: Record<string, [number, number]> = {
-  'القاهرة': [30.0444, 31.2357],
-  'الجيزة': [30.0131, 31.2089],
-  'الإسكندرية': [31.2001, 29.9187],
-  'الدقهلية': [31.0409, 31.3785],
-  'البحر الأحمر': [27.2579, 33.8116],
-  'البحيرة': [31.0364, 30.4697],
-  'الفيوم': [29.3084, 30.8428],
-  'الغربية': [30.7865, 31.0004],
-  'الإسماعيلية': [30.5965, 32.2715],
-  'المنوفية': [30.5568, 30.9991],
-  'المنيا': [28.0871, 30.7618],
-  'القليوبية': [30.2880, 31.1448],
-  'الوادي الجديد': [25.4514, 30.5472],
-  'السويس': [29.9668, 32.5498],
-  'أسوان': [24.0889, 32.8998],
-  'أسيوط': [27.1801, 31.1837],
-  'بني سويف': [29.0661, 31.0994],
-  'بورسعيد': [31.2653, 32.3019],
-  'دمياط': [31.4175, 31.8144],
-  'الشرقية': [30.5877, 31.5020],
-  'جنوب سيناء': [28.5391, 33.9750],
-  'كفر الشيخ': [31.1107, 30.9388],
-  'مطروح': [31.3543, 27.2373],
-  'الأقصر': [25.6872, 32.6396],
-  'قنا': [26.1551, 32.7160],
-  'شمال سيناء': [31.1316, 33.7984],
-  'سوهـاج': [26.5569, 31.6948],
-  'سوهاج': [26.5569, 31.6948],
-};
-
 const NEUTRAL_EGYPT_VIEW_CENTER: [number, number] = [26.8206, 30.8025]; // Geographic center of Egypt (visual view only, never saved)
 
 // Create custom SVG Leaflet pin icon
@@ -161,9 +129,6 @@ export const MapLocationPickerModal: React.FC<Props> = ({
     if (hasInitialCoords) {
       initialCenter = [Number(initialLat), Number(initialLng)];
       initialZoom = 16;
-    } else if (governorateName && GOVERNORATE_COORDINATES[governorateName]) {
-      initialCenter = GOVERNORATE_COORDINATES[governorateName];
-      initialZoom = 12;
     }
 
     const map = L.map(mapContainerRef.current, {
