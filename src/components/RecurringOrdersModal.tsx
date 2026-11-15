@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   RecurringOrder,
@@ -78,11 +78,87 @@ export const RecurringOrdersModal: React.FC = () => {
   const [userAddresses, setUserAddresses] = useState<any[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [tariffStatus, setTariffStatus] = useState<{
+    loading: boolean;
+    allowed: boolean;
+    deliveryFee: number | null;
+    isFreeDelivery: boolean;
+    estimatedDeliveryMinutes: number | null;
+    reason?: string;
+  }>({
+    loading: false,
+    allowed: false,
+    deliveryFee: null,
+    isFreeDelivery: false,
+    estimatedDeliveryMinutes: null,
+  });
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 3000);
+    setTimeout(() => setToastMsg(null), 3500);
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    if (activeRole !== 'admin' || !activeDraft) {
+      return;
+    }
+
+    if (!selectedAddressId) {
+      setTariffStatus({
+        loading: false,
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        reason: 'يرجى اختيار أو إضافة عنوان توصيل مكتمل لاعتماد الطلب.',
+      });
+      return;
+    }
+
+    const selectedAddr = userAddresses.find((a) => a.id === selectedAddressId) || null;
+    if (!selectedAddr) {
+      setTariffStatus({
+        loading: false,
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        reason: 'العنوان المحدد غير متوفر في قائمة عناوين المنزل.',
+      });
+      return;
+    }
+
+    setTariffStatus((prev) => ({ ...prev, loading: true, reason: undefined }));
+    deliveryService
+      .resolveHouseholdDeliveryTariff(selectedAddr)
+      .then((res) => {
+        if (cancelled) return;
+        setTariffStatus({
+          loading: false,
+          allowed: Boolean(res.allowed && res.deliveryFee !== null),
+          deliveryFee: res.deliveryFee,
+          isFreeDelivery: res.isFreeDelivery,
+          estimatedDeliveryMinutes: res.estimatedDeliveryMinutes,
+          reason: res.reason,
+        });
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setTariffStatus({
+          loading: false,
+          allowed: false,
+          deliveryFee: null,
+          isFreeDelivery: false,
+          estimatedDeliveryMinutes: null,
+          reason: err?.message || 'تعذر التحقق من تسعيرة التوصيل المركزية.',
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRole, activeDraft, selectedAddressId, userAddresses]);
 
   // Load addresses when opening draft approval
   const handleOpenDraftReview = async (draft: RecurringOrderRequest) => {
@@ -97,8 +173,11 @@ export const RecurringOrdersModal: React.FC = () => {
         const def = addrs.find((a: any) => a.is_default);
         if (def) setSelectedAddressId(def.id);
         else if (addrs.length > 0) setSelectedAddressId(addrs[0].id);
+        else setSelectedAddressId('');
       } catch (e) {
         console.warn('Error loading addresses:', e);
+        setUserAddresses([]);
+        setSelectedAddressId('');
       }
     }
   };
@@ -183,6 +262,17 @@ export const RecurringOrdersModal: React.FC = () => {
     if (!activeDraft) return;
     if (!selectedAddressId) {
       showToast('يرجى اختيار عنوان التوصيل');
+      return;
+    }
+    if (tariffStatus.loading) {
+      showToast('جاري التحقق من تسعيرة وتغطية العنوان، يرجى الانتظار...');
+      return;
+    }
+    if (!tariffStatus.allowed || tariffStatus.deliveryFee === null) {
+      showToast(
+        tariffStatus.reason ||
+          'العنوان المختار غير مغطى بالتسعيرة المركزية أو يفتقد الربط الجغرافي وGPS.'
+      );
       return;
     }
 
@@ -690,29 +780,62 @@ export const RecurringOrdersModal: React.FC = () => {
                   </h4>
 
                   {userAddresses.length > 0 ? (
-                    <div>
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                        عنوان التوصيل
-                      </label>
-                      <select
-                        value={selectedAddressId}
-                        onChange={(e) => setSelectedAddressId(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
-                      >
-                        {userAddresses.map((addr) => (
-                          <option key={addr.id} value={addr.id}>
-                            {addr.address_label || addr.detailed_address || 'عنوان محفوظ'} -{' '}
-                            {[addr.governorate_name, addr.markaz_name, addr.area_name]
-                              .filter(Boolean)
-                              .join(' / ')}
-                          </option>
-                        ))}
-                      </select>
+                    <div className="space-y-2.5">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                          عنوان التوصيل
+                        </label>
+                        <select
+                          value={selectedAddressId}
+                          onChange={(e) => setSelectedAddressId(e.target.value)}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800"
+                        >
+                          {userAddresses.map((addr) => (
+                            <option key={addr.id} value={addr.id}>
+                              {addr.address_label || addr.detailed_address || 'عنوان محفوظ'} -{' '}
+                              {[addr.governorate_name, addr.markaz_name, addr.area_name]
+                                .filter(Boolean)
+                                .join(' / ')}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {tariffStatus.loading ? (
+                        <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600 font-semibold">
+                          جاري التحقق من التغطية وتسعيرة التوصيل المركزية...
+                        </div>
+                      ) : tariffStatus.allowed && tariffStatus.deliveryFee !== null ? (
+                        <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between">
+                          <span className="font-bold">
+                            رسوم التوصيل المركزية:{' '}
+                            {tariffStatus.isFreeDelivery || tariffStatus.deliveryFee === 0
+                              ? 'توصيل مجاني (0 ج.م)'
+                              : `${tariffStatus.deliveryFee} ج.م`}
+                          </span>
+                          {tariffStatus.estimatedDeliveryMinutes && (
+                            <span className="text-[11px] text-emerald-700 font-semibold">
+                              الوقت المتوقع: ~{tariffStatus.estimatedDeliveryMinutes} دقيقة
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-[11px] text-rose-700 flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                          <span className="font-semibold">
+                            {tariffStatus.reason ||
+                              'العنوان المختار غير مكتمل جغرافياً أو خارج نطاق تسعيرة التوصيل المركزية.'}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   ) : (
-                    <p className="text-xs text-amber-700 bg-amber-50 p-2 rounded-lg">
-                      لم يتم تسجيل عناوين توصيل مسبقًا. سيتم استخدام العنوان المسجل في الإعدادات.
-                    </p>
+                    <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 p-2.5 rounded-xl flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                      <span>
+                        لا توجد عناوين منزلية مسجلة. يرجى إضافة عنوان مكتمل (المحافظة / المركز / المنطقة + موقع GPS) من شاشة العناوين أولاً، ولا يمكن اعتماد طلب التوصيل بدون عنوان وتغطية معتمدة.
+                      </span>
+                    </div>
                   )}
 
                   <div>
@@ -738,7 +861,12 @@ export const RecurringOrdersModal: React.FC = () => {
                     <button
                       id="btn-approve-and-convert-delivery"
                       onClick={handleApproveDraft}
-                      disabled={isProcessing}
+                      disabled={
+                        isProcessing ||
+                        !selectedAddressId ||
+                        tariffStatus.loading ||
+                        !tariffStatus.allowed
+                      }
                       className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer disabled:opacity-50 inline-flex items-center space-x-1.5 space-x-reverse"
                     >
                       <CheckCircle2 className="w-4 h-4" />

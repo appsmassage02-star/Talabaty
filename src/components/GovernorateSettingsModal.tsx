@@ -181,7 +181,7 @@ export const GovernorateSettingsModal: React.FC = () => {
                       )}
                     </h4>
                     <span className="text-[10px] text-slate-400">
-                      كود: {gov.governorate_code || 'EG'}
+                      كود: {gov.governorate_code || '—'}
                     </span>
                   </div>
                 </div>

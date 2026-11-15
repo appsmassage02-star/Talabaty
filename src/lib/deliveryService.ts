@@ -2,6 +2,7 @@ import { supabase, isSupabaseConfigured } from './supabase';
 import { cacheManager } from './cacheManager';
 import {
   resolveCentralTariff,
+  validateGeoHierarchySelection,
   validateGpsCoordinates,
   type CentralTariffResolution,
 } from './geoService';
@@ -220,6 +221,19 @@ export const deliveryService = {
       };
     }
 
+    // Strict central geo hierarchy check (exists, active, parent-child chain valid)
+    const hierarchyCheck = await validateGeoHierarchySelection(
+      address.governorate_id,
+      address.center_id,
+      address.area_id
+    );
+    if (!hierarchyCheck.valid) {
+      return {
+        success: false,
+        message: hierarchyCheck.reason || 'التسلسل الجغرافي للعنوان غير متطابق أو غير مفعّل في النظام المركزي.',
+      };
+    }
+
     // If marked default, unset other addresses' default status
     if (address.is_default) {
       try {
@@ -239,11 +253,11 @@ export const deliveryService = {
       phone: address.phone.trim(),
       country: 'مصر',
       governorate_id: address.governorate_id,
-      governorate_name: address.governorate_name.trim(),
+      governorate_name: hierarchyCheck.governorate?.name_ar || address.governorate_name.trim(),
       center_id: address.center_id,
-      markaz_name: address.markaz_name.trim(),
+      markaz_name: hierarchyCheck.center?.name_ar || address.markaz_name.trim(),
       area_id: address.area_id,
-      area_name: address.area_name?.trim() || null,
+      area_name: hierarchyCheck.area?.name_ar || address.area_name?.trim() || null,
       detailed_address: address.detailed_address.trim(),
       latitude: cleanLatitude,
       longitude: cleanLongitude,
@@ -488,29 +502,31 @@ export const deliveryService = {
     }
 
     try {
-      // 3. Fetch or resolve address snapshot
-      let addrData: HouseholdAddress | null = params.addressSnapshot || null;
-      if (!addrData && params.addressId) {
-        const { data: dbAddr } = await supabase
+      // 3. Fetch authoritative address from database whenever addressId is provided
+      let addrData: HouseholdAddress | null = null;
+      if (params.addressId) {
+        const { data: dbAddr, error: dbAddrErr } = await supabase
           .from('household_addresses')
           .select('*')
           .eq('id', params.addressId)
+          .eq('household_id', params.householdId)
           .maybeSingle();
-        if (dbAddr) addrData = dbAddr as HouseholdAddress;
-      }
 
-      if (!addrData && params.userId && params.householdId) {
-        const cachedAddrs =
-          cacheManager.getHouseholdCache<HouseholdAddress[]>(
-            params.userId,
-            params.householdId,
-            'household_addresses'
-          ) || [];
-        addrData = cachedAddrs.find((a) => a.id === params.addressId) || null;
+        if (dbAddrErr) {
+          return {
+            success: false,
+            message: `تعذر قراءة بيانات العنوان من قاعدة البيانات: ${dbAddrErr.message}`,
+          };
+        }
+        if (dbAddr) {
+          addrData = dbAddr as HouseholdAddress;
+        }
+      } else if (params.addressSnapshot) {
+        addrData = params.addressSnapshot;
       }
 
       if (!addrData) {
-        return { success: false, message: 'العنوان المحدد غير موجود، يرجى اختيار أو إضافة عنوان صحيح' };
+        return { success: false, message: 'العنوان المحدد غير موجود أو لا يتبع المنزل الحالي، يرجى اختيار أو إضافة عنوان صحيح' };
       }
 
       // 4. Strictly resolve centralized tariff & GPS validity (NO fallback to hardcoded fees)

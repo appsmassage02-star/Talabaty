@@ -1179,29 +1179,35 @@ class PharmacyService {
       // 1. Resolve real household address from database (strictly requiring real household address belonging to targetHouseholdId)
       let resolvedAddress: any = null;
 
-      if (params.addressId && isValidUUID(params.addressId)) {
+      if (params.addressId !== undefined && params.addressId !== null && String(params.addressId).trim() !== "") {
+        if (!isValidUUID(params.addressId)) {
+          throw new Error("معرف عنوان التوصيل المحدد غير صالح.");
+        }
         const { data: addrData, error: addrErr } = await supabase
           .from("household_addresses")
           .select("*")
           .eq("id", params.addressId)
           .eq("household_id", targetHouseholdId)
           .maybeSingle();
-        if (addrData) {
-          resolvedAddress = addrData;
-        } else if (addrErr) {
-          console.warn("[PharmacyService] Error resolving address by id:", addrErr);
+        if (addrErr) {
+          throw new Error(`تعذر قراءة بيانات عنوان التوصيل من قاعدة البيانات: ${addrErr.message}`);
         }
-      }
-
-      // If no address selected or not found by ID, pick user's active/default household address strictly within targetHouseholdId
-      if (!resolvedAddress) {
-        const { data: addrList } = await supabase
+        if (!addrData) {
+          throw new Error("العنوان المحدد غير موجود أو لا يتبع هذا المنزل.");
+        }
+        resolvedAddress = addrData;
+      } else {
+        const { data: addrList, error: addrListErr } = await supabase
           .from("household_addresses")
           .select("*")
           .eq("household_id", targetHouseholdId)
           .order("is_default", { ascending: false })
           .order("created_at", { ascending: false })
           .limit(1);
+
+        if (addrListErr) {
+          throw new Error(`تعذر تحميل عناوين المنزل من قاعدة البيانات: ${addrListErr.message}`);
+        }
 
         if (addrList && addrList.length > 0) {
           resolvedAddress = addrList[0];
@@ -1236,7 +1242,7 @@ class PharmacyService {
       }
       const rpcCenterName = rawMarkaz;
       const rpcGovernorateName = resolvedAddress.governorate_name?.trim() || "";
-      const rpcGovernorateCode = resolvedAddress.governorate_code?.trim() || "";
+      const rpcGovernorateCode = resolvedAddress.governorate_code?.trim() || null;
 
       // 3. Upload images in parallel to Supabase Storage before submission (max 4 images)
       const rawImages = (params.images || []).slice(0, 4);
@@ -1487,8 +1493,6 @@ class PharmacyService {
             "حدث خطأ في قاعدة البيانات أثناء حفظ أصناف الأدوية (قيد النواقص pharmacy_order_item_shortage_chk). يرجى مراجعة إدارة النظام لتحديث قيد الأصناف.";
         } else if (rpcErr.message?.includes("pharmacy_order_pharmacy_mode_chk")) {
           userMsg = "تعذر تحديد وضع الصيدلية المحددة، يرجى اختيار الصيدلية مجدداً أو ترك المندوب يختار أقرب صيدلية";
-        } else if (rpcErr.message?.includes("خدمة الصيدلية غير متاحة")) {
-          userMsg = "خدمة الصيدلية متاحة حالياً داخل محافظة سوهاج. يرجى التأكد من عنوان التوصيل المحدد واختيار عنوان في سوهاج.";
         } else if (rpcErr.message?.includes("العنوان غير تابع للمستخدم")) {
           userMsg = "العنوان المحدد غير مسجل لمنزلك الحالي، يرجى اختيار عنوان من قائمة عناوين المنزل";
         } else if (rpcErr.message?.includes("يجب اختيار عنوان حقيقي")) {

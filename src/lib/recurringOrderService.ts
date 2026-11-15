@@ -1,7 +1,9 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { cacheManager } from './cacheManager';
 import { syncManager } from './syncManager';
+import { deliveryService } from './deliveryService';
 import {
+  HouseholdAddress,
   RecurringOrder,
   RecurringOrderItem,
   RecurringOrderFrequency,
@@ -344,17 +346,53 @@ export const recurringOrderService = {
 
   /**
    * Approve draft request and convert to Delivery Order (Admin Only)
+   * Enforces valid GPS, central geo_* hierarchy, and central `delivery_area_tariffs` coverage before conversion.
    */
   async approveAndConvertToDeliveryOrder(
     requestId: string,
     addressId: string,
     deliveryNotes?: string
   ): Promise<{ success: boolean; orderId?: string; message?: string }> {
+    if (!requestId?.trim() || !addressId?.trim()) {
+      return { success: false, message: 'بيانات المسودة وعنوان التوصيل مطلوبة لاعتماد الطلب' };
+    }
+
     if (!isSupabaseConfigured()) {
       return { success: false, message: 'قاعدة بيانات Supabase غير مهيأة' };
     }
 
     try {
+      const { data: addrData, error: addrErr } = await supabase
+        .from('household_addresses')
+        .select('*')
+        .eq('id', addressId)
+        .maybeSingle();
+
+      if (addrErr) {
+        return {
+          success: false,
+          message: `تعذر قراءة بيانات عنوان التوصيل: ${addrErr.message}`,
+        };
+      }
+      if (!addrData) {
+        return {
+          success: false,
+          message: 'عنوان التوصيل المحدد غير موجود في قاعدة البيانات',
+        };
+      }
+
+      const tariffCheck = await deliveryService.resolveHouseholdDeliveryTariff(
+        addrData as HouseholdAddress
+      );
+      if (!tariffCheck.allowed || tariffCheck.deliveryFee === null) {
+        return {
+          success: false,
+          message:
+            tariffCheck.reason ||
+            'لا توجد تسعيرة توصيل مفعّلة لهذا العنوان في النظام المركزي (delivery_area_tariffs).',
+        };
+      }
+
       const { data, error } = await supabase.rpc('approve_recurring_order_request', {
         p_request_id: requestId,
         p_address_id: addressId,
@@ -363,8 +401,8 @@ export const recurringOrderService = {
 
       if (error) throw error;
       const res = data as any;
-      if (!res.success) {
-        return { success: false, message: res.message || 'فشل تحويل المسودة إلى طلب دليفري' };
+      if (!res?.success) {
+        return { success: false, message: res?.message || 'فشل تحويل المسودة إلى طلب دليفري' };
       }
 
       return { success: true, orderId: res.order_id };

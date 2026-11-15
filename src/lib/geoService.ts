@@ -80,6 +80,14 @@ export interface GeoAddressInput {
   longitude?: number | null;
 }
 
+export interface GeoHierarchyValidationResult {
+  valid: boolean;
+  reason?: string;
+  governorate?: GeoGovernorate;
+  center?: GeoCenter;
+  area?: GeoArea;
+}
+
 const SERVICE_TYPE_CANDIDATES: Record<ServiceCategoryType, string[]> = {
   household: ['household', 'household_delivery', 'delivery', 'home_delivery', 'groceries'],
   pharmacy: ['pharmacy', 'pharmacy_delivery'],
@@ -360,6 +368,111 @@ export async function getActiveAreas(
 }
 
 /**
+ * Validates that (governorateId, centerId, areaId) all exist in central `geo_*` tables,
+ * are active (`is_active !== false`), and respect strict parent-child hierarchy:
+ * center.governorate_id === governorateId AND area.center_id === centerId AND area.governorate_id === governorateId.
+ */
+export async function validateGeoHierarchySelection(
+  governorateId?: string | null,
+  centerId?: string | null,
+  areaId?: string | null,
+  client?: SupabaseClient
+): Promise<GeoHierarchyValidationResult> {
+  if (!governorateId?.trim() || !centerId?.trim() || !areaId?.trim()) {
+    return {
+      valid: false,
+      reason: 'يجب تحديد المحافظة والمركز والمنطقة من النظام الجغرافي المعتمد أولاً',
+    };
+  }
+
+  const db = getClient(client);
+
+  const [govRes, centerRes, areaRes] = await Promise.all([
+    db.from('geo_governorates').select('*').eq('id', governorateId).maybeSingle(),
+    db.from('geo_centers').select('*').eq('id', centerId).maybeSingle(),
+    db.from('geo_areas').select('*').eq('id', areaId).maybeSingle(),
+  ]);
+
+  if (govRes.error) {
+    return { valid: false, reason: formatGeoQueryError('geo_governorates', govRes.error).message };
+  }
+  if (centerRes.error) {
+    return { valid: false, reason: formatGeoQueryError('geo_centers', centerRes.error).message };
+  }
+  if (areaRes.error) {
+    return { valid: false, reason: formatGeoQueryError('geo_areas', areaRes.error).message };
+  }
+
+  const govRow = govRes.data as Record<string, any> | null;
+  if (!govRow || !govRow.id || govRow.is_active === false) {
+    return {
+      valid: false,
+      reason: 'المحافظة المحددة غير موجودة أو غير مفعّلة في النظام الجغرافي المركزي (geo_governorates).',
+    };
+  }
+
+  const centerRow = centerRes.data as Record<string, any> | null;
+  if (!centerRow || !centerRow.id || centerRow.is_active === false) {
+    return {
+      valid: false,
+      reason: 'المركز / المدينة المحددة غير موجودة أو غير مفعّلة في النظام الجغرافي المركزي (geo_centers).',
+    };
+  }
+  if (String(centerRow.governorate_id || '') !== String(govRow.id)) {
+    return {
+      valid: false,
+      reason: 'المركز المحدد لا يتبع المحافظة المختارة في النظام الجغرافي المركزي.',
+    };
+  }
+
+  const areaRow = areaRes.data as Record<string, any> | null;
+  if (!areaRow || !areaRow.id || areaRow.is_active === false) {
+    return {
+      valid: false,
+      reason: 'المنطقة المحددة غير موجودة أو غير مفعّلة في النظام الجغرافي المركزي (geo_areas).',
+    };
+  }
+  if (
+    String(areaRow.center_id || '') !== String(centerRow.id) ||
+    (areaRow.governorate_id && String(areaRow.governorate_id) !== String(govRow.id))
+  ) {
+    return {
+      valid: false,
+      reason: 'المنطقة المحددة لا تتبع المركز والمحافظة المختارين في النظام الجغرافي المركزي.',
+    };
+  }
+
+  return {
+    valid: true,
+    governorate: {
+      id: String(govRow.id),
+      name_ar: String(govRow.name_ar || ''),
+      name_en: govRow.name_en ?? null,
+      is_active: govRow.is_active !== false,
+      sort_order: Number(govRow.sort_order) || 0,
+    },
+    center: {
+      id: String(centerRow.id),
+      governorate_id: String(centerRow.governorate_id),
+      name_ar: String(centerRow.name_ar || ''),
+      name_en: centerRow.name_en ?? null,
+      is_active: centerRow.is_active !== false,
+      sort_order: Number(centerRow.sort_order) || 0,
+    },
+    area: {
+      id: String(areaRow.id),
+      governorate_id: String(areaRow.governorate_id || govRow.id),
+      center_id: String(areaRow.center_id),
+      parent_area_id: areaRow.parent_area_id ? String(areaRow.parent_area_id) : null,
+      name_ar: String(areaRow.name_ar || ''),
+      name_en: areaRow.name_en ?? null,
+      is_active: areaRow.is_active !== false,
+      sort_order: Number(areaRow.sort_order) || 0,
+    },
+  };
+}
+
+/**
  * Collects area ancestor chain (areaId -> parent_area_id -> ...) so hierarchical area tariffs/scopes match cleanly.
  */
 async function resolveAreaAncestorIds(
@@ -495,6 +608,21 @@ export async function resolveCentralTariff(params: {
   }
 
   const db = getClient(client);
+  const hierarchyCheck = await validateGeoHierarchySelection(governorateId, centerId, areaId, db);
+  if (!hierarchyCheck.valid) {
+    return {
+      covered: false,
+      tariffId: null,
+      customerDeliveryFee: null,
+      isFreeDelivery: false,
+      freeDeliveryCostBearer: null,
+      estimatedDeliveryMinutes: null,
+      matchedLevel: null,
+      applicableDeliveryOwner: deliveryOwner || null,
+      reason: hierarchyCheck.reason || 'التسلسل الجغرافي للعنوان غير صحيح أو غير مفعّل',
+    };
+  }
+
   const serviceCandidates = SERVICE_TYPE_CANDIDATES[serviceType];
 
   const { data, error } = await db
