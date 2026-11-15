@@ -124,7 +124,17 @@ export const GovernorateSettingsModal: React.FC = () => {
 
         {/* Body List */}
         <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
-          {filteredGovs.map((gov) => {
+          {filteredGovs.length === 0 ? (
+            <div className="p-6 text-center rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+              <p className="text-xs font-bold text-slate-700">
+                يتم إدارة التسعيرة والنطاق الجغرافي مركزياً عبر جدول delivery_area_tariffs وجداول geo_* في لوحة الإدارة.
+              </p>
+              <p className="text-[11px] text-slate-500">
+                لا توجد إعدادات محلية إضافية مسجلة لهذا القسم.
+              </p>
+            </div>
+          ) : (
+            filteredGovs.map((gov) => {
             const currentFee =
               editingFees[gov.governorate_name] !== undefined
                 ? editingFees[gov.governorate_name]
@@ -204,7 +214,8 @@ export const GovernorateSettingsModal: React.FC = () => {
                 </div>
               </div>
             );
-          })}
+          })
+          )}
         </div>
 
         {/* Footer */}

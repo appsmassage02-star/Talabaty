@@ -21,6 +21,7 @@ import './styles/bite-and-bait.css';
 
 import { useApp } from '../context/AppContext';
 import { biteAndBaitService } from './services/biteAndBaitService';
+import { validateGpsCoordinates, type DeliveryOwnerType } from '../lib/geoService';
 
 import {
   PREVIEW_RESTAURANTS,
@@ -401,7 +402,22 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   };
 
   // Dynamic Geographic Delivery Fee Resolution for Restaurants based on Default Address
-  const [restaurantDeliveryFees, setRestaurantDeliveryFees] = useState<Record<string, number>>({});
+  const [restaurantTariffDetails, setRestaurantTariffDetails] = useState<
+    Record<
+      string,
+      {
+        fee: number | null;
+        isCovered: boolean;
+        isFreeDelivery: boolean;
+        estimatedDeliveryMinutes: number | null;
+        applicableDeliveryOwner: DeliveryOwnerType | null;
+        tariffId: string | null;
+        tariffResolved: boolean;
+        reason?: string;
+      }
+    >
+  >({});
+  const [restaurantDeliveryFees, setRestaurantDeliveryFees] = useState<Record<string, number | null>>({});
   const [restaurantCoverageMap, setRestaurantCoverageMap] = useState<Record<string, boolean>>({});
 
   const defaultCustomerAddress = useMemo(() => {
@@ -409,29 +425,73 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   }, [activeAddresses]);
 
   useEffect(() => {
-    if (!defaultCustomerAddress || activeRestaurants.length === 0 || forcePreviewMode) return;
+    if (forcePreviewMode || activeRestaurants.length === 0) {
+      setRestaurantTariffDetails({});
+      setRestaurantDeliveryFees({});
+      setRestaurantCoverageMap({});
+      return;
+    }
+
+    const hasCompleteAddress = Boolean(
+      defaultCustomerAddress &&
+        defaultCustomerAddress.governorateId &&
+        defaultCustomerAddress.centerId &&
+        defaultCustomerAddress.areaId &&
+        validateGpsCoordinates(defaultCustomerAddress.latitude, defaultCustomerAddress.longitude).valid
+    );
+
+    if (!hasCompleteAddress || !defaultCustomerAddress) {
+      setRestaurantTariffDetails({});
+      setRestaurantDeliveryFees({});
+      setRestaurantCoverageMap({});
+      return;
+    }
+
     let isMounted = true;
 
     const resolveAllFees = async () => {
-      const feeMap: Record<string, number> = {};
+      const detailsMap: typeof restaurantTariffDetails = {};
+      const feeMap: Record<string, number | null> = {};
       const covMap: Record<string, boolean> = {};
 
-      for (const rest of activeRestaurants) {
-        try {
-          const res = await biteAndBaitService.resolveDeliveryFee(
-            rest.id,
-            defaultCustomerAddress,
-            rest.deliveryFee
-          );
-          feeMap[rest.id] = res.fee;
-          covMap[rest.id] = res.isCovered;
-        } catch {
-          feeMap[rest.id] = rest.deliveryFee ?? 0;
-          covMap[rest.id] = true;
-        }
-      }
+      await Promise.all(
+        activeRestaurants.map(async (rest) => {
+          try {
+            const res = await biteAndBaitService.resolveDeliveryFee(
+              rest.id,
+              defaultCustomerAddress
+            );
+            detailsMap[rest.id] = {
+              fee: res.fee,
+              isCovered: res.isCovered,
+              isFreeDelivery: res.isFreeDelivery,
+              estimatedDeliveryMinutes: res.estimatedDeliveryMinutes,
+              applicableDeliveryOwner: res.applicableDeliveryOwner,
+              tariffId: res.tariffId,
+              tariffResolved: true,
+              reason: res.reason,
+            };
+            feeMap[rest.id] = res.fee;
+            covMap[rest.id] = res.isCovered;
+          } catch (err: any) {
+            detailsMap[rest.id] = {
+              fee: null,
+              isCovered: false,
+              isFreeDelivery: false,
+              estimatedDeliveryMinutes: null,
+              applicableDeliveryOwner: null,
+              tariffId: null,
+              tariffResolved: true,
+              reason: err?.message || 'تعذر التحقق من التسعيرة المركزية للمطعم.',
+            };
+            feeMap[rest.id] = null;
+            covMap[rest.id] = false;
+          }
+        })
+      );
 
       if (isMounted) {
+        setRestaurantTariffDetails(detailsMap);
         setRestaurantDeliveryFees(feeMap);
         setRestaurantCoverageMap(covMap);
       }
@@ -444,16 +504,46 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     };
   }, [defaultCustomerAddress, activeRestaurants, forcePreviewMode]);
 
+  const enrichedRestaurants = useMemo<Restaurant[]>(() => {
+    return activeRestaurants.map((rest) => {
+      const detail = restaurantTariffDetails[rest.id];
+      if (!detail) {
+        return forcePreviewMode
+          ? rest
+          : {
+              ...rest,
+              deliveryFee: null,
+              tariffResolved: false,
+            };
+      }
+      return {
+        ...rest,
+        deliveryFee: detail.fee,
+        isFreeDelivery: detail.isFreeDelivery,
+        tariffResolved: detail.tariffResolved,
+        isAddressCovered: detail.isCovered,
+        estimatedDeliveryMinutes: detail.estimatedDeliveryMinutes,
+        applicableDeliveryOwner: detail.applicableDeliveryOwner,
+        coverageReason: detail.reason,
+        tariffId: detail.tariffId,
+      };
+    });
+  }, [activeRestaurants, restaurantTariffDetails, forcePreviewMode]);
+
   // MULTI-RESTAURANT CART: Group items strictly by restaurantId
   const restaurantGroups = useMemo<RestaurantCartGroup[]>(() => {
     const map: Record<string, RestaurantCartGroup> = {};
 
     activeCartItems.forEach((item) => {
       if (!map[item.restaurantId]) {
-        const rest = activeRestaurants.find((r) => r.id === item.restaurantId);
-        const resolvedFee = restaurantDeliveryFees[item.restaurantId] !== undefined
-          ? restaurantDeliveryFees[item.restaurantId]
-          : (rest?.deliveryFee ?? 0);
+        const rest = enrichedRestaurants.find((r) => r.id === item.restaurantId);
+        const detail = restaurantTariffDetails[item.restaurantId];
+        const resolvedFee =
+          detail && detail.isCovered
+            ? detail.fee
+            : rest?.tariffResolved && rest.isAddressCovered
+            ? rest.deliveryFee
+            : null;
 
         map[item.restaurantId] = {
           restaurantId: item.restaurantId,
@@ -462,6 +552,12 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
           items: [],
           subtotal: 0,
           deliveryFee: resolvedFee,
+          isFreeDelivery: Boolean(detail?.isFreeDelivery ?? rest?.isFreeDelivery),
+          tariffResolved: Boolean(detail?.tariffResolved ?? rest?.tariffResolved),
+          isAddressCovered: detail ? detail.isCovered : rest?.isAddressCovered,
+          estimatedDeliveryMinutes:
+            detail?.estimatedDeliveryMinutes ?? rest?.estimatedDeliveryMinutes ?? null,
+          coverageReason: detail?.reason ?? rest?.coverageReason,
           total: 0,
           isOpen: rest?.isOpen ?? true,
           nextOpeningTime: rest?.nextOpeningTime,
@@ -474,11 +570,13 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
 
     // Compute totals per group
     Object.values(map).forEach((group) => {
-      group.total = group.subtotal + (group.items.length > 0 ? group.deliveryFee : 0);
+      group.total =
+        group.subtotal +
+        (group.items.length > 0 && group.deliveryFee !== null ? group.deliveryFee : 0);
     });
 
     return Object.values(map);
-  }, [activeCartItems, activeRestaurants, restaurantDeliveryFees]);
+  }, [activeCartItems, enrichedRestaurants, restaurantTariffDetails]);
 
   // Overall Cart Aggregate Totals across all restaurants
   const overallSubtotal = useMemo(() => {
@@ -486,7 +584,10 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   }, [restaurantGroups]);
 
   const overallDelivery = useMemo(() => {
-    return restaurantGroups.reduce((acc, g) => acc + (g.items.length > 0 ? g.deliveryFee : 0), 0);
+    return restaurantGroups.reduce(
+      (acc, g) => acc + (g.items.length > 0 && g.deliveryFee !== null ? g.deliveryFee : 0),
+      0
+    );
   }, [restaurantGroups]);
 
   const overallTotal = overallSubtotal + overallDelivery;
@@ -506,8 +607,8 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
 
   // Selected restaurant for detail view
   const selectedRestaurant = useMemo(() => {
-    return activeRestaurants.find((r) => r.id === selectedRestaurantId) || null;
-  }, [activeRestaurants, selectedRestaurantId]);
+    return enrichedRestaurants.find((r) => r.id === selectedRestaurantId) || null;
+  }, [enrichedRestaurants, selectedRestaurantId]);
 
   // Items designated for Checkout (filtered to the selected checkout restaurant)
   const checkoutGroup = useMemo(() => {
@@ -1421,7 +1522,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
           </div>
         ) : (
           <BiteBaitHomeView
-            restaurants={activeRestaurants}
+            restaurants={enrichedRestaurants}
             featuredFoods={featuredFoods}
             categories={activeCategories}
             cartCount={cartTotalItemsCount}
@@ -1446,7 +1547,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
 
       {currentView === 'restaurants' && (
         <BiteBaitRestaurantsView
-          restaurants={activeRestaurants}
+          restaurants={enrichedRestaurants}
           favoriteRestaurantIds={favoriteRestaurantIds}
           onToggleFavorite={handleToggleFavoriteRestaurant}
           onSelectRestaurant={(r) => {
@@ -1514,7 +1615,6 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             totalPrice={checkoutGroup.total}
             restaurantName={checkoutGroup.restaurantName}
             restaurantId={checkoutGroup.restaurantId}
-            baseRestaurantDeliveryFee={checkoutGroup.restaurant?.deliveryFee ?? 0}
             householdId={household?.id}
             userId={supabaseUser?.id || (supabaseProfile as any)?.id}
             savedAddresses={activeAddresses}
@@ -1615,7 +1715,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
 
       {currentView === 'favorites' && (
         <BiteBaitFavoritesView
-          favoriteRestaurants={activeRestaurants.filter((r) =>
+          favoriteRestaurants={enrichedRestaurants.filter((r) =>
             favoriteRestaurantIds.includes(r.id)
           )}
           favoriteFoods={featuredFoods.filter((f) => favoriteFoodIds.includes(f.id))}

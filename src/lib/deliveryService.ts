@@ -1,53 +1,53 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { cacheManager } from './cacheManager';
 import {
+  resolveCentralTariff,
+  validateGpsCoordinates,
+  type CentralTariffResolution,
+} from './geoService';
+import {
   DeliverySettings,
   HouseholdAddress,
   DeliveryOrder,
   DeliveryOrderItem,
   DeliveryOrderStatus,
-  DeliveryDriver,
 } from '../types';
 
 /**
- * Robust Unified Delivery Service for Talabat Al-Bayt
- * Supports:
- * - Central delivery_settings verification (delivery_enabled, default_delivery_fee)
- * - Household Addresses management with single-default enforcement
- * - Snapshot-based Delivery Orders with delivery_order_items
- * - Status transition strictly according to policy:
- *   pending_review -> accepted -> cancellation_pending -> cancelled / completed
- * - Offline-resilient cache syncing via cacheManager
+ * Unified Delivery Service for Talabaty Household Client
+ * - Central `delivery_settings.delivery_enabled` check
+ * - Household Addresses with mandatory `geo_*` hierarchy IDs + valid GPS telemetry
+ * - Centralized `delivery_area_tariffs` resolution (NO hardcoded delivery fees)
  */
 export const deliveryService = {
   /**
-   * Fetch central delivery settings (delivery_enabled, default_delivery_fee)
+   * Fetch central delivery enablement settings (`delivery_enabled`)
    */
   async getSettings(): Promise<DeliverySettings> {
-    const fallbackSettings: DeliverySettings = {
+    const emptySettings: DeliverySettings = {
       id: 'default',
       delivery_enabled: true,
-      default_delivery_fee: 15.0,
+      default_delivery_fee: 0,
     };
 
     if (!isSupabaseConfigured()) {
-      return fallbackSettings;
+      return emptySettings;
     }
 
     try {
       const { data, error } = await supabase
         .from('delivery_settings')
-        .select('*')
+        .select('id, delivery_enabled, default_delivery_fee, updated_by, updated_at')
         .limit(1)
         .maybeSingle();
 
       if (error || !data) {
-        return fallbackSettings;
+        return emptySettings;
       }
       return data as DeliverySettings;
     } catch (err) {
       console.warn('[deliveryService] Exception fetching settings:', err);
-      return fallbackSettings;
+      return emptySettings;
     }
   },
 
@@ -127,7 +127,52 @@ export const deliveryService = {
   },
 
   /**
-   * Add or save a household address
+   * Mark an existing household address as default without bypassing address creation validation
+   */
+  async setDefaultAddress(
+    addressId: string,
+    householdId: string,
+    userId?: string
+  ): Promise<{ success: boolean; message?: string }> {
+    if (!addressId || !householdId) {
+      return { success: false, message: 'بيانات العنوان غير مكتملة' };
+    }
+
+    if (userId) {
+      const current =
+        cacheManager.getHouseholdCache<HouseholdAddress[]>(
+          userId,
+          householdId,
+          'household_addresses'
+        ) || [];
+      const updated = current.map((a) => ({ ...a, is_default: a.id === addressId }));
+      cacheManager.setHouseholdCache(userId, householdId, 'household_addresses', updated);
+    }
+
+    if (!isSupabaseConfigured()) {
+      return { success: true };
+    }
+
+    try {
+      await supabase
+        .from('household_addresses')
+        .update({ is_default: false })
+        .eq('household_id', householdId);
+
+      const { error } = await supabase
+        .from('household_addresses')
+        .update({ is_default: true, updated_at: new Date().toISOString() })
+        .eq('id', addressId);
+
+      if (error) throw error;
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, message: err.message || 'فشل تعيين العنوان الافتراضي' };
+    }
+  },
+
+  /**
+   * Add or save a household address enforcing central geo hierarchy IDs and valid non-zero GPS telemetry
    */
   async saveAddress(
     address: Partial<HouseholdAddress> & { household_id: string },
@@ -137,45 +182,46 @@ export const deliveryService = {
       return { success: false, message: 'معرّف المنزل غير موجود' };
     }
 
-    // Validate mandatory fields
     if (!address.full_name?.trim()) {
       return { success: false, message: 'يرجى إدخال اسم المستلم' };
     }
     if (!address.phone?.trim()) {
       return { success: false, message: 'يرجى إدخال رقم هاتف التواصل' };
     }
-    if (!address.governorate_name?.trim()) {
-      return { success: false, message: 'يرجى اختيار المحافظة' };
+    if (!address.governorate_id?.trim() || !address.governorate_name?.trim()) {
+      return { success: false, message: 'يرجى اختيار المحافظة من القائمة المعتمدة' };
     }
-    if (!address.markaz_name?.trim()) {
-      return { success: false, message: 'يرجى اختيار المركز أو الحي' };
+    if (!address.center_id?.trim() || !address.markaz_name?.trim()) {
+      return { success: false, message: 'يرجى اختيار المركز / المدينة من القائمة المعتمدة' };
+    }
+    if (!address.area_id?.trim()) {
+      return { success: false, message: 'يرجى اختيار المنطقة / الحي من القائمة المعتمدة' };
     }
     if (!address.detailed_address?.trim()) {
       return { success: false, message: 'يرجى كتابة العنوان التفصيلي' };
     }
 
-    // Validate GPS Coordinates if provided
-    let cleanLatitude: number | null = null;
-    let cleanLongitude: number | null = null;
-
-    if (address.latitude !== undefined && address.latitude !== null && String(address.latitude).trim() !== '') {
-      const latNum = Number(address.latitude);
-      if (isNaN(latNum) || latNum < -90 || latNum > 90) {
-        return { success: false, message: 'قيمة خط العرض (Latitude) غير صالحة، يجب أن تكون بين -90 و 90' };
-      }
-      cleanLatitude = Number(latNum.toFixed(7));
+    // Strict mandatory non-zero GPS verification (no fake/default coords allowed)
+    const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      return {
+        success: false,
+        message: gpsCheck.reason || 'تحديد الموقع على الخريطة أو عبر GPS إجباري لحفظ العنوان',
+      };
     }
 
-    if (address.longitude !== undefined && address.longitude !== null && String(address.longitude).trim() !== '') {
-      const lngNum = Number(address.longitude);
-      if (isNaN(lngNum) || lngNum < -180 || lngNum > 180) {
-        return { success: false, message: 'قيمة خط الطول (Longitude) غير صالحة، يجب أن تكون بين -180 و 180' };
-      }
-      cleanLongitude = Number(lngNum.toFixed(7));
+    const cleanLatitude = Number(gpsCheck.latitude.toFixed(7));
+    const cleanLongitude = Number(gpsCheck.longitude.toFixed(7));
+
+    if (!isSupabaseConfigured()) {
+      return {
+        success: false,
+        message: 'اتصال قاعدة البيانات غير متاح حالياً؛ لا يمكن حفظ العنوان بدون التحقق من النظام الجغرافي المركزي.',
+      };
     }
 
     // If marked default, unset other addresses' default status
-    if (address.is_default && isSupabaseConfigured()) {
+    if (address.is_default) {
       try {
         await supabase
           .from('household_addresses')
@@ -186,111 +232,95 @@ export const deliveryService = {
       }
     }
 
-    const payload: any = {
-      ...address,
+    const payload: Record<string, any> = {
+      household_id: address.household_id,
+      address_label: address.address_label?.trim() || 'عنوان المنزل',
+      full_name: address.full_name.trim(),
+      phone: address.phone.trim(),
+      country: 'مصر',
+      governorate_id: address.governorate_id,
+      governorate_code: address.governorate_code || address.governorate_id,
+      governorate_name: address.governorate_name.trim(),
+      center_id: address.center_id,
+      markaz_code: address.markaz_code || address.center_id,
+      markaz_name: address.markaz_name.trim(),
+      area_id: address.area_id,
+      area_name: address.area_name?.trim() || null,
+      detailed_address: address.detailed_address.trim(),
       latitude: cleanLatitude,
       longitude: cleanLongitude,
-      country: 'مصر',
+      gps_accuracy_m:
+        address.gps_accuracy_m !== undefined && address.gps_accuracy_m !== null
+          ? Number(address.gps_accuracy_m)
+          : null,
+      gps_source: address.gps_source || 'map_pin',
+      gps_captured_at: address.gps_captured_at || new Date().toISOString(),
+      is_default: !!address.is_default,
       updated_at: new Date().toISOString(),
     };
 
-    if (!isSupabaseConfigured()) {
-      // Local fallback with generated ID
-      const newAddr: HouseholdAddress = {
-        id: address.id || `addr_${Date.now()}`,
-        household_id: address.household_id,
-        address_label: address.address_label || 'عنوان المنزل',
-        full_name: address.full_name.trim(),
-        phone: address.phone.trim(),
-        country: 'مصر',
-        governorate_code: address.governorate_code || '',
-        governorate_name: address.governorate_name.trim(),
-        markaz_code: address.markaz_code || '',
-        markaz_name: address.markaz_name.trim(),
-        detailed_address: address.detailed_address.trim(),
-        latitude: cleanLatitude,
-        longitude: cleanLongitude,
-        is_default: !!address.is_default,
-        created_at: address.created_at || new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+    const OPTIONAL_TELEMETRY_COLS = new Set(['gps_accuracy_m', 'gps_source', 'gps_captured_at', 'area_name']);
 
-      if (userId) {
-        const current = cacheManager.getHouseholdCache<HouseholdAddress[]>(
-          userId,
-          address.household_id,
-          'household_addresses'
-        ) || [];
-        const filtered = current.filter((a) => a.id !== newAddr.id);
-        if (newAddr.is_default) {
-          filtered.forEach((a) => { a.is_default = false; });
+    const executeWrite = async (isUpdate: boolean): Promise<HouseholdAddress> => {
+      let attemptPayload = { ...payload };
+      for (let retry = 0; retry < 5; retry += 1) {
+        const query = isUpdate
+          ? supabase
+              .from('household_addresses')
+              .update(attemptPayload)
+              .eq('id', address.id!)
+              .select()
+              .single()
+          : supabase
+              .from('household_addresses')
+              .insert(attemptPayload)
+              .select()
+              .single();
+
+        const { data, error } = await query;
+
+        if (!error && data) {
+          return data as HouseholdAddress;
         }
-        const updated = [newAddr, ...filtered];
-        cacheManager.setHouseholdCache(userId, address.household_id, 'household_addresses', updated);
+
+        // Only strip optional metadata telemetry columns if DB schema cache doesn't expose them yet;
+        // NEVER strip governorate_id / center_id / area_id / latitude / longitude.
+        if (error && error.code === 'PGRST204') {
+          const match = /Could not find the '([^']+)' column/i.exec(error.message || '');
+          const colName = match?.[1];
+          if (colName && OPTIONAL_TELEMETRY_COLS.has(colName) && colName in attemptPayload) {
+            delete attemptPayload[colName];
+            continue;
+          }
+        }
+
+        if (error && error.code === '23503') {
+          throw new Error(
+            'فشل حفظ العنوان: قيد المفتاح الأجنبي في جدول household_addresses لا يزال مرتبطاً بجداول قديمة بدلاً من geo_governorates / geo_centers / geo_areas في قاعدة البيانات.'
+          );
+        }
+
+        throw error || new Error('فشل حفظ العنوان');
       }
 
-      return { success: true, address: newAddr };
-    }
+      throw new Error('تعذر إتمام حفظ العنوان بعد عدة محاولات');
+    };
 
     try {
-      let savedAddress: HouseholdAddress;
-      if (address.id) {
-        let { data, error } = await supabase
-          .from('household_addresses')
-          .update(payload)
-          .eq('id', address.id)
-          .select()
-          .single();
-
-        // Handle potential schema cache reload delay for new columns
-        if (error && error.code === 'PGRST204' && (error.message?.includes('latitude') || error.message?.includes('longitude'))) {
-          delete payload.latitude;
-          delete payload.longitude;
-          const retryRes = await supabase
-            .from('household_addresses')
-            .update(payload)
-            .eq('id', address.id)
-            .select()
-            .single();
-          data = retryRes.data;
-          error = retryRes.error;
-        }
-
-        if (error) throw error;
-        savedAddress = data as HouseholdAddress;
-      } else {
-        let { data, error } = await supabase
-          .from('household_addresses')
-          .insert(payload)
-          .select()
-          .single();
-
-        // Handle potential schema cache reload delay for new columns
-        if (error && error.code === 'PGRST204' && (error.message?.includes('latitude') || error.message?.includes('longitude'))) {
-          delete payload.latitude;
-          delete payload.longitude;
-          const retryRes = await supabase
-            .from('household_addresses')
-            .insert(payload)
-            .select()
-            .single();
-          data = retryRes.data;
-          error = retryRes.error;
-        }
-
-        if (error) throw error;
-        savedAddress = data as HouseholdAddress;
-      }
+      const savedAddress = await executeWrite(Boolean(address.id));
 
       if (userId && address.household_id) {
-        const current = cacheManager.getHouseholdCache<HouseholdAddress[]>(
-          userId,
-          address.household_id,
-          'household_addresses'
-        ) || [];
+        const current =
+          cacheManager.getHouseholdCache<HouseholdAddress[]>(
+            userId,
+            address.household_id,
+            'household_addresses'
+          ) || [];
         const filtered = current.filter((a) => a.id !== savedAddress.id);
         if (savedAddress.is_default) {
-          filtered.forEach((a) => { a.is_default = false; });
+          filtered.forEach((a) => {
+            a.is_default = false;
+          });
         }
         const updated = [savedAddress, ...filtered];
         cacheManager.setHouseholdCache(userId, address.household_id, 'household_addresses', updated);
@@ -333,7 +363,85 @@ export const deliveryService = {
   },
 
   /**
-   * Create a new delivery order via the secure atomic RPC or direct transaction fallback
+   * Resolves central household delivery tariff & eligibility from `delivery_area_tariffs`.
+   * Checks global delivery_enabled switch, valid GPS coordinates, and geo hierarchy IDs.
+   */
+  async resolveHouseholdDeliveryTariff(address?: Partial<HouseholdAddress> | null): Promise<{
+    allowed: boolean;
+    deliveryFee: number | null;
+    isFreeDelivery: boolean;
+    estimatedDeliveryMinutes: number | null;
+    tariffId: string | null;
+    reason?: string;
+    resolution?: CentralTariffResolution;
+  }> {
+    const settings = await this.getSettings();
+    if (!settings.delivery_enabled) {
+      return {
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        tariffId: null,
+        reason: 'خدمة التوصيل معطلة حالياً من قبل الإدارة',
+      };
+    }
+
+    if (!address) {
+      return {
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        tariffId: null,
+        reason: 'يرجى اختيار عنوان توصيل صحيح أولاً',
+      };
+    }
+
+    const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
+    if (!gpsCheck.valid) {
+      return {
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        tariffId: null,
+        reason: 'هذا العنوان لا يحتوي على موقع GPS صالح. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.',
+      };
+    }
+
+    if (!address.governorate_id || !address.center_id || !address.area_id) {
+      return {
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        tariffId: null,
+        reason: 'العنوان غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تعديل العنوان واستكماله.',
+      };
+    }
+
+    const tariffRes = await resolveCentralTariff({
+      serviceType: 'household',
+      deliveryOwner: 'talabaty',
+      governorateId: address.governorate_id,
+      centerId: address.center_id,
+      areaId: address.area_id,
+    });
+
+    return {
+      allowed: tariffRes.covered,
+      deliveryFee: tariffRes.customerDeliveryFee,
+      isFreeDelivery: tariffRes.isFreeDelivery,
+      estimatedDeliveryMinutes: tariffRes.estimatedDeliveryMinutes,
+      tariffId: tariffRes.tariffId,
+      reason: tariffRes.reason,
+      resolution: tariffRes,
+    };
+  },
+
+  /**
+   * Create a new delivery order validated strictly against centralized geo hierarchy, GPS, and `delivery_area_tariffs`.
    */
   async createOrder(params: {
     householdId: string;
@@ -367,112 +475,108 @@ export const deliveryService = {
       return { success: false, message: 'لا توجد أصناف في طلب التوصيل' };
     }
 
-    // 3. If Supabase configured, execute creation with full items persistence
-    if (isSupabaseConfigured()) {
-      try {
-        // Fetch or resolve address snapshot
-        let addrData: any = params.addressSnapshot || null;
-        if (!addrData && params.addressId) {
-          const { data: dbAddr } = await supabase
-            .from('household_addresses')
-            .select('*')
-            .eq('id', params.addressId)
-            .maybeSingle();
-          if (dbAddr) addrData = dbAddr;
-        }
+    if (!isSupabaseConfigured()) {
+      return {
+        success: false,
+        message: 'اتصال قاعدة البيانات غير متاح؛ لا يمكن التحقق من التسعيرة المركزية أو إنشاء الطلب.',
+      };
+    }
 
-        if (!addrData && params.userId && params.householdId) {
-          const cachedAddrs = cacheManager.getHouseholdCache<HouseholdAddress[]>(
+    try {
+      // 3. Fetch or resolve address snapshot
+      let addrData: HouseholdAddress | null = params.addressSnapshot || null;
+      if (!addrData && params.addressId) {
+        const { data: dbAddr } = await supabase
+          .from('household_addresses')
+          .select('*')
+          .eq('id', params.addressId)
+          .maybeSingle();
+        if (dbAddr) addrData = dbAddr as HouseholdAddress;
+      }
+
+      if (!addrData && params.userId && params.householdId) {
+        const cachedAddrs =
+          cacheManager.getHouseholdCache<HouseholdAddress[]>(
             params.userId,
             params.householdId,
             'household_addresses'
           ) || [];
-          addrData = cachedAddrs.find((a) => a.id === params.addressId) || null;
-        }
+        addrData = cachedAddrs.find((a) => a.id === params.addressId) || null;
+      }
 
-        if (!addrData) {
-          return { success: false, message: 'العنوان المحدد غير موجود، يرجى اختيار أو إضافة عنوان صحيح' };
-        }
+      if (!addrData) {
+        return { success: false, message: 'العنوان المحدد غير موجود، يرجى اختيار أو إضافة عنوان صحيح' };
+      }
 
-        // Resolve delivery fee using governorate settings (Tier 1: Governorate fee, Tier 2: Default fee, Tier 3: Governorate disabled)
-        const feeRes = await this.resolveDeliveryFeeForGovernorate(
-          addrData.governorate_name,
-          addrData.governorate_code
-        );
-
-        if (!feeRes.allowed) {
-          return {
-            success: false,
-            message: feeRes.reason || `خدمة التوصيل غير مفعلة حالياً في محافظة ${addrData.governorate_name || 'المحددة'}`,
-          };
-        }
-
-        const deliveryFee = feeRes.deliveryFee;
-        const subtotal = params.items.reduce((acc, item) => acc + (Number(item.total_price) || 0), 0);
-        const totalAmount = subtotal + deliveryFee;
-
-        // Check if invoice exists in public.invoices to prevent Foreign Key constraint violation
-        let validInvoiceId: string | null = null;
-        if (params.invoiceId) {
-          const { data: invCheck } = await supabase
-            .from('invoices')
-            .select('id')
-            .eq('id', params.invoiceId)
-            .maybeSingle();
-
-          if (invCheck?.id) {
-            validInvoiceId = invCheck.id;
-          } else {
-            console.warn('[deliveryService] Invoice not yet in invoices table, decoupling invoice_id to prevent FK constraint failure');
-          }
-        }
-
-        // Base order payload matching actual table schema (user_id instead of created_by)
-        const orderPayload: any = {
-          household_id: params.householdId,
-          user_id: params.userId || null,
-          invoice_id: validInvoiceId,
-          address_id: params.addressId,
-          customer_name: addrData.full_name || 'المنزل',
-          customer_phone: addrData.phone || '',
-          country: 'مصر',
-          governorate_name: addrData.governorate_name || '',
-          markaz_name: addrData.markaz_name || '',
-          detailed_address: addrData.detailed_address || '',
-          delivery_fee: deliveryFee,
-          subtotal: subtotal,
-          total_amount: totalAmount,
-          delivery_notes: params.deliveryNotes || null,
-          status: 'pending_review' as DeliveryOrderStatus,
-          ...(params.source_recurring_request_id ? { source_recurring_request_id: params.source_recurring_request_id } : {}),
+      // 4. Strictly resolve centralized tariff & GPS validity (NO fallback to hardcoded fees)
+      const tariffCheck = await this.resolveHouseholdDeliveryTariff(addrData);
+      if (!tariffCheck.allowed || tariffCheck.deliveryFee === null) {
+        return {
+          success: false,
+          message:
+            tariffCheck.reason ||
+            'لا توجد تسعيرة توصيل مفعّلة لهذا العنوان، لا يمكن إتمام الطلب.',
         };
+      }
 
-        let { data: orderData, error: orderErr } = await supabase
-          .from('delivery_orders')
-          .insert(orderPayload)
-          .select()
-          .single();
+      const deliveryFee = tariffCheck.isFreeDelivery ? 0 : Number(tariffCheck.deliveryFee);
+      const subtotal = params.items.reduce((acc, item) => acc + (Number(item.total_price) || 0), 0);
+      const totalAmount = subtotal + deliveryFee;
 
-        // If insert failed due to column missing from remote schema cache (PGRST204), strip and retry
-        if (orderErr && orderErr.code === 'PGRST204') {
-          const match = /Could not find the '([^']+)' column/i.exec(orderErr.message);
-          if (match && match[1] && match[1] in orderPayload) {
-            console.warn(`[deliveryService] Retrying delivery_orders insert without missing column '${match[1]}'`);
-            delete orderPayload[match[1]];
-            const retryRes = await supabase
-              .from('delivery_orders')
-              .insert(orderPayload)
-              .select()
-              .single();
-            orderData = retryRes.data;
-            orderErr = retryRes.error;
-          }
+      // 5. Check if invoice exists in public.invoices to prevent Foreign Key constraint violation
+      let validInvoiceId: string | null = null;
+      if (params.invoiceId) {
+        const { data: invCheck } = await supabase
+          .from('invoices')
+          .select('id')
+          .eq('id', params.invoiceId)
+          .maybeSingle();
+
+        if (invCheck?.id) {
+          validInvoiceId = invCheck.id;
         }
+      }
 
-        // If insert failed due to foreign key on invoice_id, retry safely with null
-        if (orderErr && orderPayload.invoice_id) {
-          console.warn('[deliveryService] Retrying delivery order without invoice_id FK:', orderErr.message);
-          orderPayload.invoice_id = null;
+      const orderPayload: Record<string, any> = {
+        household_id: params.householdId,
+        user_id: params.userId || null,
+        invoice_id: validInvoiceId,
+        address_id: params.addressId,
+        customer_name: addrData.full_name || 'المنزل',
+        customer_phone: addrData.phone || '',
+        country: 'مصر',
+        governorate_id: addrData.governorate_id,
+        governorate_name: addrData.governorate_name || '',
+        center_id: addrData.center_id,
+        markaz_name: addrData.markaz_name || '',
+        area_id: addrData.area_id,
+        area_name: addrData.area_name || null,
+        latitude: Number(addrData.latitude),
+        longitude: Number(addrData.longitude),
+        detailed_address: addrData.detailed_address || '',
+        delivery_fee: deliveryFee,
+        subtotal,
+        total_amount: totalAmount,
+        delivery_notes: params.deliveryNotes || null,
+        status: 'pending_review' as DeliveryOrderStatus,
+        ...(params.source_recurring_request_id
+          ? { source_recurring_request_id: params.source_recurring_request_id }
+          : {}),
+      };
+
+      let { data: orderData, error: orderErr } = await supabase
+        .from('delivery_orders')
+        .insert(orderPayload)
+        .select()
+        .single();
+
+      // Handle remote schema cache not yet having optional snapshot columns on delivery_orders
+      let safetyRetries = 0;
+      while (orderErr && orderErr.code === 'PGRST204' && safetyRetries < 6) {
+        safetyRetries += 1;
+        const match = /Could not find the '([^']+)' column/i.exec(orderErr.message || '');
+        if (match && match[1] && match[1] in orderPayload) {
+          delete orderPayload[match[1]];
           const retryRes = await supabase
             .from('delivery_orders')
             .insert(orderPayload)
@@ -480,148 +584,31 @@ export const deliveryService = {
             .single();
           orderData = retryRes.data;
           orderErr = retryRes.error;
+        } else {
+          break;
         }
-
-        if (orderErr || !orderData) {
-          console.error('[deliveryService] Error inserting delivery_orders:', orderErr);
-          throw orderErr || new Error('فشل إدراج طلب التوصيل في قاعدة البيانات');
-        }
-
-        const orderId = orderData.id;
-        console.log(`[deliveryService] Successfully created delivery_orders with id: ${orderId}`);
-
-        // Insert items into delivery_order_items using EXACT columns:
-        // order_id, product_id, product_name, category_id, category_name, quantity, unit_price, total_price
-        const itemsPayload = params.items.map((item) => ({
-          order_id: orderId,
-          product_id: item.product_id || null,
-          product_name: item.product_name,
-          category_id: item.category_id || null,
-          category_name: item.category_name || null,
-          quantity: item.quantity || '١',
-          unit_price: Number(item.unit_price) || 0,
-          total_price: Number(item.total_price) || 0,
-        }));
-
-        console.log(`[deliveryService] Inserting ${itemsPayload.length} items into delivery_order_items for order ${orderId}:`, itemsPayload);
-
-        const { data: insertedItems, error: itemsErr } = await supabase
-          .from('delivery_order_items')
-          .insert(itemsPayload)
-          .select();
-
-        if (itemsErr) {
-          console.error('[deliveryService] CRITICAL: Error inserting delivery_order_items:', itemsErr);
-          return {
-            success: false,
-            message: `فشل حفظ أصناف الطلب في جدول delivery_order_items: ${itemsErr.message || JSON.stringify(itemsErr)}`,
-          };
-        }
-
-        // Verification: Read back delivery_order_items using order_id = orderId to ensure actual persistence
-        const { data: verifiedItems, error: verifyErr } = await supabase
-          .from('delivery_order_items')
-          .select('*')
-          .eq('order_id', orderId);
-
-        if (verifyErr) {
-          console.error('[deliveryService] CRITICAL: Error verifying saved delivery_order_items:', verifyErr);
-          return {
-            success: false,
-            message: `فشل التحقق من الأصناف المحفوظة في قاعدة البيانات: ${verifyErr.message}`,
-          };
-        }
-
-        if (!verifiedItems || verifiedItems.length === 0) {
-          console.error('[deliveryService] CRITICAL: Verification query returned 0 items for order_id:', orderId);
-          return {
-            success: false,
-            message: 'فشل التحقق: تم إنشاء الطلب ولكن لم يتم العثور على أي أصناف في delivery_order_items',
-          };
-        }
-
-        console.log(`[deliveryService] Verification successful: verified ${verifiedItems.length} items in delivery_order_items for order ${orderId}`);
-
-        // Optional status history record
-        try {
-          await supabase.from('delivery_order_status_history').insert({
-            delivery_order_id: orderId,
-            old_status: null,
-            new_status: 'pending_review',
-            note: 'تم إنشاء الطلب بنجاح وهو قيد المراجعة',
-          });
-        } catch (histErr) {
-          console.warn('[deliveryService] Status history log info:', histErr);
-        }
-
-        // Update local cache immediately with verified items
-        const completeOrder: DeliveryOrder = {
-          ...orderData,
-          items: verifiedItems,
-        };
-
-        if (params.userId && params.householdId) {
-          const cached = cacheManager.getHouseholdCache<DeliveryOrder[]>(
-            params.userId,
-            params.householdId,
-            'delivery_orders'
-          ) || [];
-          const updated = [completeOrder, ...cached.filter((o) => o.id !== orderId)];
-          cacheManager.setHouseholdCache(params.userId, params.householdId, 'delivery_orders', updated);
-        }
-
-        return {
-          success: true,
-          order_id: orderId,
-          message: 'تم إرسال طلب التوصيل وحفظ أصناف الفاتورة بنجاح!',
-        };
-      } catch (directErr: any) {
-        console.error('[deliveryService] Direct insert error:', directErr);
-        return { success: false, message: directErr.message || 'فشل إنشاء طلب التوصيل' };
       }
-    }
 
-    // Offline / Local Simulation fallback
-    const offlineFeeRes = await this.resolveDeliveryFeeForGovernorate(
-      params.addressSnapshot?.governorate_name,
-      params.addressSnapshot?.governorate_code
-    );
+      if (orderErr && orderPayload.invoice_id) {
+        orderPayload.invoice_id = null;
+        const retryRes = await supabase
+          .from('delivery_orders')
+          .insert(orderPayload)
+          .select()
+          .single();
+        orderData = retryRes.data;
+        orderErr = retryRes.error;
+      }
 
-    if (!offlineFeeRes.allowed) {
-      return {
-        success: false,
-        message: offlineFeeRes.reason || `خدمة التوصيل غير مفعلة حالياً في محافظة ${params.addressSnapshot?.governorate_name || 'المحددة'}`,
-      };
-    }
+      if (orderErr || !orderData) {
+        console.error('[deliveryService] Error inserting delivery_orders:', orderErr);
+        throw orderErr || new Error('فشل إدراج طلب التوصيل في قاعدة البيانات');
+      }
 
-    const offlineDeliveryFee = offlineFeeRes.deliveryFee;
-    const offlineSubtotal = params.items.reduce((acc, item) => acc + (Number(item.total_price) || 0), 0);
-    const offlineTotalAmount = offlineSubtotal + offlineDeliveryFee;
+      const orderId = orderData.id;
 
-    const mockOrderId = `ord_${Date.now()}`;
-    const mockOrder: DeliveryOrder = {
-      id: mockOrderId,
-      household_id: params.householdId,
-      user_id: params.userId || null,
-      invoice_id: params.invoiceId || null,
-      address_id: params.addressId,
-      source_recurring_request_id: params.source_recurring_request_id || null,
-      customer_name: params.addressSnapshot?.full_name || 'المنزل',
-      customer_phone: params.addressSnapshot?.phone || '',
-      country: 'مصر',
-      governorate_name: params.addressSnapshot?.governorate_name || '',
-      markaz_name: params.addressSnapshot?.markaz_name || '',
-      detailed_address: params.addressSnapshot?.detailed_address || '',
-      delivery_fee: offlineDeliveryFee,
-      subtotal: offlineSubtotal,
-      total_amount: offlineTotalAmount,
-      delivery_notes: params.deliveryNotes || null,
-      status: 'pending_review' as DeliveryOrderStatus,
-      created_at: new Date().toISOString(),
-      items: params.items.map((item, idx) => ({
-        id: `mock-item-${idx}`,
-        order_id: mockOrderId,
-        delivery_order_id: mockOrderId,
+      const itemsPayload = params.items.map((item) => ({
+        order_id: orderId,
         product_id: item.product_id || null,
         product_name: item.product_name,
         category_id: item.category_id || null,
@@ -629,24 +616,79 @@ export const deliveryService = {
         quantity: item.quantity || '١',
         unit_price: Number(item.unit_price) || 0,
         total_price: Number(item.total_price) || 0,
-      })),
-    };
+      }));
 
-    if (params.userId && params.householdId) {
-      const cached = cacheManager.getHouseholdCache<DeliveryOrder[]>(
-        params.userId,
-        params.householdId,
-        'delivery_orders'
-      ) || [];
-      const updated = [mockOrder, ...cached];
-      cacheManager.setHouseholdCache(params.userId, params.householdId, 'delivery_orders', updated);
+      const { error: itemsErr } = await supabase
+        .from('delivery_order_items')
+        .insert(itemsPayload)
+        .select();
+
+      if (itemsErr) {
+        console.error('[deliveryService] CRITICAL: Error inserting delivery_order_items:', itemsErr);
+        return {
+          success: false,
+          message: `فشل حفظ أصناف الطلب في جدول delivery_order_items: ${itemsErr.message || JSON.stringify(itemsErr)}`,
+        };
+      }
+
+      const { data: verifiedItems, error: verifyErr } = await supabase
+        .from('delivery_order_items')
+        .select('*')
+        .eq('order_id', orderId);
+
+      if (verifyErr) {
+        return {
+          success: false,
+          message: `فشل التحقق من الأصناف المحفوظة في قاعدة البيانات: ${verifyErr.message}`,
+        };
+      }
+
+      if (!verifiedItems || verifiedItems.length === 0) {
+        return {
+          success: false,
+          message: 'فشل التحقق: تم إنشاء الطلب ولكن لم يتم العثور على أي أصناف في delivery_order_items',
+        };
+      }
+
+      try {
+        await supabase.from('delivery_order_status_history').insert({
+          delivery_order_id: orderId,
+          old_status: null,
+          new_status: 'pending_review',
+          note: 'تم إنشاء الطلب بنجاح وهو قيد المراجعة',
+        });
+      } catch {
+        // non-blocking
+      }
+
+      const completeOrder: DeliveryOrder = {
+        ...(orderData as DeliveryOrder),
+        is_free_delivery: tariffCheck.isFreeDelivery,
+        estimated_delivery_minutes: tariffCheck.estimatedDeliveryMinutes,
+        tariff_id: tariffCheck.tariffId,
+        items: verifiedItems as DeliveryOrderItem[],
+      };
+
+      if (params.userId && params.householdId) {
+        const cached =
+          cacheManager.getHouseholdCache<DeliveryOrder[]>(
+            params.userId,
+            params.householdId,
+            'delivery_orders'
+          ) || [];
+        const updated = [completeOrder, ...cached.filter((o) => o.id !== orderId)];
+        cacheManager.setHouseholdCache(params.userId, params.householdId, 'delivery_orders', updated);
+      }
+
+      return {
+        success: true,
+        order_id: orderId,
+        message: 'تم إرسال طلب التوصيل وحفظ أصناف الفاتورة بنجاح!',
+      };
+    } catch (directErr: any) {
+      console.error('[deliveryService] Direct insert error:', directErr);
+      return { success: false, message: directErr.message || 'فشل إنشاء طلب التوصيل' };
     }
-
-    return {
-      success: true,
-      order_id: mockOrderId,
-      message: 'تم تسجيل طلب التوصيل بنجاح (حفظ محلي)',
-    };
   },
 
   /**
@@ -937,41 +979,11 @@ export const deliveryService = {
   },
 
   /**
-   * Fetch all governorate settings for delivery
+   * Fetch legacy governorate settings if queried by settings UI (NEVER returns hardcoded 15 EGP mock rows)
    */
   async getGovernorateSettings(): Promise<any[]> {
-    const fallbackGovernorates = [
-      { governorate_name: 'سوهاج', governorate_code: 'EG-SHG', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'القاهرة', governorate_code: 'EG-C', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الجيزة', governorate_code: 'EG-GZ', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الإسكندرية', governorate_code: 'EG-ALX', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'أسيوط', governorate_code: 'EG-AST', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'قنا', governorate_code: 'EG-KN', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الأقصر', governorate_code: 'EG-LX', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'أسوان', governorate_code: 'EG-ASN', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'المنيا', governorate_code: 'EG-MN', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'بني سويف', governorate_code: 'EG-BNS', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الفيوم', governorate_code: 'EG-FYM', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'البحر الأحمر', governorate_code: 'EG-BA', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الوادي الجديد', governorate_code: 'EG-WAD', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'مطروح', governorate_code: 'EG-MT', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'شمال سيناء', governorate_code: 'EG-SIN', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'جنوب سيناء', governorate_code: 'EG-JS', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'بورسعيد', governorate_code: 'EG-PTS', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الإسماعيلية', governorate_code: 'EG-IS', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'السويس', governorate_code: 'EG-SUZ', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الشرقية', governorate_code: 'EG-SHR', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الدقهلية', governorate_code: 'EG-DK', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'القليوبية', governorate_code: 'EG-KB', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'الغربية', governorate_code: 'EG-GH', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'المنوفية', governorate_code: 'EG-MNF', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'البحيرة', governorate_code: 'EG-BH', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'كفر الشيخ', governorate_code: 'EG-KFS', is_active: true, delivery_fee: 15 },
-      { governorate_name: 'دمياط', governorate_code: 'EG-DT', is_active: true, delivery_fee: 15 },
-    ];
-
     if (!isSupabaseConfigured()) {
-      return fallbackGovernorates;
+      return [];
     }
 
     try {
@@ -980,13 +992,13 @@ export const deliveryService = {
         .select('*')
         .order('governorate_name', { ascending: true });
 
-      if (error || !data || data.length === 0) {
-        return fallbackGovernorates;
+      if (error || !data) {
+        return [];
       }
       return data;
     } catch (err) {
       console.warn('[deliveryService] Exception fetching governorates settings:', err);
-      return fallbackGovernorates;
+      return [];
     }
   },
 
@@ -1017,83 +1029,5 @@ export const deliveryService = {
     } catch (err: any) {
       return { success: false, message: err.message || 'فشل تحديث إعدادات المحافظة' };
     }
-  },
-
-  /**
-   * Determine delivery fee and eligibility based on user's governorate
-   * Strict 3-tier precedence:
-   * Tier 1: Active governorate setting with custom fee -> use governorate fee
-   * Tier 2: No specific governorate fee / not found -> use default_delivery_fee
-   * Tier 3: Governorate has is_active === false -> Delivery is NOT allowed
-   */
-  async resolveDeliveryFeeForGovernorate(
-    governorateName?: string,
-    governorateCode?: string
-  ): Promise<{
-    allowed: boolean;
-    deliveryFee: number;
-    reason?: string;
-    source: 'governorate' | 'default';
-  }> {
-    const settings = await this.getSettings();
-    if (!settings.delivery_enabled) {
-      return {
-        allowed: false,
-        deliveryFee: Number(settings.default_delivery_fee) || 15.0,
-        reason: 'خدمة التوصيل معطلة حالياً من قبل الإدارة',
-        source: 'default',
-      };
-    }
-
-    const defaultFee = Number(settings.default_delivery_fee) || 15.0;
-    const govSettingsList = await this.getGovernorateSettings();
-
-    const cleanName = (governorateName || '').trim();
-    const cleanCode = (governorateCode || '').trim().toLowerCase();
-
-    const matched = govSettingsList.find((g: any) => {
-      if (cleanCode && g.governorate_code && g.governorate_code.toLowerCase() === cleanCode) {
-        return true;
-      }
-      if (cleanName && g.governorate_name) {
-        const gName = g.governorate_name.trim();
-        if (gName === cleanName) return true;
-        if (cleanName.includes(gName) || gName.includes(cleanName)) return true;
-      }
-      return false;
-    });
-
-    if (matched) {
-      // Tier 3: Deactivated governorate
-      if (matched.is_active === false) {
-        return {
-          allowed: false,
-          deliveryFee: Number(matched.delivery_fee) || defaultFee,
-          reason: `خدمة التوصيل غير مفعلة حالياً في محافظة ${matched.governorate_name || cleanName}`,
-          source: 'governorate',
-        };
-      }
-
-      // Tier 1: Active governorate with defined fee
-      if (
-        matched.delivery_fee !== null &&
-        matched.delivery_fee !== undefined &&
-        !isNaN(Number(matched.delivery_fee)) &&
-        Number(matched.delivery_fee) >= 0
-      ) {
-        return {
-          allowed: true,
-          deliveryFee: Number(matched.delivery_fee),
-          source: 'governorate',
-        };
-      }
-    }
-
-    // Tier 2: Fallback to default delivery fee
-    return {
-      allowed: true,
-      deliveryFee: defaultFee,
-      source: 'default',
-    };
   },
 };

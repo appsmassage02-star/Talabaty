@@ -1,28 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { deliveryService } from '../lib/deliveryService';
+import { validateGpsCoordinates } from '../lib/geoService';
 import { HouseholdAddress, DeliverySettings, InvoiceProduct } from '../types';
-import { EGYPT_GOVERNORATES } from '../data/egyptLocations';
 import {
   Truck,
   MapPin,
   Plus,
   AlertCircle,
-  CheckCircle2,
   X,
-  User,
-  Phone,
-  Building,
-  Calendar,
-  Compass,
-  FileText,
-  Star,
   RefreshCw,
   Ban,
   Crosshair,
   Map,
+  Clock,
+  AlertTriangle,
 } from 'lucide-react';
-import { MapLocationPickerModal } from './MapLocationPickerModal';
+import { MapLocationPickerModal, type MapLocationConfirmMeta } from './MapLocationPickerModal';
+import { GeoHierarchySelector, type GeoSelectionValue } from './GeoHierarchySelector';
 
 interface Props {
   isOpen: boolean;
@@ -36,6 +31,15 @@ interface Props {
     addressSnapshot: HouseholdAddress;
   }) => Promise<{ success: boolean; message?: string }>;
 }
+
+const EMPTY_GEO: GeoSelectionValue = {
+  governorateId: '',
+  governorateName: '',
+  centerId: '',
+  centerName: '',
+  areaId: '',
+  areaName: '',
+};
 
 export const DeliveryOrderModal: React.FC<Props> = ({
   isOpen,
@@ -57,16 +61,17 @@ export const DeliveryOrderModal: React.FC<Props> = ({
 
   // New Address inline form state
   const [isAddingNewAddress, setIsAddingNewAddress] = useState<boolean>(false);
-  const [newLabel, setNewLabel] = useState<string>('عنوان التوصيل');
+  const [newLabel] = useState<string>('عنوان التوصيل');
   const [newName, setNewName] = useState<string>('');
   const [newPhone, setNewPhone] = useState<string>('');
-  const [selectedGovCode, setSelectedGovCode] = useState<string>('');
-  const [selectedGovName, setSelectedGovName] = useState<string>('');
-  const [selectedMarkazName, setSelectedMarkazName] = useState<string>('');
+  const [geoSelection, setGeoSelection] = useState<GeoSelectionValue>(EMPTY_GEO);
   const [newDetailedAddress, setNewDetailedAddress] = useState<string>('');
-  const [newIsDefault, setNewIsDefault] = useState<boolean>(false);
+  const [newIsDefault] = useState<boolean>(false);
   const [newLatitude, setNewLatitude] = useState<number | null>(null);
   const [newLongitude, setNewLongitude] = useState<number | null>(null);
+  const [newGpsAccuracyM, setNewGpsAccuracyM] = useState<number | null>(null);
+  const [newGpsSource, setNewGpsSource] = useState<'gps' | 'map_pin' | null>(null);
+  const [newGpsCapturedAt, setNewGpsCapturedAt] = useState<string | null>(null);
   const [isLocatingNewAddress, setIsLocatingNewAddress] = useState<boolean>(false);
   const [locationErrorNewAddress, setLocationErrorNewAddress] = useState<string | null>(null);
   const [isMapPickerOpen, setIsMapPickerOpen] = useState<boolean>(false);
@@ -83,14 +88,21 @@ export const DeliveryOrderModal: React.FC<Props> = ({
       (pos) => {
         setNewLatitude(Number(pos.coords.latitude.toFixed(7)));
         setNewLongitude(Number(pos.coords.longitude.toFixed(7)));
+        setNewGpsAccuracyM(
+          typeof pos.coords.accuracy === 'number' && Number.isFinite(pos.coords.accuracy)
+            ? Number(pos.coords.accuracy.toFixed(1))
+            : null
+        );
+        setNewGpsSource('gps');
+        setNewGpsCapturedAt(new Date().toISOString());
         setIsLocatingNewAddress(false);
       },
       (err) => {
         setIsLocatingNewAddress(false);
         if (err.code === 1) {
-          setLocationErrorNewAddress('تم رفض إذن الموقع. يرجى تفعيل الـ GPS في جهازك.');
+          setLocationErrorNewAddress('تم رفض إذن الموقع. يرجى تفعيل الـ GPS أو الاختيار من الخريطة.');
         } else {
-          setLocationErrorNewAddress('تعذر تحديد الموقع الجغرافي حالياً.');
+          setLocationErrorNewAddress('تعذر تحديد الموقع الجغرافي حالياً، يمكنك استخدام الخريطة.');
         }
       },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
@@ -120,21 +132,11 @@ export const DeliveryOrderModal: React.FC<Props> = ({
         setSettings(settingsData);
         setAddresses(addressesData);
 
-        // Select default address or first address
         if (addressesData.length > 0) {
           const defaultAddr = addressesData.find((a) => a.is_default) || addressesData[0];
           setSelectedAddressId(defaultAddr.id);
-          if (defaultAddr.governorate_code) {
-            setSelectedGovCode(defaultAddr.governorate_code);
-          }
-          if (defaultAddr.governorate_name) {
-            setSelectedGovName(defaultAddr.governorate_name);
-          }
-          if (defaultAddr.markaz_name) {
-            setSelectedMarkazName(defaultAddr.markaz_name);
-          }
         } else {
-          // Open address form automatically if no address exists
+          setSelectedAddressId('');
           setIsAddingNewAddress(true);
         }
       } catch (err) {
@@ -151,49 +153,50 @@ export const DeliveryOrderModal: React.FC<Props> = ({
     };
   }, [isOpen, household?.id, supabaseUser?.id]);
 
-  // Update markaz list when governorate changes
-  const currentGov = selectedGovCode
-    ? EGYPT_GOVERNORATES.find((g) => g.code === selectedGovCode) || null
-    : null;
-  const marakezList = currentGov?.marakez || [];
-
-  useEffect(() => {
-    if (selectedGovCode && marakezList.length > 0 && !marakezList.includes(selectedMarkazName)) {
-      setSelectedMarkazName(marakezList[0] || '');
-    } else if (!selectedGovCode) {
-      setSelectedMarkazName('');
-    }
-  }, [selectedGovCode, marakezList, selectedMarkazName]);
-
-  // Governorate Delivery Fee resolution state
-  const [resolvedGovFee, setResolvedGovFee] = useState<{
+  // Central tariff resolution state (NO hardcoded fee)
+  const [tariffState, setTariffState] = useState<{
+    loading: boolean;
     allowed: boolean;
-    deliveryFee: number;
+    deliveryFee: number | null;
+    isFreeDelivery: boolean;
+    estimatedDeliveryMinutes: number | null;
     reason?: string;
-    source: 'governorate' | 'default';
   }>({
-    allowed: true,
-    deliveryFee: 15,
-    source: 'default',
+    loading: false,
+    allowed: false,
+    deliveryFee: null,
+    isFreeDelivery: false,
+    estimatedDeliveryMinutes: null,
   });
 
-  // Re-resolve fee whenever selected address changes
   useEffect(() => {
     let isMounted = true;
-    const resolveFee = async () => {
-      const addr = addresses.find((a) => a.id === selectedAddressId);
-      if (!addr) return;
-      const res = await deliveryService.resolveDeliveryFeeForGovernorate(
-        addr.governorate_name,
-        addr.governorate_code
-      );
-      if (isMounted) {
-        setResolvedGovFee(res);
-      }
-    };
-    if (selectedAddressId && addresses.length > 0) {
-      resolveFee();
+    const addr = addresses.find((a) => a.id === selectedAddressId);
+    if (!addr) {
+      setTariffState({
+        loading: false,
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        reason: addresses.length > 0 ? 'يرجى اختيار عنوان للتوصيل' : undefined,
+      });
+      return;
     }
+
+    setTariffState((prev) => ({ ...prev, loading: true, reason: undefined }));
+    deliveryService.resolveHouseholdDeliveryTariff(addr).then((res) => {
+      if (!isMounted) return;
+      setTariffState({
+        loading: false,
+        allowed: res.allowed,
+        deliveryFee: res.deliveryFee,
+        isFreeDelivery: res.isFreeDelivery,
+        estimatedDeliveryMinutes: res.estimatedDeliveryMinutes,
+        reason: res.reason,
+      });
+    });
+
     return () => {
       isMounted = false;
     };
@@ -201,9 +204,10 @@ export const DeliveryOrderModal: React.FC<Props> = ({
 
   if (!isOpen) return null;
 
-  const isDeliveryEnabled = (settings?.delivery_enabled ?? true) && resolvedGovFee.allowed;
-  const deliveryFee = resolvedGovFee.deliveryFee;
-  const totalAmount = subtotal + (isDeliveryEnabled ? deliveryFee : 0);
+  const isDeliveryEnabled = (settings?.delivery_enabled ?? true) && tariffState.allowed;
+  const resolvedFeeNumber =
+    tariffState.allowed && tariffState.deliveryFee !== null ? Number(tariffState.deliveryFee) : null;
+  const totalAmount = subtotal + (resolvedFeeNumber ?? 0);
 
   // Handle adding a new address inline
   const handleSaveNewAddress = async (e: React.FormEvent) => {
@@ -214,7 +218,6 @@ export const DeliveryOrderModal: React.FC<Props> = ({
       setFormError('معرّف المنزل غير متاح.');
       return;
     }
-
     if (!newName.trim()) {
       setFormError('يرجى إدخال اسم المستلم');
       return;
@@ -223,16 +226,20 @@ export const DeliveryOrderModal: React.FC<Props> = ({
       setFormError('يرجى إدخال رقم هاتف التواصل');
       return;
     }
-    if (!selectedGovName.trim()) {
-      setFormError('يرجى اختيار المحافظة');
-      return;
-    }
-    if (!selectedMarkazName.trim()) {
-      setFormError('يرجى اختيار المركز أو الحي');
+    if (!geoSelection.governorateId || !geoSelection.centerId || !geoSelection.areaId) {
+      setFormError('يرجى اختيار المحافظة والمركز والمنطقة من النظام الجغرافي المعتمد');
       return;
     }
     if (!newDetailedAddress.trim()) {
       setFormError('يرجى كتابة العنوان التفصيلي');
+      return;
+    }
+
+    const gpsCheck = validateGpsCoordinates(newLatitude, newLongitude);
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      setFormError(
+        gpsCheck.reason || 'يجب تحديد الموقع بدقة عبر GPS أو تثبيت الدبوس على الخريطة'
+      );
       return;
     }
 
@@ -245,13 +252,20 @@ export const DeliveryOrderModal: React.FC<Props> = ({
           full_name: newName.trim(),
           phone: newPhone.trim(),
           country: 'مصر',
-          governorate_code: selectedGovCode,
-          governorate_name: selectedGovName,
-          markaz_code: selectedMarkazName,
-          markaz_name: selectedMarkazName,
+          governorate_id: geoSelection.governorateId,
+          governorate_code: geoSelection.governorateId,
+          governorate_name: geoSelection.governorateName,
+          center_id: geoSelection.centerId,
+          markaz_code: geoSelection.centerId,
+          markaz_name: geoSelection.centerName,
+          area_id: geoSelection.areaId,
+          area_name: geoSelection.areaName,
           detailed_address: newDetailedAddress.trim(),
-          latitude: newLatitude,
-          longitude: newLongitude,
+          latitude: gpsCheck.latitude,
+          longitude: gpsCheck.longitude,
+          gps_accuracy_m: newGpsAccuracyM,
+          gps_source: newGpsSource || 'map_pin',
+          gps_captured_at: newGpsCapturedAt || new Date().toISOString(),
           is_default: newIsDefault || addresses.length === 0,
         },
         supabaseUser?.id
@@ -263,14 +277,17 @@ export const DeliveryOrderModal: React.FC<Props> = ({
         return;
       }
 
-      // Add to addresses list and select it
       const updatedList = [res.address, ...addresses];
       setAddresses(updatedList);
       setSelectedAddressId(res.address.id);
       setIsAddingNewAddress(false);
+      setGeoSelection(EMPTY_GEO);
       setNewDetailedAddress('');
       setNewLatitude(null);
       setNewLongitude(null);
+      setNewGpsAccuracyM(null);
+      setNewGpsSource(null);
+      setNewGpsCapturedAt(null);
       setLocationErrorNewAddress(null);
     } catch (err: any) {
       setFormError(err.message || 'حدث خطأ أثناء حفظ العنوان');
@@ -283,37 +300,32 @@ export const DeliveryOrderModal: React.FC<Props> = ({
   const handleConfirmOrder = async () => {
     setFormError(null);
 
-    // 1. Validate service is enabled
-    if (!isDeliveryEnabled || !resolvedGovFee.allowed) {
-      setFormError(
-        resolvedGovFee.reason ||
-          'خدمة التوصيل معطلة حالياً. لا يمكن إنشاء طلبات جديدة في الوقت الحالي.'
-      );
+    if (!settings?.delivery_enabled) {
+      setFormError('خدمة التوصيل معطلة حالياً. لا يمكن إنشاء طلبات جديدة في الوقت الحالي.');
       return;
     }
 
-    // 2. Validate products
     if (!products || products.length === 0) {
       setFormError('لا توجد منتجات في الفاتورة.');
       return;
     }
 
-    // 3. Validate address selection
     const selectedAddr = addresses.find((a) => a.id === selectedAddressId);
     if (!selectedAddr) {
       setFormError('يرجى اختيار عنوان التوصيل من القائمة أو إضافة عنوان جديد.');
       return;
     }
 
-    // 4. Validate mandatory address fields
-    if (
-      !selectedAddr.full_name?.trim() ||
-      !selectedAddr.phone?.trim() ||
-      !selectedAddr.governorate_name?.trim() ||
-      !selectedAddr.markaz_name?.trim() ||
-      !selectedAddr.detailed_address?.trim()
-    ) {
-      setFormError('بيانات العنوان المحدد غير مكتملة، يرجى استكمال بيانات العنوان.');
+    if (tariffState.loading) {
+      setFormError('جاري التحقق من تسعيرة التوصيل لهذه المنطقة...');
+      return;
+    }
+
+    if (!tariffState.allowed || resolvedFeeNumber === null) {
+      setFormError(
+        tariffState.reason ||
+          'لا توجد تسعيرة توصيل مفعّلة أو موقع GPS صالح لهذا العنوان.'
+      );
       return;
     }
 
@@ -322,7 +334,7 @@ export const DeliveryOrderModal: React.FC<Props> = ({
       const res = await onConfirm({
         addressId: selectedAddr.id,
         deliveryNotes: deliveryNotes.trim(),
-        deliveryFee: deliveryFee,
+        deliveryFee: resolvedFeeNumber,
         addressSnapshot: selectedAddr,
       });
 
@@ -389,7 +401,7 @@ export const DeliveryOrderModal: React.FC<Props> = ({
             </div>
           )}
 
-          {/* Delivery Fee Notice (Read-only, cannot be edited) */}
+          {/* Delivery Fee Notice (Server Central Tariff) */}
           <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-between">
             <div className="flex items-center space-x-2 space-x-reverse">
               <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs">
@@ -399,14 +411,27 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                 <span className="text-xs font-bold text-slate-800 block">
                   تكلفة التوصيل المعتمدة
                 </span>
-                <span className="text-[10px] text-slate-400 block">
-                  محددة رسمياً من الإدارة (غير قابلة للتعديل)
+                <span className="text-[10px] text-slate-500 block">
+                  {tariffState.estimatedDeliveryMinutes
+                    ? `المدة المتوقعة: ~${tariffState.estimatedDeliveryMinutes} دقيقة`
+                    : 'محددة تلقائياً من التسعيرة المركزية للمنطقة'}
                 </span>
               </div>
             </div>
-            <span className="text-base font-black text-emerald-700 font-mono">
-              {deliveryFee.toFixed(2)} {budgetConfig.currency}
-            </span>
+            {tariffState.loading ? (
+              <span className="text-xs font-bold text-slate-500 flex items-center gap-1">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>جاري الحساب...</span>
+              </span>
+            ) : resolvedFeeNumber !== null ? (
+              <span className="text-base font-black text-emerald-700 font-mono">
+                {tariffState.isFreeDelivery
+                  ? `توصيل مجاني (0.00 ${budgetConfig.currency})`
+                  : `${resolvedFeeNumber.toFixed(2)} ${budgetConfig.currency}`}
+              </span>
+            ) : (
+              <span className="text-xs font-black text-rose-600">غير متاح</span>
+            )}
           </div>
 
           {/* Address Selection Section */}
@@ -428,7 +453,6 @@ export const DeliveryOrderModal: React.FC<Props> = ({
               )}
             </div>
 
-            {/* If adding new address inline */}
             {isAddingNewAddress ? (
               <form
                 onSubmit={handleSaveNewAddress}
@@ -477,68 +501,15 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                      الدولة
-                    </label>
-                    <input
-                      type="text"
-                      disabled
-                      value="مصر"
-                      className="w-full px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-xl text-xs font-black text-slate-500 cursor-not-allowed"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                      المحافظة <span className="text-rose-500">*</span>
-                    </label>
-                    <select
-                      value={selectedGovCode}
-                      onChange={(e) => {
-                        const code = e.target.value;
-                        const gov = EGYPT_GOVERNORATES.find((g) => g.code === code);
-                        setSelectedGovCode(code);
-                        if (gov) {
-                          setSelectedGovName(gov.nameAr);
-                          setSelectedMarkazName(gov.marakez[0] || '');
-                        } else {
-                          setSelectedGovName('');
-                          setSelectedMarkazName('');
-                        }
-                      }}
-                      className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                    >
-                      <option value="">-- اختر المحافظة --</option>
-                      {EGYPT_GOVERNORATES.map((gov) => (
-                        <option key={gov.code} value={gov.code}>
-                          {gov.nameAr}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
                   <div className="sm:col-span-2">
-                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                      المركز / الحي <span className="text-rose-500">*</span>
-                    </label>
-                    <select
-                      value={selectedMarkazName}
-                      onChange={(e) => setSelectedMarkazName(e.target.value)}
-                      className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                    >
-                      {!selectedGovCode && (
-                        <option value="">-- اختر المحافظة أولاً --</option>
-                      )}
-                      {selectedGovCode && marakezList.length === 0 && (
-                        <option value="">-- لا توجد مراكز مسجلة --</option>
-                      )}
-                      {marakezList.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                    </select>
+                    <GeoHierarchySelector
+                      value={geoSelection}
+                      onChange={setGeoSelection}
+                      compact
+                    />
+                    <p className="text-[10px] text-amber-700 font-bold mt-1">
+                      ℹ️ اختيار المنطقة الجغرافية لا يغني عن تحديد موقعك عبر GPS أو الخريطة.
+                    </p>
                   </div>
                 </div>
 
@@ -556,7 +527,7 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                   />
                 </div>
 
-                {/* GPS / Map Location Section (Optional) */}
+                {/* Mandatory GPS / Map Location Section */}
                 <div className="pt-1.5 border-t border-blue-200/50 flex items-center justify-between flex-wrap gap-1.5">
                   <div className="flex items-center space-x-1.5 space-x-reverse text-[11px]">
                     <MapPin className="w-3.5 h-3.5 text-blue-600" />
@@ -565,14 +536,20 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                         محدد ({newLatitude.toFixed(4)}, {newLongitude.toFixed(4)})
                       </span>
                     ) : (
-                      <span className="text-slate-500">إرفاق إحداثيات العنوان (اختياري)</span>
+                      <span className="text-rose-600 font-bold">تثبيت الموقع على الخريطة أو GPS إجباري *</span>
                     )}
                   </div>
                   <div className="flex items-center space-x-1.5 space-x-reverse flex-wrap gap-1">
                     {newLatitude !== null && (
                       <button
                         type="button"
-                        onClick={() => { setNewLatitude(null); setNewLongitude(null); }}
+                        onClick={() => {
+                          setNewLatitude(null);
+                          setNewLongitude(null);
+                          setNewGpsAccuracyM(null);
+                          setNewGpsSource(null);
+                          setNewGpsCapturedAt(null);
+                        }}
                         className="text-[10px] text-rose-600 hover:underline px-1"
                       >
                         إلغاء الموقع
@@ -646,7 +623,8 @@ export const DeliveryOrderModal: React.FC<Props> = ({
             ) : (
               <div className="space-y-2 max-h-48 overflow-y-auto pr-0.5">
                 {addresses.map((addr) => {
-                  const hasCoords = addr.latitude != null && addr.longitude != null && !isNaN(Number(addr.latitude)) && !isNaN(Number(addr.longitude));
+                  const hasCoords = validateGpsCoordinates(addr.latitude, addr.longitude).valid;
+                  const hasGeo = Boolean(addr.governorate_id && addr.center_id && addr.area_id);
                   return (
                     <label
                       key={addr.id}
@@ -664,7 +642,7 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                         className="mt-1 w-4 h-4 text-blue-600 focus:ring-blue-500 border-slate-300"
                       />
                       <div className="flex-1 min-w-0 text-xs">
-                        <div className="flex items-center space-x-2 space-x-reverse">
+                        <div className="flex items-center space-x-2 space-x-reverse flex-wrap gap-1">
                           <span className="font-black text-slate-800">
                             {addr.address_label || 'عنوان المنزل'}
                           </span>
@@ -673,10 +651,15 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                               افتراضي
                             </span>
                           )}
-                          {hasCoords && (
+                          {hasCoords && hasGeo ? (
                             <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-bold px-1.5 py-0.2 rounded flex items-center space-x-0.5 space-x-reverse">
                               <MapPin className="w-2.5 h-2.5 ml-0.5 text-emerald-600" />
-                              <span>GPS</span>
+                              <span>مكتمل GPS</span>
+                            </span>
+                          ) : (
+                            <span className="bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-bold px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                              <AlertTriangle className="w-2.5 h-2.5" />
+                              <span>{!hasGeo ? 'ينقص المنطقة المعتمدة' : 'ينقص GPS'}</span>
                             </span>
                           )}
                         </div>
@@ -684,7 +667,8 @@ export const DeliveryOrderModal: React.FC<Props> = ({
                           {addr.full_name} ({addr.phone})
                         </p>
                         <p className="text-slate-500 text-[11px] truncate mt-0.5">
-                          {addr.governorate_name}، {addr.markaz_name} - {addr.detailed_address}
+                          {addr.governorate_name}، {addr.markaz_name}
+                          {addr.area_name ? `، ${addr.area_name}` : ''} - {addr.detailed_address}
                         </p>
                       </div>
                     </label>
@@ -708,11 +692,11 @@ export const DeliveryOrderModal: React.FC<Props> = ({
             />
           </div>
 
-          {/* Governorate Warning Banner if Delivery is Disabled */}
-          {!resolvedGovFee.allowed && (
+          {/* Warning Banner if Uncovered / Missing Geo / Missing GPS */}
+          {!tariffState.loading && !tariffState.allowed && tariffState.reason && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center space-x-2 space-x-reverse text-rose-700 text-xs font-bold">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 ml-1.5" />
-              <span>{resolvedGovFee.reason || 'خدمة التوصيل غير مفعلة حالياً في هذه المحافظة.'}</span>
+              <span>{tariffState.reason}</span>
             </div>
           )}
 
@@ -727,25 +711,29 @@ export const DeliveryOrderModal: React.FC<Props> = ({
             <div className="flex items-center justify-between text-slate-600">
               <div className="flex items-center space-x-1.5 space-x-reverse">
                 <span>رسوم التوصيل للمنزل</span>
-                {resolvedGovFee.source === 'governorate' && (
-                  <span className="text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 font-bold mr-1">
-                    محافظة {addresses.find((a) => a.id === selectedAddressId)?.governorate_name}
+                {tariffState.estimatedDeliveryMinutes ? (
+                  <span className="text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 font-bold inline-flex items-center gap-1 mr-1">
+                    <Clock className="w-2.5 h-2.5" />
+                    <span>{tariffState.estimatedDeliveryMinutes} د</span>
                   </span>
-                )}
-                {resolvedGovFee.source === 'default' && (
-                  <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200 font-medium mr-1">
-                    السعر الافتراضي العام
-                  </span>
-                )}
+                ) : null}
               </div>
               <span className="font-bold font-mono text-emerald-700">
-                +{deliveryFee.toFixed(2)} {budgetConfig.currency}
+                {tariffState.loading
+                  ? '...'
+                  : resolvedFeeNumber === null
+                  ? 'غير متاح'
+                  : tariffState.isFreeDelivery
+                  ? 'مجاني (0.00)'
+                  : `+${resolvedFeeNumber.toFixed(2)} ${budgetConfig.currency}`}
               </span>
             </div>
             <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-slate-900 font-black text-sm">
               <span>إجمالي المصروف المتوقع (منتجات + توصيل)</span>
               <span className="text-blue-700 font-mono text-base">
-                {totalAmount.toFixed(2)} {budgetConfig.currency}
+                {resolvedFeeNumber !== null
+                  ? `${totalAmount.toFixed(2)} ${budgetConfig.currency}`
+                  : 'يُحسب بعد استيفاء التغطية'}
               </span>
             </div>
           </div>
@@ -764,7 +752,14 @@ export const DeliveryOrderModal: React.FC<Props> = ({
           <button
             type="button"
             onClick={handleConfirmOrder}
-            disabled={!isDeliveryEnabled || !resolvedGovFee.allowed || isSubmitting || addresses.length === 0}
+            disabled={
+              !isDeliveryEnabled ||
+              tariffState.loading ||
+              !tariffState.allowed ||
+              resolvedFeeNumber === null ||
+              isSubmitting ||
+              addresses.length === 0
+            }
             className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-md shadow-blue-500/20 transition-all flex items-center space-x-1.5 space-x-reverse"
           >
             {isSubmitting ? (
@@ -786,14 +781,17 @@ export const DeliveryOrderModal: React.FC<Props> = ({
       <MapLocationPickerModal
         isOpen={isMapPickerOpen}
         onClose={() => setIsMapPickerOpen(false)}
-        onConfirm={(lat, lng) => {
+        onConfirm={(lat, lng, meta?: MapLocationConfirmMeta) => {
           setNewLatitude(lat);
           setNewLongitude(lng);
+          setNewGpsAccuracyM(meta?.accuracyM ?? null);
+          setNewGpsSource(meta?.source || 'map_pin');
+          setNewGpsCapturedAt(meta?.capturedAt || new Date().toISOString());
           setLocationErrorNewAddress(null);
         }}
         initialLat={newLatitude}
         initialLng={newLongitude}
-        governorateName={selectedGovName}
+        governorateName={geoSelection.governorateName}
         title="تحديد موقع عنوان التوصيل على الخريطة"
       />
     </div>

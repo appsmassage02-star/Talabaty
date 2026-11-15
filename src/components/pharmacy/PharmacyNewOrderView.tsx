@@ -17,17 +17,22 @@ import {
   Save,
   X,
   Check,
-  ChevronDown,
-  Pill,
   MapPin,
   MessageSquare,
   Loader2,
+  Crosshair,
+  Map as MapIcon,
+  Clock,
+  Truck,
 } from "lucide-react";
 import { useApp } from "../../context/AppContext";
 import { deliveryService } from "../../lib/deliveryService";
+import { pharmacyService } from "../../lib/pharmacyService";
+import { validateGpsCoordinates } from "../../lib/geoService";
 import { HouseholdAddress } from "../../types";
-import { EGYPT_GOVERNORATES } from "../../data/egyptLocations";
 import { processDocumentImage } from "../../lib/imageUtils";
+import { GeoHierarchySelector, type GeoSelectionValue } from "../GeoHierarchySelector";
+import { MapLocationPickerModal, type MapLocationConfirmMeta } from "../MapLocationPickerModal";
 
 interface PharmacyNewOrderViewProps {
   initialPrescription?: PharmacyPrescription | null;
@@ -100,27 +105,43 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
   const [customDeliveryAddress, setCustomDeliveryAddress] = useState<string>("");
   const [customerNotes, setCustomerNotes] = useState<string>("");
 
-  // Inline add Sohag address state
+  // Central Pharmacy Tariff Resolution State
+  const [pharmacyTariff, setPharmacyTariff] = useState<{
+    loading: boolean;
+    allowed: boolean;
+    deliveryFee: number | null;
+    isFreeDelivery: boolean;
+    estimatedDeliveryMinutes: number | null;
+    reason?: string;
+  }>({
+    loading: false,
+    allowed: false,
+    deliveryFee: null,
+    isFreeDelivery: false,
+    estimatedDeliveryMinutes: null,
+  });
+
+  // Inline add address state (central geo + mandatory GPS)
   const [showAddAddressInline, setShowAddAddressInline] = useState(false);
-  const [newAddressMarkaz, setNewAddressMarkaz] = useState("سوهاج");
+  const [newGeoSelection, setNewGeoSelection] = useState<GeoSelectionValue>({
+    governorateId: "",
+    governorateName: "",
+    centerId: "",
+    centerName: "",
+    areaId: "",
+    areaName: "",
+  });
   const [newAddressDetails, setNewAddressDetails] = useState("");
   const [newAddressPhone, setNewAddressPhone] = useState("");
+  const [newLat, setNewLat] = useState<number | null>(null);
+  const [newLng, setNewLng] = useState<number | null>(null);
+  const [newGpsAccuracyM, setNewGpsAccuracyM] = useState<number | null>(null);
+  const [newGpsSource, setNewGpsSource] = useState<"gps" | "map_pin" | null>(null);
+  const [newGpsCapturedAt, setNewGpsCapturedAt] = useState<string | null>(null);
+  const [isLocatingGps, setIsLocatingGps] = useState(false);
+  const [gpsInlineError, setGpsInlineError] = useState<string | null>(null);
+  const [isMapPickerOpen, setIsMapPickerOpen] = useState(false);
   const [isSavingAddress, setIsSavingAddress] = useState(false);
-
-  const sohagGov = EGYPT_GOVERNORATES.find((g) => g.code === "sohag");
-  const sohagMarakez = sohagGov?.marakez || [
-    "سوهاج",
-    "أخميم",
-    "طما",
-    "طهطا",
-    "المراغة",
-    "جهينة",
-    "ساقلتة",
-    "المنشأة",
-    "جرجا",
-    "البلينا",
-    "دار السلام",
-  ];
 
   useEffect(() => {
     let isMounted = true;
@@ -128,15 +149,24 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
       deliveryService.getHouseholdAddresses(household.id, supabaseUser?.id).then((addrs) => {
         if (!isMounted) return;
         setHouseholdAddresses(addrs);
-        // Prefer an address in Sohag
-        const sohagAddr = addrs.find((a) =>
-          Boolean(
-            a.governorate_name?.includes("سوهاج") ||
-            a.governorate_code?.toLowerCase().includes("sohag") ||
-            a.governorate_code?.toUpperCase() === "EG-SHG"
-          )
-        );
-        const def = sohagAddr || addrs.find((a) => a.is_default) || addrs[0];
+        const def =
+          addrs.find(
+            (a) =>
+              a.is_default &&
+              a.governorate_id &&
+              a.center_id &&
+              a.area_id &&
+              validateGpsCoordinates(a.latitude, a.longitude).valid
+          ) ||
+          addrs.find(
+            (a) =>
+              a.governorate_id &&
+              a.center_id &&
+              a.area_id &&
+              validateGpsCoordinates(a.latitude, a.longitude).valid
+          ) ||
+          addrs.find((a) => a.is_default) ||
+          addrs[0];
         if (def) {
           setSelectedAddressId(def.id);
           setCustomDeliveryAddress(def.detailed_address || "");
@@ -148,15 +178,94 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
     };
   }, [household?.id, supabaseUser?.id]);
 
-  const handleCreateSohagAddress = async () => {
+  // Re-evaluate central pharmacy tariff whenever chosen address changes
+  useEffect(() => {
+    let active = true;
+    const chosen = householdAddresses.find((a) => a.id === selectedAddressId);
+    if (!chosen) {
+      setPharmacyTariff({
+        loading: false,
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        reason: householdAddresses.length > 0 ? "يرجى اختيار عنوان توصيل" : undefined,
+      });
+      return;
+    }
+
+    setPharmacyTariff((prev) => ({ ...prev, loading: true, reason: undefined }));
+    pharmacyService.resolvePharmacyDeliveryTariff(chosen).then((res) => {
+      if (!active) return;
+      setPharmacyTariff({
+        loading: false,
+        allowed: res.allowed,
+        deliveryFee: res.deliveryFee,
+        isFreeDelivery: res.isFreeDelivery,
+        estimatedDeliveryMinutes: res.estimatedDeliveryMinutes,
+        reason: res.reason,
+      });
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedAddressId, householdAddresses]);
+
+  const handleLocateInlineGps = () => {
+    setGpsInlineError(null);
+    if (typeof window === "undefined" || !navigator.geolocation) {
+      setGpsInlineError("خدمة GPS غير مدعومة في هذا المتصفح، يرجى تحديد الموقع من الخريطة.");
+      return;
+    }
+    setIsLocatingGps(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setNewLat(Number(pos.coords.latitude.toFixed(7)));
+        setNewLng(Number(pos.coords.longitude.toFixed(7)));
+        setNewGpsAccuracyM(
+          typeof pos.coords.accuracy === "number" && Number.isFinite(pos.coords.accuracy)
+            ? Number(pos.coords.accuracy.toFixed(1))
+            : null
+        );
+        setNewGpsSource("gps");
+        setNewGpsCapturedAt(new Date().toISOString());
+        setIsLocatingGps(false);
+      },
+      (err) => {
+        setIsLocatingGps(false);
+        setGpsInlineError(
+          err.code === 1
+            ? "تم رفض إذن الموقع. يمكنك تثبيت الدبوس مباشرة من الخريطة التفاعلية."
+            : "تعذر التقاط GPS حالياً، يرجى تثبيت الموقع من الخريطة."
+        );
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
+  };
+
+  const handleCreateCentralAddress = async () => {
     if (!household?.id) {
       setErrorMessage("يجب تسجيل المنزل أولاً لإضافة عنوان توصيل");
+      return;
+    }
+    if (!newGeoSelection.governorateId || !newGeoSelection.centerId || !newGeoSelection.areaId) {
+      setErrorMessage("يرجى اختيار المحافظة والمركز والمنطقة من القوائم المعتمدة");
       return;
     }
     if (!newAddressDetails.trim()) {
       setErrorMessage("يرجى إدخال تفاصيل العنوان (الشارع والحي والعمارة)");
       return;
     }
+
+    const gpsCheck = validateGpsCoordinates(newLat, newLng);
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      setErrorMessage(
+        gpsCheck.reason || "يجب تحديد الموقع الجغرافي بدقة عبر GPS أو الخريطة التفاعلية"
+      );
+      return;
+    }
+
     setIsSavingAddress(true);
     setErrorMessage(null);
     try {
@@ -171,11 +280,20 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
             household?.admin_phone ||
             "01000000000",
           country: "مصر",
-          governorate_code: "EG-SHG",
-          governorate_name: "سوهاج",
-          markaz_code: newAddressMarkaz,
-          markaz_name: newAddressMarkaz,
+          governorate_id: newGeoSelection.governorateId,
+          governorate_code: newGeoSelection.governorateId,
+          governorate_name: newGeoSelection.governorateName,
+          center_id: newGeoSelection.centerId,
+          markaz_code: newGeoSelection.centerId,
+          markaz_name: newGeoSelection.centerName,
+          area_id: newGeoSelection.areaId,
+          area_name: newGeoSelection.areaName,
           detailed_address: newAddressDetails.trim(),
+          latitude: gpsCheck.latitude,
+          longitude: gpsCheck.longitude,
+          gps_accuracy_m: newGpsAccuracyM,
+          gps_source: newGpsSource || "map_pin",
+          gps_captured_at: newGpsCapturedAt || new Date().toISOString(),
           is_default: householdAddresses.length === 0,
         },
         supabaseUser?.id
@@ -186,8 +304,21 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
         setSelectedAddressId(res.address.id);
         setCustomDeliveryAddress(res.address.detailed_address || "");
         setShowAddAddressInline(false);
+        setNewGeoSelection({
+          governorateId: "",
+          governorateName: "",
+          centerId: "",
+          centerName: "",
+          areaId: "",
+          areaName: "",
+        });
         setNewAddressDetails("");
-        setSuccessToast("تمت إضافة عنوان التوصيل في محافظة سوهاج بنجاح!");
+        setNewLat(null);
+        setNewLng(null);
+        setNewGpsAccuracyM(null);
+        setNewGpsSource(null);
+        setNewGpsCapturedAt(null);
+        setSuccessToast("تم حفظ العنوان الجغرافي وإحداثيات GPS بنجاح!");
       } else {
         setErrorMessage(res.message || "فشل إضافة العنوان");
       }
@@ -386,7 +517,7 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
 
     if (!selectedAddressId) {
       setErrorMessage(
-        "يرجى اختيار أو إضافة عنوان توصيل لمنزلك في محافظة سوهاج أولاً لإرسال الطلب."
+        "يرجى اختيار أو إضافة عنوان توصيل لمنزلك محدد الإحداثيات والمنطقة لإرسال الطلب."
       );
       return;
     }
@@ -399,17 +530,15 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
       return;
     }
 
-    const isSohag = Boolean(
-      chosenAddr.governorate_name?.includes("سوهاج") ||
-      chosenAddr.governorate_code?.toLowerCase().includes("sohag") ||
-      chosenAddr.governorate_code?.toUpperCase() === "EG-SHG" ||
-      chosenAddr.markaz_name?.includes("سوهاج") ||
-      chosenAddr.detailed_address?.includes("سوهاج")
-    );
+    if (pharmacyTariff.loading) {
+      setErrorMessage("جاري التحقق من تغطية وتسعيرة التوصيل لهذه المنطقة...");
+      return;
+    }
 
-    if (!isSohag) {
+    if (!pharmacyTariff.allowed || pharmacyTariff.deliveryFee === null) {
       setErrorMessage(
-        `خدمة الصيدلية متاحة حالياً داخل محافظة سوهاج فقط. العنوان المحدد (${chosenAddr.governorate_name || "خارج سوهاج"}) غير مشمول بالتغطية، يرجى اختيار أو إضافة عنوان داخل سوهاج.`
+        pharmacyTariff.reason ||
+          "لا توجد تغطية أو تسعيرة توصيل مفعّلة لخدمة الصيدلية لهذا العنوان."
       );
       return;
     }
@@ -418,7 +547,7 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
     try {
       const finalTitle = title.trim() || `طلب روشتة ${selectedPharmacy || "علاج عاجل"}`;
       const deliveryAddressText = customDeliveryAddress.trim() ||
-        `${chosenAddr.governorate_name || "سوهاج"} - ${chosenAddr.markaz_name ? chosenAddr.markaz_name + " - " : ""}${chosenAddr.detailed_address || ""}`.trim();
+        `${chosenAddr.governorate_name || ""} - ${chosenAddr.markaz_name ? chosenAddr.markaz_name + " - " : ""}${chosenAddr.detailed_address || ""}`.trim();
 
       // 1. Auto-save prescription to user's saved prescriptions so images and medicines are saved in DB
       let savedPrescriptionId: string | undefined = undefined;
@@ -914,16 +1043,38 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
           )}
         </div>
 
-        {/* Delivery Address & Instructions Section */}
+        {/* Delivery Address & Central Tariff Section */}
         <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-1.5">
             <span className="text-xs font-bold text-slate-800 flex items-center space-x-1.5 space-x-reverse">
               <MapPin className="w-4 h-4 text-emerald-600" />
               <span>عنوان التوصيل للمنزل</span>
             </span>
-            <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-              توصيل دليفري (محافظة سوهاج)
-            </span>
+            {pharmacyTariff.loading ? (
+              <span className="text-[10px] text-slate-500 font-bold flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>جاري فحص التغطية والتسعيرة...</span>
+              </span>
+            ) : pharmacyTariff.allowed && pharmacyTariff.deliveryFee !== null ? (
+              <span className="text-[10.5px] text-emerald-700 font-bold bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                <Truck className="w-3 h-3" />
+                <span>
+                  {pharmacyTariff.isFreeDelivery
+                    ? "توصيل مجاني (0 ج.م)"
+                    : `رسوم التوصيل: ${pharmacyTariff.deliveryFee} ج.م`}
+                </span>
+                {pharmacyTariff.estimatedDeliveryMinutes ? (
+                  <span className="inline-flex items-center gap-0.5 text-slate-600 mr-1">
+                    <Clock className="w-2.5 h-2.5" />
+                    {pharmacyTariff.estimatedDeliveryMinutes}د
+                  </span>
+                ) : null}
+              </span>
+            ) : selectedAddressId ? (
+              <span className="text-[10px] text-rose-700 font-bold bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">
+                غير مشمول / ينقص استيفاء الموقع
+              </span>
+            ) : null}
           </div>
 
           {householdAddresses.length > 0 ? (
@@ -941,15 +1092,12 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
                   className="flex-1 text-xs p-2.5 bg-white border border-slate-200 rounded-xl font-medium text-slate-800 focus:outline-none focus:border-emerald-500"
                 >
                   {householdAddresses.map((addr) => {
-                    const isSohag = Boolean(
-                      addr.governorate_name?.includes("سوهاج") ||
-                      addr.governorate_code?.toLowerCase().includes("sohag") ||
-                      addr.governorate_code?.toUpperCase() === "EG-SHG" ||
-                      addr.markaz_name?.includes("سوهاج")
-                    );
+                    const hasGps = validateGpsCoordinates(addr.latitude, addr.longitude).valid;
+                    const hasGeo = Boolean(addr.governorate_id && addr.center_id && addr.area_id);
+                    const badge = hasGps && hasGeo ? "✓" : "⚠️ ينقص GPS/منطقة";
                     return (
                       <option key={addr.id} value={addr.id}>
-                        {isSohag ? "✓ [سوهاج]" : "⚠️ [خارج التغطية]"} {addr.address_label || "عنوان"} — {addr.governorate_name || "سوهاج"} ({addr.markaz_name || ""}) - {addr.detailed_address || ""}
+                        {badge} {addr.address_label || "عنوان"} — {addr.governorate_name || ""} ({addr.markaz_name || ""}{addr.area_name ? ` - ${addr.area_name}` : ""}) - {addr.detailed_address || ""}
                       </option>
                     );
                   })}
@@ -959,34 +1107,20 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
                   type="button"
                   onClick={() => setShowAddAddressInline(!showAddAddressInline)}
                   className="px-2.5 py-2.5 bg-white hover:bg-slate-100 text-emerald-700 border border-slate-200 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer flex items-center space-x-1 space-x-reverse"
-                  title="إضافة عنوان جديد في سوهاج"
+                  title="إضافة عنوان جديد"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>عنوان جديد</span>
                 </button>
               </div>
 
-              {/* Outside Sohag warning if selected address is outside Sohag */}
-              {(() => {
-                const sel = householdAddresses.find((a) => a.id === selectedAddressId);
-                if (
-                  sel &&
-                  !sel.governorate_name?.includes("سوهاج") &&
-                  !sel.governorate_code?.toLowerCase().includes("sohag") &&
-                  sel.governorate_code?.toUpperCase() !== "EG-SHG" &&
-                  !sel.markaz_name?.includes("سوهاج")
-                ) {
-                  return (
-                    <div className="bg-amber-50 border border-amber-200 text-amber-900 p-2.5 rounded-xl text-[11px] font-bold flex items-center space-x-1.5 space-x-reverse">
-                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                      <span>
-                        تنبيه: العنوان المحدد يقع في ({sel.governorate_name || "خارج سوهاج"}). خدمة الصيدلية متاحة حالياً داخل محافظة سوهاج فقط. يرجى اختيار عنوان داخل سوهاج أو النقر على "عنوان جديد".
-                      </span>
-                    </div>
-                  );
-                }
-                return null;
-              })()}
+              {/* Coverage / Geo / GPS Warning Banner for selected address */}
+              {!pharmacyTariff.loading && !pharmacyTariff.allowed && pharmacyTariff.reason && (
+                <div className="bg-amber-50 border border-amber-200 text-amber-900 p-2.5 rounded-xl text-[11px] font-bold flex items-center space-x-1.5 space-x-reverse">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>{pharmacyTariff.reason}</span>
+                </div>
+              )}
             </div>
           ) : (
             <div className="space-y-2">
@@ -996,7 +1130,7 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
                   <span>لا يوجد عنوان مسجل لمنزلك حتى الآن</span>
                 </div>
                 <p className="text-[11px] text-amber-800 leading-relaxed">
-                  تتطلب خدمة الصيدلية عنوان توصيل مسجل لمنزلك داخل محافظة سوهاج لربط الطلب بالمندوب. يرجى إضافة عنوانك أدناه.
+                  تتطلب خدمة الصيدلية عنواناً مربوطاً بالنظام الجغرافي المركزي ومثبت الإحداثيات (GPS).
                 </p>
                 {!showAddAddressInline && (
                   <button
@@ -1005,20 +1139,20 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
                     className="w-full mt-2 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1 space-x-reverse cursor-pointer shadow-2xs"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>إضافة عنوان جديد في سوهاج الآن</span>
+                    <span>إضافة عنوان جديد الآن</span>
                   </button>
                 )}
               </div>
             </div>
           )}
 
-          {/* Inline Form to Add a Sohag Address */}
+          {/* Inline Form using Central Geo Hierarchy + Mandatory GPS */}
           {showAddAddressInline && (
             <div className="bg-white p-3.5 rounded-xl border border-emerald-200 shadow-2xs space-y-3 animate-in fade-in">
               <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                 <span className="text-xs font-bold text-emerald-950 flex items-center space-x-1 space-x-reverse">
                   <Plus className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>إضافة عنوان توصيل جديد في محافظة سوهاج</span>
+                  <span>إضافة عنوان توصيل جديد</span>
                 </span>
                 {householdAddresses.length > 0 && (
                   <button
@@ -1031,27 +1165,16 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
                 )}
               </div>
 
+              <GeoHierarchySelector
+                value={newGeoSelection}
+                onChange={setNewGeoSelection}
+                compact
+              />
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-right">
                 <div>
                   <label className="text-[10px] font-bold text-slate-600 block mb-1">
-                    المركز / الحي (محافظة سوهاج)
-                  </label>
-                  <select
-                    value={newAddressMarkaz}
-                    onChange={(e) => setNewAddressMarkaz(e.target.value)}
-                    className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800"
-                  >
-                    {sohagMarakez.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold text-slate-600 block mb-1">
-                    رقم هاتف التواصل
+                    رقم هاتف التواصل *
                   </label>
                   <input
                     type="tel"
@@ -1062,25 +1185,59 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
                     className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800"
                   />
                 </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-600 block mb-1">
+                    العنوان التفصيلي *
+                  </label>
+                  <input
+                    type="text"
+                    value={newAddressDetails}
+                    onChange={(e) => setNewAddressDetails(e.target.value)}
+                    placeholder="الشارع - رقم العمارة - الدور - الشقة"
+                    className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="text-[10px] font-bold text-slate-600 block mb-1">
-                  العنوان التفصيلي (الشارع، رقم العمارة، الشقة، علامة مميزة)
-                </label>
-                <input
-                  type="text"
-                  value={newAddressDetails}
-                  onChange={(e) => setNewAddressDetails(e.target.value)}
-                  placeholder="مثال: شارع سيتي - برج الأطباء - الدور الرابع"
-                  className="w-full text-xs p-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800"
-                />
+              {/* Mandatory GPS / Map Pin */}
+              <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between flex-wrap gap-2">
+                <div className="text-[11px] font-bold">
+                  {newLat !== null && newLng !== null ? (
+                    <span className="text-emerald-700">
+                      ✓ تم تحديد الموقع ({newLat.toFixed(5)}, {newLng.toFixed(5)})
+                    </span>
+                  ) : (
+                    <span className="text-rose-600">تثبيت الموقع عبر GPS أو الخريطة إجباري *</span>
+                  )}
+                  {gpsInlineError && (
+                    <p className="text-[10px] text-rose-600 mt-0.5">{gpsInlineError}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleLocateInlineGps}
+                    disabled={isLocatingGps}
+                    className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1 disabled:opacity-50"
+                  >
+                    <Crosshair className="w-3 h-3" />
+                    <span>{isLocatingGps ? "جاري التحديد..." : "GPS تلقائي"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsMapPickerOpen(true)}
+                    className="px-2.5 py-1.5 bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 rounded-lg text-[11px] font-bold inline-flex items-center gap-1"
+                  >
+                    <MapIcon className="w-3 h-3" />
+                    <span>من الخريطة</span>
+                  </button>
+                </div>
               </div>
 
               <div className="flex items-center space-x-2 space-x-reverse pt-1">
                 <button
                   type="button"
-                  onClick={handleCreateSohagAddress}
+                  onClick={handleCreateCentralAddress}
                   disabled={isSavingAddress}
                   className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-1 space-x-reverse cursor-pointer"
                 >
@@ -1151,14 +1308,36 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
           <button
             type="button"
             onClick={handleSaveAndSendToDriver}
-            disabled={isSubmitting}
-            className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm hover:shadow transition-all cursor-pointer"
+            disabled={
+              isSubmitting ||
+              pharmacyTariff.loading ||
+              !pharmacyTariff.allowed ||
+              pharmacyTariff.deliveryFee === null
+            }
+            className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-sm hover:shadow transition-all cursor-pointer"
           >
             <Send className="w-4 h-4" />
             <span>حفظ وإرسال للسائق</span>
           </button>
         </div>
       </div>
+
+      <MapLocationPickerModal
+        isOpen={isMapPickerOpen}
+        onClose={() => setIsMapPickerOpen(false)}
+        onConfirm={(lat, lng, meta?: MapLocationConfirmMeta) => {
+          setNewLat(lat);
+          setNewLng(lng);
+          setNewGpsAccuracyM(meta?.accuracyM ?? null);
+          setNewGpsSource(meta?.source || "map_pin");
+          setNewGpsCapturedAt(meta?.capturedAt || new Date().toISOString());
+          setGpsInlineError(null);
+        }}
+        initialLat={newLat}
+        initialLng={newLng}
+        governorateName={newGeoSelection.governorateName}
+        title="تحديد موقع توصيل الصيدلية على الخريطة"
+      />
     </div>
   );
 };

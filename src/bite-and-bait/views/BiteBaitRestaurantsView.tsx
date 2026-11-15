@@ -64,7 +64,10 @@ export const BiteBaitRestaurantsView: React.FC<BiteBaitRestaurantsViewProps> = (
         return (a.estimatedPrepTimeMinutes || 30) - (b.estimatedPrepTimeMinutes || 30);
       }
       if (sortBy === 'deliveryFee') {
-        return (a.deliveryFee || 0) - (b.deliveryFee || 0);
+        return (
+          (a.deliveryFee ?? Number.MAX_SAFE_INTEGER) -
+          (b.deliveryFee ?? Number.MAX_SAFE_INTEGER)
+        );
       }
       // default: most popular (featured first, then review count)
       if (a.isFeatured && !b.isFeatured) return -1;

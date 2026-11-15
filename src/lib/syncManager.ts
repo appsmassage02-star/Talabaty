@@ -237,9 +237,41 @@ class SyncManager {
     if (!uid || !hid || typeof window === "undefined") return [];
 
     try {
-      const raw = localStorage.getItem(buildQueueStorageKey(uid, hid));
+      const storageKey = buildQueueStorageKey(uid, hid);
+      const raw = localStorage.getItem(storageKey);
       if (!raw) return [];
-      return JSON.parse(raw) as SyncQueueItem[];
+      const queue = JSON.parse(raw) as SyncQueueItem[];
+
+      // Auto-heal any queued categories operations with invalid 'subcategories' field or failed status
+      let hasHealed = false;
+      for (const item of queue) {
+        if (item.entity === "categories") {
+          if (item.payload && item.payload.subcategories !== undefined) {
+            delete item.payload.subcategories;
+            hasHealed = true;
+          }
+          if (
+            item.status === "FAILED" &&
+            item.lastError &&
+            item.lastError.includes("subcategories")
+          ) {
+            item.status = "PENDING";
+            item.retryCount = 0;
+            item.lastError = null;
+            hasHealed = true;
+          }
+        }
+      }
+
+      if (hasHealed) {
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(queue));
+        } catch {
+          // ignore localStorage quota error
+        }
+      }
+
+      return queue;
     } catch (e) {
       console.warn("[SyncManager] Error reading persistent queue:", e);
       return [];
@@ -808,6 +840,7 @@ class SyncManager {
         case "categories": {
           if (type === "INSERT" || type === "UPSERT" || type === "UPDATE") {
             // Note: Schema public.categories has primary key (household_id, id).
+            // Do NOT send 'subcategories' as public.categories schema does not have a 'subcategories' column.
             const categoryData: Record<string, any> = {
               id: recordId,
               household_id: householdId,
@@ -819,7 +852,6 @@ class SyncManager {
               badge_color: payload.badgeColor || payload.badge_color || "",
               description: payload.description || "",
               common_items: payload.commonItems || payload.common_items || [],
-              subcategories: payload.subcategories || [],
               is_custom:
                 payload.isCustom !== undefined
                   ? Boolean(payload.isCustom)
@@ -841,10 +873,25 @@ class SyncManager {
               categoryData.updated_at = payload.updated_at || payload.updatedAt;
             }
 
-            const { error } = await supabase.from("categories").upsert(
+            let { error } = await supabase.from("categories").upsert(
               categoryData,
               { onConflict: "household_id,id" }
             );
+
+            // Resilient schema cache handling: If a column does not exist in schema cache, remove it and retry
+            if (error && error.message?.includes("in the schema cache")) {
+              const match = error.message.match(/Could not find the '([^']+)' column/i);
+              if (match && match[1] && categoryData[match[1]] !== undefined) {
+                console.warn(`[SyncManager] Column '${match[1]}' not in categories schema cache. Removing and retrying upsert...`);
+                delete categoryData[match[1]];
+                const retryRes = await supabase.from("categories").upsert(
+                  categoryData,
+                  { onConflict: "household_id,id" }
+                );
+                error = retryRes.error;
+              }
+            }
+
             if (error) throw error;
             return { success: true };
           } else if (type === "DELETE") {

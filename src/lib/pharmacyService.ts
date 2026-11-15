@@ -2,6 +2,12 @@ import { supabase } from "./supabase";
 import { cacheManager } from "./cacheManager";
 import { processDocumentImage } from "./imageUtils";
 import {
+  resolveCentralTariff,
+  validateGpsCoordinates,
+  type CentralTariffResolution,
+} from "./geoService";
+import type { HouseholdAddress } from "../types";
+import {
   PharmacyPrescription,
   PharmacyPrescriptionItem,
   PharmacyPrescriptionImage,
@@ -999,9 +1005,17 @@ class PharmacyService {
             driverNotes: undefined,
             receiptImageUrl: resolvePrescriptionImageUrl(receiptFile?.storage_path) || undefined,
             itemsTotal:
-              o.medicines_total !== null ? Number(o.medicines_total) : 0,
-            deliveryFee: o.delivery_fee !== null ? Number(o.delivery_fee) : 15,
-            finalTotal: o.grand_total !== null ? Number(o.grand_total) : 15,
+              o.medicines_total !== null && o.medicines_total !== undefined
+                ? Number(o.medicines_total)
+                : 0,
+            deliveryFee:
+              o.delivery_fee !== null && o.delivery_fee !== undefined
+                ? Number(o.delivery_fee)
+                : 0,
+            finalTotal:
+              o.grand_total !== null && o.grand_total !== undefined
+                ? Number(o.grand_total)
+                : 0,
             paymentMethod: "الدفع عند الاستلام",
             isArchived,
             cancellationReason,
@@ -1024,6 +1038,74 @@ class PharmacyService {
       console.warn("[PharmacyService] getOrders exception:", err);
       return [];
     }
+  }
+
+  /**
+   * Resolves central delivery tariff & coverage for Pharmacy service on a household address
+   */
+  async resolvePharmacyDeliveryTariff(address?: Partial<HouseholdAddress> | null): Promise<{
+    allowed: boolean;
+    deliveryFee: number | null;
+    isFreeDelivery: boolean;
+    estimatedDeliveryMinutes: number | null;
+    tariffId: string | null;
+    reason?: string;
+    resolution?: CentralTariffResolution;
+  }> {
+    if (!address) {
+      return {
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        tariffId: null,
+        reason: "يرجى اختيار عنوان توصيل أولاً",
+      };
+    }
+
+    const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
+    if (!gpsCheck.valid) {
+      return {
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        tariffId: null,
+        reason:
+          gpsCheck.reason ||
+          "هذا العنوان لا يحتوي على موقع GPS صالح. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.",
+      };
+    }
+
+    if (!address.governorate_id || !address.center_id || !address.area_id) {
+      return {
+        allowed: false,
+        deliveryFee: null,
+        isFreeDelivery: false,
+        estimatedDeliveryMinutes: null,
+        tariffId: null,
+        reason:
+          "العنوان المحدد غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تحديث العنوان أو إضافة عنوان جديد.",
+      };
+    }
+
+    const tariffRes = await resolveCentralTariff({
+      serviceType: "pharmacy",
+      deliveryOwner: "talabaty",
+      governorateId: address.governorate_id,
+      centerId: address.center_id,
+      areaId: address.area_id,
+    });
+
+    return {
+      allowed: tariffRes.covered,
+      deliveryFee: tariffRes.customerDeliveryFee,
+      isFreeDelivery: tariffRes.isFreeDelivery,
+      estimatedDeliveryMinutes: tariffRes.estimatedDeliveryMinutes,
+      tariffId: tariffRes.tariffId,
+      reason: tariffRes.reason,
+      resolution: tariffRes,
+    };
   }
 
   /**
@@ -1128,35 +1210,36 @@ class PharmacyService {
 
       if (!resolvedAddress) {
         throw new Error(
-          "يرجى تحديد أو إضافة عنوان توصيل لمنزلك في محافظة سوهاج أولاً عبر قسم العناوين قبل إرسال طلب الصيدلية"
+          "يرجى تحديد أو إضافة عنوان توصيل لمنزلك أولاً عبر قسم العناوين قبل إرسال طلب الصيدلية"
         );
       }
 
-      // 2. Validate region: Pharmacy delivery service is currently active for Sohag governorate
-      const isSohagRegion = Boolean(
-        resolvedAddress.governorate_name?.includes("سوهاج") ||
-        resolvedAddress.governorate_code?.toLowerCase().includes("sohag") ||
-        resolvedAddress.governorate_code?.toUpperCase() === "EG-SHG" ||
-        resolvedAddress.markaz_name?.includes("سوهاج") ||
-        resolvedAddress.detailed_address?.includes("سوهاج")
-      );
-
-      if (!isSohagRegion) {
+      // 2. Strictly validate GPS, centralized geo hierarchy, and central `delivery_area_tariffs` for pharmacy
+      const tariffCheck = await this.resolvePharmacyDeliveryTariff(resolvedAddress);
+      if (!tariffCheck.allowed || tariffCheck.deliveryFee === null) {
         throw new Error(
-          `خدمة الصيدلية متاحة حالياً داخل محافظة سوهاج فقط. عنوان التوصيل المحدد يقع في (${resolvedAddress.governorate_name || "خارج سوهاج"}). يرجى اختيار أو إضافة عنوان داخل سوهاج لإتمام الطلب.`
+          tariffCheck.reason ||
+            "لا توجد تغطية أو تسعيرة توصيل مفعّلة لخدمة الصيدلية في هذه المنطقة حالياً."
         );
       }
+
+      const resolvedDeliveryFee = tariffCheck.isFreeDelivery
+        ? 0
+        : Number(tariffCheck.deliveryFee);
 
       // Authoritative RPC public.pharmacy_create_order validates governorate and center
       const rawMarkaz = resolvedAddress.markaz_name?.trim() || "";
       if (!rawMarkaz) {
         throw new Error(
-          "اسم المركز / المدينة غير محدد في عنوان التوصيل المختار. يرجى تعديل العنوان واختيار المركز التابع له (مثل: أخميم، طهطا، جرجا، سوهاج، المراغة، إلخ) لإتمام الطلب."
+          "اسم المركز / المدينة غير محدد في عنوان التوصيل المختار. يرجى تعديل العنوان واستكمال البيانات."
         );
       }
       const rpcCenterName = rawMarkaz;
-      const rpcGovernorateName = resolvedAddress.governorate_name?.trim() || "سوهاج";
-      const rpcGovernorateCode = resolvedAddress.governorate_code?.trim() || "EG-SHG";
+      const rpcGovernorateName = resolvedAddress.governorate_name?.trim() || "";
+      const rpcGovernorateCode =
+        resolvedAddress.governorate_code?.trim() ||
+        resolvedAddress.governorate_id ||
+        "";
 
       // 3. Upload images in parallel to Supabase Storage before submission (max 4 images)
       const rawImages = (params.images || []).slice(0, 4);
@@ -1285,9 +1368,9 @@ class PharmacyService {
         images: uploadedImages,
         paymentMethod: "الدفع عند الاستلام",
         isArchived: false,
-        deliveryFee: 15,
+        deliveryFee: resolvedDeliveryFee,
         itemsTotal: 0,
-        finalTotal: 15,
+        finalTotal: resolvedDeliveryFee,
       };
 
       // 7. Strictly sanitize UUIDs (prevent syntax error on draft_reorder_... temporary IDs)

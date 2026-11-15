@@ -9,7 +9,12 @@ export interface RestaurantCartGroup {
   restaurant?: Restaurant;
   items: FoodCartItem[];
   subtotal: number;
-  deliveryFee: number;
+  deliveryFee: number | null;
+  isFreeDelivery?: boolean;
+  tariffResolved?: boolean;
+  isAddressCovered?: boolean;
+  estimatedDeliveryMinutes?: number | null;
+  coverageReason?: string;
   total: number;
   isOpen: boolean;
   nextOpeningTime?: string;
@@ -357,9 +362,15 @@ export const BiteBaitCartView: React.FC<BiteBaitCartViewProps> = ({
 
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#475569' }}>
                     <span>رسوم توصيل هذا المطعم:</span>
-                    <span style={{ fontWeight: 700, color: group.deliveryFee > 0 ? '#0f172a' : '#16a34a' }}>
-                      {group.deliveryFee > 0 ? `${group.deliveryFee} ج.م` : 'مجاني'}
-                    </span>
+                    {!group.tariffResolved ? (
+                      <span style={{ fontWeight: 700, color: '#64748b' }}>يُحدد عند تأكيد العنوان</span>
+                    ) : group.isAddressCovered === false || group.deliveryFee === null ? (
+                      <span style={{ fontWeight: 700, color: '#dc2626' }}>خارج التغطية للعنوان الافتراضي</span>
+                    ) : group.isFreeDelivery || group.deliveryFee === 0 ? (
+                      <span style={{ fontWeight: 700, color: '#16a34a' }}>توصيل مجاني</span>
+                    ) : (
+                      <span style={{ fontWeight: 700, color: '#0f172a' }}>{group.deliveryFee} ج.م</span>
+                    )}
                   </div>
 
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', fontWeight: 800, color: '#0f172a', paddingTop: '4px', borderTop: '1px dashed #cbd5e1' }}>

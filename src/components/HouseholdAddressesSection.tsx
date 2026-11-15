@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { deliveryService } from '../lib/deliveryService';
+import { validateGpsCoordinates } from '../lib/geoService';
 import { HouseholdAddress } from '../types';
-import { EGYPT_GOVERNORATES } from '../data/egyptLocations';
 import {
   MapPin,
   Plus,
@@ -12,7 +12,6 @@ import {
   Home,
   Phone,
   User,
-  Building,
   Check,
   RefreshCw,
   Star,
@@ -23,13 +22,24 @@ import {
   Navigation,
   X,
   Map,
+  AlertTriangle,
 } from 'lucide-react';
-import { MapLocationPickerModal } from './MapLocationPickerModal';
+import { MapLocationPickerModal, type MapLocationConfirmMeta } from './MapLocationPickerModal';
+import { GeoHierarchySelector, type GeoSelectionValue } from './GeoHierarchySelector';
 
 interface Props {
   onAddressAdded?: (address: HouseholdAddress) => void;
   compact?: boolean;
 }
+
+const EMPTY_GEO_SELECTION: GeoSelectionValue = {
+  governorateId: '',
+  governorateName: '',
+  centerId: '',
+  centerName: '',
+  areaId: '',
+  areaName: '',
+};
 
 export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, compact = false }) => {
   const { household, supabaseUser } = useApp();
@@ -46,19 +56,21 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
   const [addressLabel, setAddressLabel] = useState<string>('المنزل الرئيسي');
   const [fullName, setFullName] = useState<string>('');
   const [phone, setPhone] = useState<string>('');
-  const [country] = useState<string>('مصر'); // Fixed & immutable
-  const [selectedGovernorateCode, setSelectedGovernorateCode] = useState<string>('cairo');
-  const [selectedGovernorateName, setSelectedGovernorateName] = useState<string>('القاهرة');
-  const [selectedMarkazName, setSelectedMarkazName] = useState<string>('');
+  const [geoSelection, setGeoSelection] = useState<GeoSelectionValue>(EMPTY_GEO_SELECTION);
+  const [legacyEditNames, setLegacyEditNames] = useState<
+    { governorateName?: string; centerName?: string; areaName?: string } | undefined
+  >(undefined);
   const [detailedAddress, setDetailedAddress] = useState<string>('');
   const [isDefault, setIsDefault] = useState<boolean>(false);
 
-  // GPS Coordinates & Geolocation State
+  // GPS Coordinates & Telemetry State (Mandatory)
   const [latitude, setLatitude] = useState<number | null>(null);
   const [longitude, setLongitude] = useState<number | null>(null);
+  const [gpsAccuracyM, setGpsAccuracyM] = useState<number | null>(null);
+  const [gpsSource, setGpsSource] = useState<'gps' | 'map_pin' | null>(null);
+  const [gpsCapturedAt, setGpsCapturedAt] = useState<string | null>(null);
   const [isLocating, setIsLocating] = useState<boolean>(false);
   const [locationError, setLocationError] = useState<string | null>(null);
-  const [showManualCoords, setShowManualCoords] = useState<boolean>(false);
   const [isMapPickerOpen, setIsMapPickerOpen] = useState<boolean>(false);
 
   // Fetch addresses
@@ -72,7 +84,7 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       const data = await deliveryService.getHouseholdAddresses(household.id, supabaseUser?.id);
       setAddresses(data);
       if (data.length === 0) {
-        setIsDefault(true); // First address is default by default
+        setIsDefault(true);
       }
     } catch (err) {
       console.error('Error loading addresses:', err);
@@ -92,17 +104,7 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
     };
   }, [household?.id, supabaseUser?.id]);
 
-  // When governorate changes, update markaz options and pick the first one
-  const currentGov = EGYPT_GOVERNORATES.find((g) => g.code === selectedGovernorateCode) || EGYPT_GOVERNORATES[0];
-  const marakezList = currentGov?.marakez || [];
-
-  useEffect(() => {
-    if (marakezList.length > 0 && !marakezList.includes(selectedMarkazName)) {
-      setSelectedMarkazName(marakezList[0]);
-    }
-  }, [selectedGovernorateCode, marakezList]);
-
-  // GPS Geolocation trigger (Only when requested by user click)
+  // GPS Geolocation trigger (explicit user action)
   const handleGetCurrentLocation = () => {
     setLocationError(null);
     if (typeof window === 'undefined' || !navigator.geolocation) {
@@ -115,8 +117,15 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       (pos) => {
         const lat = Number(pos.coords.latitude.toFixed(7));
         const lng = Number(pos.coords.longitude.toFixed(7));
+        const acc =
+          typeof pos.coords.accuracy === 'number' && Number.isFinite(pos.coords.accuracy)
+            ? Number(pos.coords.accuracy.toFixed(1))
+            : null;
         setLatitude(lat);
         setLongitude(lng);
+        setGpsAccuracyM(acc);
+        setGpsSource('gps');
+        setGpsCapturedAt(new Date().toISOString());
         setIsLocating(false);
         setLocationError(null);
       },
@@ -124,11 +133,11 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
         setIsLocating(false);
         let msg = 'تعذر الحصول على الموقع الجغرافي.';
         if (err.code === 1) {
-          msg = 'تم رفض إذن الوصول للموقع. يرجى تفعيل إذن الموقع (GPS) من إعدادات المتصفح أو الجهاز ثم المحاولة مجدداً.';
+          msg = 'تم رفض إذن الوصول للموقع. يرجى تفعيل إذن الموقع (GPS) أو استخدام الخريطة التفاعلية لتثبيت الدبوس.';
         } else if (err.code === 2) {
-          msg = 'بيانات الموقع غير متوفرة حالياً. تأكد من تفعيل خدمة الموقع (GPS) والاتصال بالإنترنت.';
+          msg = 'بيانات الموقع غير متوفرة حالياً. تأكد من تفعيل خدمة الموقع (GPS) أو استخدم الخريطة.';
         } else if (err.code === 3) {
-          msg = 'انتهت مهلة طلب تحديد الموقع. يرجى إعادة المحاولة.';
+          msg = 'انتهت مهلة طلب تحديد الموقع. يرجى إعادة المحاولة أو التحديد من الخريطة.';
         }
         setLocationError(msg);
       },
@@ -143,20 +152,27 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
   const handleClearLocation = () => {
     setLatitude(null);
     setLongitude(null);
+    setGpsAccuracyM(null);
+    setGpsSource(null);
+    setGpsCapturedAt(null);
     setLocationError(null);
   };
 
   const handleResetForm = () => {
     setEditingAddressId(null);
-    setAddressLabel('عنوان إضافي');
+    setAddressLabel(addresses.length === 0 ? 'المنزل الرئيسي' : 'عنوان إضافي');
     setFullName('');
     setPhone('');
+    setGeoSelection(EMPTY_GEO_SELECTION);
+    setLegacyEditNames(undefined);
     setDetailedAddress('');
-    setIsDefault(false);
+    setIsDefault(addresses.length === 0);
     setLatitude(null);
     setLongitude(null);
+    setGpsAccuracyM(null);
+    setGpsSource(null);
+    setGpsCapturedAt(null);
     setLocationError(null);
-    setShowManualCoords(false);
     setIsFormOpen(false);
   };
 
@@ -165,17 +181,45 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
     setAddressLabel(addr.address_label || 'عنوان المنزل');
     setFullName(addr.full_name || '');
     setPhone(addr.phone || '');
-    setSelectedGovernorateCode(addr.governorate_code || 'cairo');
-    setSelectedGovernorateName(addr.governorate_name || 'القاهرة');
-    setSelectedMarkazName(addr.markaz_name || '');
+    if (addr.governorate_id && addr.center_id && addr.area_id) {
+      setGeoSelection({
+        governorateId: addr.governorate_id,
+        governorateName: addr.governorate_name || '',
+        centerId: addr.center_id,
+        centerName: addr.markaz_name || '',
+        areaId: addr.area_id,
+        areaName: addr.area_name || '',
+      });
+      setLegacyEditNames(undefined);
+    } else {
+      setGeoSelection(EMPTY_GEO_SELECTION);
+      setLegacyEditNames({
+        governorateName: addr.governorate_name,
+        centerName: addr.markaz_name,
+        areaName: addr.area_name || undefined,
+      });
+    }
     setDetailedAddress(addr.detailed_address || '');
     setIsDefault(!!addr.is_default);
-    setLatitude(addr.latitude != null && !isNaN(Number(addr.latitude)) ? Number(addr.latitude) : null);
-    setLongitude(addr.longitude != null && !isNaN(Number(addr.longitude)) ? Number(addr.longitude) : null);
+
+    const gpsCheck = validateGpsCoordinates(addr.latitude, addr.longitude);
+    if (gpsCheck.valid && gpsCheck.latitude !== null && gpsCheck.longitude !== null) {
+      setLatitude(gpsCheck.latitude);
+      setLongitude(gpsCheck.longitude);
+      setGpsAccuracyM(addr.gps_accuracy_m ?? null);
+      setGpsSource((addr.gps_source as 'gps' | 'map_pin') || 'map_pin');
+      setGpsCapturedAt(addr.gps_captured_at || null);
+    } else {
+      setLatitude(null);
+      setLongitude(null);
+      setGpsAccuracyM(null);
+      setGpsSource(null);
+      setGpsCapturedAt(null);
+    }
+
     setLocationError(null);
     setErrorMessage(null);
     setSuccessMessage(null);
-    setShowManualCoords(false);
     setIsFormOpen(true);
   };
 
@@ -200,13 +244,18 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       return;
     }
 
-    if (!selectedGovernorateName.trim()) {
-      setErrorMessage('يرجى اختيار المحافظة');
+    if (!geoSelection.governorateId || !geoSelection.governorateName) {
+      setErrorMessage('يرجى اختيار المحافظة من النظام الجغرافي المعتمد');
       return;
     }
 
-    if (!selectedMarkazName.trim()) {
-      setErrorMessage('يرجى اختيار المركز أو الحي');
+    if (!geoSelection.centerId || !geoSelection.centerName) {
+      setErrorMessage('يرجى اختيار المركز / المدينة من النظام الجغرافي المعتمد');
+      return;
+    }
+
+    if (!geoSelection.areaId || !geoSelection.areaName) {
+      setErrorMessage('يرجى اختيار المنطقة / الحي من النظام الجغرافي المعتمد');
       return;
     }
 
@@ -215,13 +264,12 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       return;
     }
 
-    // Coordinates sanity check if entered manually
-    if (latitude !== null && (isNaN(latitude) || latitude < -90 || latitude > 90)) {
-      setErrorMessage('قيمة خط العرض (Latitude) يجب أن تكون بين -90 و 90');
-      return;
-    }
-    if (longitude !== null && (isNaN(longitude) || longitude < -180 || longitude > 180)) {
-      setErrorMessage('قيمة خط الطول (Longitude) يجب أن تكون بين -180 و 180');
+    const gpsCheck = validateGpsCoordinates(latitude, longitude);
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      setErrorMessage(
+        gpsCheck.reason ||
+          'يجب تحديد موقعك الدقيق عبر GPS أو تثبيت الدبوس على الخريطة قبل حفظ العنوان'
+      );
       return;
     }
 
@@ -235,13 +283,20 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
           full_name: fullName.trim(),
           phone: phone.trim(),
           country: 'مصر',
-          governorate_code: selectedGovernorateCode,
-          governorate_name: selectedGovernorateName,
-          markaz_code: selectedMarkazName,
-          markaz_name: selectedMarkazName,
+          governorate_id: geoSelection.governorateId,
+          governorate_code: geoSelection.governorateId,
+          governorate_name: geoSelection.governorateName,
+          center_id: geoSelection.centerId,
+          markaz_code: geoSelection.centerId,
+          markaz_name: geoSelection.centerName,
+          area_id: geoSelection.areaId,
+          area_name: geoSelection.areaName,
           detailed_address: detailedAddress.trim(),
-          latitude: latitude,
-          longitude: longitude,
+          latitude: gpsCheck.latitude,
+          longitude: gpsCheck.longitude,
+          gps_accuracy_m: gpsAccuracyM,
+          gps_source: gpsSource || 'map_pin',
+          gps_captured_at: gpsCapturedAt || new Date().toISOString(),
           is_default: isDefault || addresses.length === 0,
         },
         supabaseUser?.id
@@ -255,7 +310,6 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
 
       const savedAddress = result.address;
 
-      // Immediately update local state so the address appears without delay
       setAddresses((prev) => {
         const isDef = !!savedAddress.is_default;
         const mapped = isDef ? prev.map((a) => ({ ...a, is_default: false })) : [...prev];
@@ -273,8 +327,6 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       }
 
       handleResetForm();
-
-      // Notify other views & modals immediately
       window.dispatchEvent(new CustomEvent('household-address-updated', { detail: savedAddress }));
     } catch (err: any) {
       setErrorMessage(err.message || 'حدث خطأ أثناء حفظ العنوان');
@@ -286,19 +338,15 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
   // Set address as default
   const handleSetDefault = async (addr: HouseholdAddress) => {
     if (!household?.id) return;
-    // Optimistically update
     setAddresses((prev) =>
       prev.map((a) => ({ ...a, is_default: a.id === addr.id }))
     );
     try {
-      await deliveryService.saveAddress(
-        {
-          ...addr,
-          household_id: household.id,
-          is_default: true,
-        },
-        supabaseUser?.id
-      );
+      const res = await deliveryService.setDefaultAddress(addr.id, household.id, supabaseUser?.id);
+      if (!res.success) {
+        loadAddresses();
+        return;
+      }
       window.dispatchEvent(new CustomEvent('household-address-updated', { detail: { ...addr, is_default: true } }));
     } catch (err) {
       console.error('Failed to set default address:', err);
@@ -454,48 +502,16 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
               />
             </div>
 
-            {/* Governorate Selection */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                المحافظة <span className="text-rose-500">*</span>
-              </label>
-              <select
-                value={selectedGovernorateCode}
-                onChange={(e) => {
-                  const code = e.target.value;
-                  const gov = EGYPT_GOVERNORATES.find((g) => g.code === code);
-                  setSelectedGovernorateCode(code);
-                  if (gov) {
-                    setSelectedGovernorateName(gov.nameAr);
-                    setSelectedMarkazName(gov.marakez[0] || '');
-                  }
-                }}
-                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-              >
-                {EGYPT_GOVERNORATES.map((gov) => (
-                  <option key={gov.code} value={gov.code}>
-                    {gov.nameAr}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Markaz Selection */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                المركز / الحي <span className="text-rose-500">*</span>
-              </label>
-              <select
-                value={selectedMarkazName}
-                onChange={(e) => setSelectedMarkazName(e.target.value)}
-                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-              >
-                {marakezList.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+            {/* Central Geo Hierarchy Selector: Governorate -> Center -> Area */}
+            <div className="sm:col-span-2 pt-1">
+              <GeoHierarchySelector
+                value={geoSelection}
+                onChange={setGeoSelection}
+                initialLegacyNames={legacyEditNames}
+              />
+              <p className="text-[10.5px] text-amber-700 font-bold mt-1.5">
+                ℹ️ اختيار المحافظة والمركز والمنطقة لا يغني عن تحديد موقعك الفعلي بدقة على الخريطة أو عبر GPS.
+              </p>
             </div>
           </div>
 
@@ -514,7 +530,7 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
             />
           </div>
 
-          {/* GPS Coordinates Section (Optional, High Accuracy) */}
+          {/* GPS Coordinates Section (Mandatory via GPS or Leaflet Map Pin) */}
           <div className="p-3.5 bg-white border border-slate-200 rounded-2xl space-y-2.5">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2 space-x-reverse">
@@ -523,10 +539,10 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                 </div>
                 <div>
                   <h4 className="text-xs font-extrabold text-slate-900">
-                    الموقع الجغرافي الدقيق (GPS)
+                    الموقع الجغرافي الدقيق (GPS) <span className="text-rose-500">* إجباري</span>
                   </h4>
-                  <p className="text-[10px] text-slate-400">
-                    اختياري — يساعد مندوب التوصيل في الوصول لموقعك بدقة عبر الخريطة
+                  <p className="text-[10px] text-slate-500">
+                    مطلوب لتحديد نطاق التغطية بدقة — استخدم زر GPS أو ثبّت الدبوس على الخريطة
                   </p>
                 </div>
               </div>
@@ -543,7 +559,6 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
               )}
             </div>
 
-            {/* Error Message for Location */}
             {locationError && (
               <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-[11px] font-bold flex items-start space-x-2 space-x-reverse">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
@@ -551,7 +566,6 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
               </div>
             )}
 
-            {/* Coordinates Status / Selector */}
             {latitude !== null && longitude !== null ? (
               <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between flex-wrap gap-2">
@@ -559,10 +573,11 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                     <div>
                       <span className="text-xs font-black text-emerald-950 block">
-                        تم تسجيل الموقع الجغرافي بنجاح
+                        تم التقاط الموقع الجغرافي بنجاح ({gpsSource === 'gps' ? 'GPS' : 'دبوس الخريطة'})
                       </span>
                       <span dir="ltr" className="text-[11px] font-mono text-emerald-700">
                         {latitude.toFixed(6)}, {longitude.toFixed(6)}
+                        {gpsAccuracyM ? ` (±${gpsAccuracyM}m)` : ''}
                       </span>
                     </div>
                   </div>
@@ -576,15 +591,6 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                       <Map className="w-3 h-3 ml-1 text-emerald-600" />
                       <span>تعديل على الخريطة</span>
                     </button>
-                    <a
-                      href={`https://www.google.com/maps?q=${latitude},${longitude}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-2.5 py-1 bg-white hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[11px] font-bold inline-flex items-center space-x-1 space-x-reverse transition-colors shadow-2xs"
-                    >
-                      <span>معاينة في Google Maps</span>
-                      <ExternalLink className="w-3 h-3 ml-1" />
-                    </a>
                     <button
                       type="button"
                       onClick={handleGetCurrentLocation}
@@ -600,22 +606,12 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                     </button>
                   </div>
                 </div>
-
-                <div className="pt-1">
-                  <button
-                    type="button"
-                    onClick={() => setShowManualCoords(!showManualCoords)}
-                    className="text-[10px] text-slate-500 hover:text-slate-700 font-bold underline"
-                  >
-                    {showManualCoords ? 'إخفاء الإحداثيات اليدوية' : 'تعديل خطوط الطول والعرض يدوياً'}
-                  </button>
-                </div>
               </div>
             ) : (
-              <div className="flex items-center justify-between flex-wrap gap-2 bg-slate-50 p-2.5 rounded-xl border border-dashed border-slate-300">
-                <div className="flex items-center space-x-2 space-x-reverse text-slate-600">
-                  <MapPin className="w-4 h-4 text-slate-400 shrink-0" />
-                  <span className="text-[11px] font-medium">لم يتم إرفاق موقع جغرافي لهذا العنوان</span>
+              <div className="flex items-center justify-between flex-wrap gap-2 bg-amber-50/70 p-2.5 rounded-xl border border-dashed border-amber-300">
+                <div className="flex items-center space-x-2 space-x-reverse text-amber-800">
+                  <MapPin className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span className="text-[11px] font-bold">مطلوب تثبيت الموقع على الخريطة أو عبر GPS</span>
                 </div>
                 <div className="flex items-center space-x-2 space-x-reverse flex-wrap gap-1.5">
                   <button
@@ -632,7 +628,7 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                     ) : (
                       <>
                         <Crosshair className="w-3.5 h-3.5 ml-1" />
-                        <span>تحديد موقعي الحالي</span>
+                        <span>تحديد موقعي الحالي (GPS)</span>
                       </>
                     )}
                   </button>
@@ -644,53 +640,6 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                     <Map className="w-3.5 h-3.5 ml-1 text-emerald-600" />
                     <span>اختيار الموقع من الخريطة</span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowManualCoords(!showManualCoords)}
-                    className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-xl text-[11px] font-bold transition-all"
-                  >
-                    إدخال يدوي
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Manual Coordinate inputs (Collapsible / Optional) */}
-            {showManualCoords && (
-              <div className="grid grid-cols-2 gap-2.5 pt-2 border-t border-slate-100 animate-in fade-in">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
-                    خط العرض (Latitude: -90 إلى 90)
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    dir="ltr"
-                    value={latitude !== null ? latitude : ''}
-                    onChange={(e) => {
-                      const val = e.target.value.trim();
-                      setLatitude(val === '' ? null : Number(val));
-                    }}
-                    placeholder="26.556..."
-                    className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-mono text-slate-800 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
-                    خط الطول (Longitude: -180 إلى 180)
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    dir="ltr"
-                    value={longitude !== null ? longitude : ''}
-                    onChange={(e) => {
-                      const val = e.target.value.trim();
-                      setLongitude(val === '' ? null : Number(val));
-                    }}
-                    placeholder="31.694..."
-                    className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-mono text-slate-800 text-right focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                  />
                 </div>
               </div>
             )}
@@ -768,7 +717,9 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {addresses.map((addr) => {
-            const hasCoords = addr.latitude != null && addr.longitude != null && !isNaN(Number(addr.latitude)) && !isNaN(Number(addr.longitude));
+            const hasCoords = validateGpsCoordinates(addr.latitude, addr.longitude).valid;
+            const hasGeoHierarchy = Boolean(addr.governorate_id && addr.center_id && addr.area_id);
+            const needsCompletion = !hasCoords || !hasGeoHierarchy;
             return (
               <div
                 key={addr.id}
@@ -839,6 +790,7 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                     <div>
                       <span className="font-bold text-emerald-950">
                         {addr.governorate_name} - {addr.markaz_name}
+                        {addr.area_name ? ` - ${addr.area_name}` : ''}
                       </span>
                       <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
                         {addr.detailed_address}
@@ -846,8 +798,8 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                     </div>
                   </div>
 
-                  {/* GPS Badge & Coordinates status */}
-                  {hasCoords ? (
+                  {/* GPS & Geo Readiness Status */}
+                  {!needsCompletion ? (
                     <div className="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] flex-wrap gap-1.5">
                       <span className="inline-flex items-center space-x-1 space-x-reverse text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md font-bold border border-emerald-200">
                         <MapPin className="w-3 h-3 text-emerald-600 ml-1" />
@@ -861,19 +813,26 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
                         rel="noopener noreferrer"
                         className="text-emerald-700 hover:text-emerald-900 font-bold inline-flex items-center space-x-1 space-x-reverse hover:underline"
                       >
-                        <span>فتح في Google Maps</span>
+                        <span>معاينة</span>
                         <ExternalLink className="w-3 h-3 ml-0.5" />
                       </a>
                     </div>
                   ) : (
-                    <div className="mt-2 pt-1.5 border-t border-slate-100/60 flex items-center justify-between text-[10px] text-slate-400">
-                      <span>العنوان بدون إحداثيات GPS</span>
+                    <div className="mt-2 pt-1.5 border-t border-amber-100 flex items-center justify-between text-[10.5px] text-amber-700 bg-amber-50/70 px-2 py-1 rounded-lg">
+                      <span className="inline-flex items-center gap-1 font-bold">
+                        <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
+                        {!hasGeoHierarchy && !hasCoords
+                          ? 'يحتاج استكمال المنطقة وGPS'
+                          : !hasGeoHierarchy
+                          ? 'يحتاج اختيار المنطقة المعتمدة'
+                          : 'يحتاج تثبيت موقع GPS'}
+                      </span>
                       <button
                         type="button"
                         onClick={() => handleStartEdit(addr)}
-                        className="text-emerald-600 hover:text-emerald-700 font-bold hover:underline"
+                        className="text-emerald-700 hover:text-emerald-800 font-extrabold hover:underline shrink-0"
                       >
-                        + إرفاق الموقع الآن
+                        تحديث الآن
                       </button>
                     </div>
                   )}
@@ -888,14 +847,17 @@ export const HouseholdAddressesSection: React.FC<Props> = ({ onAddressAdded, com
       <MapLocationPickerModal
         isOpen={isMapPickerOpen}
         onClose={() => setIsMapPickerOpen(false)}
-        onConfirm={(lat, lng) => {
+        onConfirm={(lat, lng, meta?: MapLocationConfirmMeta) => {
           setLatitude(lat);
           setLongitude(lng);
+          setGpsAccuracyM(meta?.accuracyM ?? null);
+          setGpsSource(meta?.source || 'map_pin');
+          setGpsCapturedAt(meta?.capturedAt || new Date().toISOString());
           setLocationError(null);
         }}
         initialLat={latitude}
         initialLng={longitude}
-        governorateName={selectedGovernorateName}
+        governorateName={geoSelection.governorateName}
         title={editingAddressId ? 'تعديل موقع العنوان على الخريطة' : 'تحديد موقع العنوان على الخريطة'}
       />
     </div>

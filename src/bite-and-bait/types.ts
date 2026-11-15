@@ -61,7 +61,15 @@ export interface Restaurant {
   rating: number;
   reviewsCount: number;
   estimatedPrepTimeMinutes: number;
-  deliveryFee: number;
+  deliveryFee: number | null;
+  hasOwnDelivery?: boolean;
+  isFreeDelivery?: boolean;
+  tariffResolved?: boolean;
+  isAddressCovered?: boolean;
+  estimatedDeliveryMinutes?: number | null;
+  applicableDeliveryOwner?: 'restaurant' | 'talabaty' | null;
+  coverageReason?: string;
+  tariffId?: string | null;
   minOrderAmount: number;
   isOpen: boolean;
   isBusy?: boolean;
@@ -107,6 +115,7 @@ export interface FoodGovernorate {
   name_ar: string;
   name_en?: string;
   is_active: boolean;
+  sort_order?: number;
 }
 
 export interface FoodCenter {
@@ -115,15 +124,18 @@ export interface FoodCenter {
   name_ar: string;
   name_en?: string;
   is_active: boolean;
+  sort_order?: number;
 }
 
 export interface FoodArea {
   id: string;
   governorate_id: string;
   center_id: string;
+  parent_area_id?: string | null;
   name_ar: string;
   name_en?: string;
   is_active: boolean;
+  sort_order?: number;
 }
 
 export interface FoodCustomerAddress {
@@ -140,6 +152,9 @@ export interface FoodCustomerAddress {
   detailedAddress: string;
   latitude: number;
   longitude: number;
+  gpsAccuracyM?: number | null;
+  gpsSource?: string | null;
+  gpsCapturedAt?: string | null;
   isDefault?: boolean;
 }
 

@@ -198,15 +198,40 @@ export const BiteBaitRestaurantCard: React.FC<BiteBaitRestaurantCardProps> = ({
         {/* Meta details (Address, Delivery Fee) */}
         <div className="bnb-meta-row" style={{ marginTop: 'auto', paddingTop: '8px', borderTop: '1px solid #f1f5f9' }}>
           {restaurant.address ? (
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '60%' }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '52%' }}>
               📍 {restaurant.address}
             </span>
           ) : (
             <span style={{ color: '#94a3b8' }}>📍 توصيل محلي</span>
           )}
-          <span style={{ fontWeight: 700, color: (restaurant.deliveryFee || 0) > 0 ? '#0f172a' : '#16a34a' }}>
-            🛵 توصيل: {(restaurant.deliveryFee || 0) > 0 ? `${restaurant.deliveryFee} ج.م` : 'مجاني'}
-          </span>
+          {(() => {
+            if (!restaurant.tariffResolved) {
+              return (
+                <span style={{ fontWeight: 700, color: '#64748b', fontSize: '11px' }}>
+                  🛵 يُحدد حسب العنوان
+                </span>
+              );
+            }
+            if (restaurant.isAddressCovered === false || restaurant.deliveryFee === null) {
+              return (
+                <span style={{ fontWeight: 700, color: '#dc2626', fontSize: '11px' }}>
+                  🚫 خارج نطاق التوصيل
+                </span>
+              );
+            }
+            if (restaurant.isFreeDelivery || restaurant.deliveryFee === 0) {
+              return (
+                <span style={{ fontWeight: 700, color: '#16a34a' }}>
+                  🎁 توصيل مجاني{restaurant.estimatedDeliveryMinutes ? ` • ${restaurant.estimatedDeliveryMinutes} د` : ''}
+                </span>
+              );
+            }
+            return (
+              <span style={{ fontWeight: 700, color: '#0f172a' }}>
+                🛵 {restaurant.deliveryFee} ج.م{restaurant.estimatedDeliveryMinutes ? ` • ${restaurant.estimatedDeliveryMinutes} د` : ''}
+              </span>
+            );
+          })()}
         </div>
       </div>
     </div>

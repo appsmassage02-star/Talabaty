@@ -13,10 +13,16 @@ import {
   RefreshCw,
 } from 'lucide-react';
 
+export interface MapLocationConfirmMeta {
+  accuracyM: number | null;
+  source: 'gps' | 'map_pin';
+  capturedAt: string;
+}
+
 interface Props {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: (latitude: number, longitude: number) => void;
+  onConfirm: (latitude: number, longitude: number, meta?: MapLocationConfirmMeta) => void;
   initialLat?: number | null;
   initialLng?: number | null;
   governorateName?: string;
@@ -55,7 +61,7 @@ const GOVERNORATE_COORDINATES: Record<string, [number, number]> = {
   'سوهاج': [26.5569, 31.6948],
 };
 
-const DEFAULT_EGYPT_CENTER: [number, number] = [30.0444, 31.2357]; // Cairo
+const NEUTRAL_EGYPT_VIEW_CENTER: [number, number] = [26.8206, 30.8025]; // Geographic center of Egypt (visual view only, never saved)
 
 // Create custom SVG Leaflet pin icon
 function createCustomPinIcon() {
@@ -91,6 +97,8 @@ export const MapLocationPickerModal: React.FC<Props> = ({
   // Local draft coordinates (independent of parent state until confirmed)
   const [draftLat, setDraftLat] = useState<number | null>(null);
   const [draftLng, setDraftLng] = useState<number | null>(null);
+  const [draftAccuracyM, setDraftAccuracyM] = useState<number | null>(null);
+  const [draftSource, setDraftSource] = useState<'gps' | 'map_pin'>('map_pin');
 
   const [isLocating, setIsLocating] = useState<boolean>(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
@@ -100,16 +108,26 @@ export const MapLocationPickerModal: React.FC<Props> = ({
   useEffect(() => {
     if (isOpen) {
       const validLat =
-        initialLat != null && !isNaN(initialLat) && initialLat >= -90 && initialLat <= 90
+        initialLat != null &&
+        !isNaN(initialLat) &&
+        Number(initialLat) !== 0 &&
+        initialLat >= -90 &&
+        initialLat <= 90
           ? Number(initialLat)
           : null;
       const validLng =
-        initialLng != null && !isNaN(initialLng) && initialLng >= -180 && initialLng <= 180
+        initialLng != null &&
+        !isNaN(initialLng) &&
+        Number(initialLng) !== 0 &&
+        initialLng >= -180 &&
+        initialLng <= 180
           ? Number(initialLng)
           : null;
 
       setDraftLat(validLat);
       setDraftLng(validLng);
+      setDraftAccuracyM(null);
+      setDraftSource('map_pin');
       setGpsError(null);
       setTileError(false);
     }
@@ -131,13 +149,14 @@ export const MapLocationPickerModal: React.FC<Props> = ({
       initialLng != null &&
       !isNaN(initialLat) &&
       !isNaN(initialLng) &&
+      (Number(initialLat) !== 0 || Number(initialLng) !== 0) &&
       initialLat >= -90 &&
       initialLat <= 90 &&
       initialLng >= -180 &&
       initialLng <= 180;
 
-    let initialCenter: [number, number] = DEFAULT_EGYPT_CENTER;
-    let initialZoom = 12;
+    let initialCenter: [number, number] = NEUTRAL_EGYPT_VIEW_CENTER;
+    let initialZoom = 6;
 
     if (hasInitialCoords) {
       initialCenter = [Number(initialLat), Number(initialLng)];
@@ -179,11 +198,15 @@ export const MapLocationPickerModal: React.FC<Props> = ({
 
     const pinIcon = createCustomPinIcon();
 
-    const placeOrUpdateMarker = (lat: number, lng: number) => {
+    const placeOrUpdateMarker = (lat: number, lng: number, source: 'gps' | 'map_pin' = 'map_pin') => {
       const roundedLat = Number(lat.toFixed(6));
       const roundedLng = Number(lng.toFixed(6));
       setDraftLat(roundedLat);
       setDraftLng(roundedLng);
+      setDraftSource(source);
+      if (source === 'map_pin') {
+        setDraftAccuracyM(null);
+      }
 
       if (markerRef.current) {
         markerRef.current.setLatLng([roundedLat, roundedLng]);
@@ -198,6 +221,8 @@ export const MapLocationPickerModal: React.FC<Props> = ({
           const markerLatLng = e.target.getLatLng();
           setDraftLat(Number(markerLatLng.lat.toFixed(6)));
           setDraftLng(Number(markerLatLng.lng.toFixed(6)));
+          setDraftSource('map_pin');
+          setDraftAccuracyM(null);
         });
 
         markerRef.current = marker;
@@ -206,12 +231,12 @@ export const MapLocationPickerModal: React.FC<Props> = ({
 
     // If initial coordinates exist, place the marker
     if (hasInitialCoords) {
-      placeOrUpdateMarker(Number(initialLat), Number(initialLng));
+      placeOrUpdateMarker(Number(initialLat), Number(initialLng), 'map_pin');
     }
 
     // Map Click Listener to move or set marker
     map.on('click', (e: L.LeafletMouseEvent) => {
-      placeOrUpdateMarker(e.latlng.lat, e.latlng.lng);
+      placeOrUpdateMarker(e.latlng.lat, e.latlng.lng, 'map_pin');
     });
 
     // Invalidate map size after animation / modal display
@@ -246,9 +271,15 @@ export const MapLocationPickerModal: React.FC<Props> = ({
         setIsLocating(false);
         const lat = Number(position.coords.latitude.toFixed(6));
         const lng = Number(position.coords.longitude.toFixed(6));
+        const accuracy =
+          typeof position.coords.accuracy === 'number' && Number.isFinite(position.coords.accuracy)
+            ? Number(position.coords.accuracy.toFixed(1))
+            : null;
 
         setDraftLat(lat);
         setDraftLng(lng);
+        setDraftAccuracyM(accuracy);
+        setDraftSource('gps');
 
         if (mapInstanceRef.current) {
           mapInstanceRef.current.flyTo([lat, lng], 17, { duration: 1.2 });
@@ -267,6 +298,8 @@ export const MapLocationPickerModal: React.FC<Props> = ({
               const markerLatLng = e.target.getLatLng();
               setDraftLat(Number(markerLatLng.lat.toFixed(6)));
               setDraftLng(Number(markerLatLng.lng.toFixed(6)));
+              setDraftSource('map_pin');
+              setDraftAccuracyM(null);
             });
 
             markerRef.current = marker;
@@ -306,8 +339,12 @@ export const MapLocationPickerModal: React.FC<Props> = ({
   };
 
   const handleConfirm = () => {
-    if (draftLat !== null && draftLng !== null) {
-      onConfirm(draftLat, draftLng);
+    if (draftLat !== null && draftLng !== null && (draftLat !== 0 || draftLng !== 0)) {
+      onConfirm(draftLat, draftLng, {
+        accuracyM: draftAccuracyM,
+        source: draftSource,
+        capturedAt: new Date().toISOString(),
+      });
       onClose();
     }
   };

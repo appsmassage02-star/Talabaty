@@ -6,6 +6,10 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
+import {
+  resolveRestaurantDeliveryScopeAndTariff,
+  validateGpsCoordinates,
+} from "./src/lib/geoService";
 
 dotenv.config();
 
@@ -463,6 +467,19 @@ app.post("/api/food/create-order", async (req, res) => {
     if (!address?.id || !address.detailedAddress?.trim()) {
       return res.status(400).json({ success: false, message: "يرجى تحديد عنوان توصيل صالح ومكتمل." });
     }
+    if (!address.governorateId || !address.centerId || !address.areaId) {
+      return res.status(400).json({
+        success: false,
+        message: "يجب ربط عنوان التوصيل بالمحافظة والمركز والمنطقة من النظام الجغرافي المركزي.",
+      });
+    }
+    const gpsValidation = validateGpsCoordinates(address.latitude, address.longitude);
+    if (!gpsValidation.valid || gpsValidation.latitude === null || gpsValidation.longitude === null) {
+      return res.status(400).json({
+        success: false,
+        message: gpsValidation.reason || "إحداثيات GPS مطلوبة ولا يمكن استخدام إحداثيات افتراضية.",
+      });
+    }
     if (!customerPhone?.trim()) {
       return res.status(400).json({ success: false, message: "يرجى إدخال رقم هاتف للتواصل." });
     }
@@ -614,86 +631,52 @@ app.post("/api/food/create-order", async (req, res) => {
       });
     }
 
-    // 6. Resolve delivery fee with area priority & coverage check
-    let verifiedDeliveryFee = Number(dbRestaurant.delivery_fee) || 15;
-    const { data: areaFees } = await serverSupabase
-      .from("restaurant_area_delivery_fees")
-      .select("id, area_id, delivery_fee, is_active")
-      .eq("restaurant_id", dbRestaurant.id)
-      .eq("is_active", true);
+    // 6. Resolve delivery scope (Case 1 / Case 2) and central tariff (`delivery_area_tariffs`)
+    const scopeAndTariff = await resolveRestaurantDeliveryScopeAndTariff({
+      restaurant: dbRestaurant,
+      governorateId: address.governorateId,
+      centerId: address.centerId,
+      areaId: address.areaId,
+      client: serverSupabase as any,
+    });
 
-    const { data: serviceAreas } = await serverSupabase
-      .from("restaurant_service_areas")
-      .select("id, governorate_id, center_id, area_id, is_active")
-      .eq("restaurant_id", dbRestaurant.id)
-      .eq("is_active", true);
-
-    let feeMatched = false;
-    if (address.areaId && areaFees && areaFees.length > 0) {
-      const feeRow = areaFees.find((f: any) => f.area_id === address.areaId);
-      if (feeRow?.delivery_fee !== null && feeRow?.delivery_fee !== undefined) {
-        verifiedDeliveryFee = Number(feeRow.delivery_fee);
-        feeMatched = true;
-      }
-    }
-
-    if (!feeMatched && address.area && address.centerId && areaFees && areaFees.length > 0) {
-      const { data: aList } = await serverSupabase
-        .from("food_areas")
-        .select("id, name_ar")
-        .eq("center_id", address.centerId)
-        .eq("is_active", true);
-
-      const matchedArea = (aList || []).find((a: any) => a.name_ar?.trim() === address.area?.trim());
-      if (matchedArea) {
-        const feeRow = areaFees.find((f: any) => f.area_id === matchedArea.id);
-        if (feeRow?.delivery_fee !== null && feeRow?.delivery_fee !== undefined) {
-          verifiedDeliveryFee = Number(feeRow.delivery_fee);
-          feeMatched = true;
-        }
-      }
-    }
-
-    // Verify restaurant covers this location
-    if (serviceAreas && serviceAreas.length > 0) {
-      const covers = serviceAreas.some((sa: any) => {
-        if (address.areaId && sa.area_id === address.areaId) return true;
-        if (address.centerId && sa.center_id === address.centerId) return true;
-        if (address.governorateId && sa.governorate_id === address.governorateId) return true;
-        return false;
+    if (!scopeAndTariff.covered || scopeAndTariff.customerDeliveryFee === null) {
+      return res.status(400).json({
+        success: false,
+        message:
+          scopeAndTariff.reason ||
+          `العنوان المحدد (${address.area || address.markaz || address.governorate || ""}) غير مغطى بالتوصيل أو لا توجد تسعيرة مفعّلة له حالياً.`,
       });
-      if (!covers && !feeMatched) {
-        return res.status(400).json({
-          success: false,
-          message: `المطعم لا يغطي المركز أو المنطقة المحددة (${address.area || address.markaz || address.governorate}) حالياً.`,
-        });
-      }
     }
 
+    const verifiedDeliveryFee = scopeAndTariff.customerDeliveryFee;
     const verifiedTotalAmount = verifiedSubtotal + verifiedDeliveryFee;
 
-    // 7. Calculate Fee Shares
+    // 7. Calculate Fee Shares (server-side only; fulfillment_route determined exclusively by server scope rule)
     const commissionPercent = Number(dbRestaurant.commission_percent) || 0;
     const adminFeeShare = Number(((verifiedSubtotal * commissionPercent) / 100).toFixed(2));
     const restaurantFeeShare = Number((verifiedSubtotal - adminFeeShare).toFixed(2));
     const driverFeeShare = verifiedDeliveryFee;
 
     // 8. Insert into public.restaurant_orders
+    const restGps = validateGpsCoordinates(dbRestaurant.latitude, dbRestaurant.longitude);
     const orderPayload = {
       customer_user_id: userId,
       restaurant_id: dbRestaurant.id,
       fulfillment_route:
-        dbRestaurant.delivery_type === "restaurant_delivery" ? "restaurant_delivery" : "driver_delivery",
+        scopeAndTariff.applicableDeliveryOwner === "restaurant"
+          ? "restaurant_delivery"
+          : "driver_delivery",
       status: "pending",
       restaurant_name_snapshot: dbRestaurant.name,
       restaurant_phone_snapshot: dbRestaurant.phone || null,
-      restaurant_latitude_snapshot: Number(dbRestaurant.latitude) || 30.05,
-      restaurant_longitude_snapshot: Number(dbRestaurant.longitude) || 31.34,
+      restaurant_latitude_snapshot: restGps.valid ? restGps.latitude : null,
+      restaurant_longitude_snapshot: restGps.valid ? restGps.longitude : null,
       customer_name: customerName?.trim() || "العميل",
       customer_phone: customerPhone?.trim() || "",
       delivery_address: address.detailedAddress || "",
-      delivery_latitude: address.latitude ? Number(address.latitude) : 30.05,
-      delivery_longitude: address.longitude ? Number(address.longitude) : 31.34,
+      delivery_latitude: gpsValidation.latitude,
+      delivery_longitude: gpsValidation.longitude,
       food_subtotal: verifiedSubtotal,
       discount_amount: 0,
       delivery_fee: verifiedDeliveryFee,

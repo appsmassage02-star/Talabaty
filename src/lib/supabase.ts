@@ -1359,7 +1359,6 @@ export const dbService = {
         badge_color: c.badgeColor || c.badge_color || "",
         description: c.description || "",
         common_items: c.commonItems || c.common_items || [],
-        subcategories: c.subcategories || [],
         is_custom: false,
       }));
 
@@ -1395,27 +1394,39 @@ export const dbService = {
     }
 
     try {
-      const { data, error } = await supabase
+      const categoryPayload: Record<string, any> = {
+        id: category.id,
+        household_id: category.household_id,
+        name_ar: category.name_ar,
+        name_en: category.name_en,
+        image_url: category.image_url,
+        color: category.color,
+        bg_light: category.bg_light,
+        badge_color: category.badge_color,
+        description: category.description,
+        common_items: category.common_items || [],
+        is_custom: category.is_custom !== undefined ? category.is_custom : true,
+      };
+
+      let { data, error } = await supabase
         .from("categories")
-        .upsert(
-          {
-            id: category.id,
-            household_id: category.household_id,
-            name_ar: category.name_ar,
-            name_en: category.name_en,
-            image_url: category.image_url,
-            color: category.color,
-            bg_light: category.bg_light,
-            badge_color: category.badge_color,
-            description: category.description,
-            common_items: category.common_items || [],
-            subcategories: category.subcategories || [],
-            is_custom: category.is_custom !== undefined ? category.is_custom : true,
-          },
-          { onConflict: "household_id,id" }
-        )
+        .upsert(categoryPayload, { onConflict: "household_id,id" })
         .select()
         .single();
+
+      if (error && error.message?.includes("in the schema cache")) {
+        const match = error.message.match(/Could not find the '([^']+)' column/i);
+        if (match && match[1] && categoryPayload[match[1]] !== undefined) {
+          delete categoryPayload[match[1]];
+          const retry = await supabase
+            .from("categories")
+            .upsert(categoryPayload, { onConflict: "household_id,id" })
+            .select()
+            .single();
+          data = retry.data;
+          error = retry.error;
+        }
+      }
 
       if (error) throw error;
       return { success: true, data };

@@ -185,7 +185,7 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
           </div>
         </div>
 
-        {/* Restaurant Stats Bar (Authentic DB data only) */}
+        {/* Restaurant Stats Bar (Authentic DB data & Central Tariff) */}
         <div
           style={{
             padding: '14px 20px',
@@ -199,8 +199,28 @@ export const BiteBaitRestaurantDetailView: React.FC<BiteBaitRestaurantDetailView
             borderTop: '1px solid #f1f5f9',
           }}
         >
-          <span>⏱️ وقت التجهيز: <b>{restaurant.estimatedPrepTimeMinutes && restaurant.estimatedPrepTimeMinutes > 0 ? `${restaurant.estimatedPrepTimeMinutes} دقيقة` : 'غير محدد'}</b></span>
-          <span>🛵 رسوم التوصيل: <b>{(restaurant.deliveryFee || 0) > 0 ? `${restaurant.deliveryFee} ج.م` : 'مجاني'}</b></span>
+          <span>
+            ⏱️ زمن التوصيل المتوقع:{' '}
+            <b>
+              {restaurant.estimatedDeliveryMinutes && restaurant.estimatedDeliveryMinutes > 0
+                ? `${restaurant.estimatedDeliveryMinutes} دقيقة`
+                : restaurant.estimatedPrepTimeMinutes && restaurant.estimatedPrepTimeMinutes > 0
+                ? `${restaurant.estimatedPrepTimeMinutes} دقيقة`
+                : 'يُحدد حسب العنوان'}
+            </b>
+          </span>
+          <span>
+            🛵 رسوم التوصيل:{' '}
+            {!restaurant.tariffResolved ? (
+              <b style={{ color: '#64748b' }}>يُحدد حسب العنوان</b>
+            ) : restaurant.isAddressCovered === false || restaurant.deliveryFee === null ? (
+              <b style={{ color: '#dc2626' }}>خارج نطاق التوصيل لعنوانك الحالي</b>
+            ) : restaurant.isFreeDelivery || restaurant.deliveryFee === 0 ? (
+              <b style={{ color: '#16a34a' }}>توصيل مجاني</b>
+            ) : (
+              <b>{restaurant.deliveryFee} ج.م</b>
+            )}
+          </span>
           <span>💵 الحد الأدنى: <b>{(restaurant.minOrderAmount || 0) > 0 ? `${restaurant.minOrderAmount} ج.م` : 'بدون حد أدنى'}</b></span>
           <span>
             الحالة:{' '}
