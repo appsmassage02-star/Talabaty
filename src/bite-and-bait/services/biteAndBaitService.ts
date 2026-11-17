@@ -174,7 +174,7 @@ export const biteAndBaitService = {
       const { data, error } = await supabase
         .from('restaurant_section_settings')
         .select(
-          'id, section_enabled, section_visibility, disabled_display_mode, global_max_delivery_radius_km, no_driver_timeout_minutes, created_at, updated_at'
+          'id, section_enabled, section_visibility, disabled_display_mode, created_at, updated_at'
         );
 
       if (error) {
@@ -210,8 +210,6 @@ export const biteAndBaitService = {
         disabled_display_mode: ['show_disabled', 'grayscale', 'hide'].includes(row.disabled_display_mode)
           ? row.disabled_display_mode
           : 'show_disabled',
-        global_max_delivery_radius_km: Number(row.global_max_delivery_radius_km) || 10,
-        no_driver_timeout_minutes: Number(row.no_driver_timeout_minutes) || 10,
         created_at: row.created_at,
         updated_at: row.updated_at,
         status_message: row.section_enabled
@@ -1329,8 +1327,7 @@ export const biteAndBaitService = {
             name,
             phone,
             address,
-            image_url,
-            delivery_fee
+            image_url
           ),
           restaurant_order_items (
             id,
@@ -1604,16 +1601,17 @@ export const biteAndBaitService = {
         };
       }
 
-      // 2. Enforce central `ready_food` coverage & GPS boundary before calling create_bite_bait_order RPC
-      let geoGovId = params.governorateId || null;
-      let geoCenterId = params.centerId || null;
-      let geoAreaId = params.areaId || null;
+      // 2. Enforce central `ready_food` geo IDs, coverage & GPS boundary unconditionally before calling create_bite_bait_order RPC
+      let geoGovId = params.governorateId ? String(params.governorateId).trim() : null;
+      let geoCenterId = params.centerId ? String(params.centerId).trim() : null;
+      let geoAreaId = params.areaId ? String(params.areaId).trim() : null;
 
-      if ((!geoGovId || !geoCenterId || !geoAreaId) && params.addressId) {
+      if (params.addressId) {
         const { data: addrRow, error: addrErr } = await supabase
           .from('household_addresses')
-          .select('*')
+          .select('id, household_id, governorate_id, center_id, area_id')
           .eq('id', params.addressId)
+          .eq('household_id', params.householdId)
           .maybeSingle();
 
         if (addrErr) {
@@ -1624,36 +1622,49 @@ export const biteAndBaitService = {
           };
         }
 
-        if (addrRow) {
-          geoGovId = addrRow.governorate_id || null;
-          geoCenterId = addrRow.center_id || null;
-          geoAreaId = addrRow.area_id || null;
-        }
-      }
-
-      if (geoGovId && geoCenterId && geoAreaId) {
-        const feeCheck = await this.resolveDeliveryFee(params.restaurantId, {
-          id: params.addressId || 'checkout-address',
-          label: 'عنوان التوصيل',
-          recipientName: params.customerName,
-          phone: params.customerPhone,
-          governorate: '',
-          governorateId: geoGovId,
-          markaz: '',
-          centerId: geoCenterId,
-          areaId: geoAreaId,
-          detailedAddress: params.deliveryAddress,
-          latitude: params.deliveryLatitude,
-          longitude: params.deliveryLongitude,
-        });
-
-        if (!feeCheck.isCovered || feeCheck.fee === null) {
+        if (!addrRow) {
           return {
             success: false,
             data: { orderId: '', orderNumber: '' },
-            error: feeCheck.reason || 'أنت خارج نطاق التوصيل',
+            error: 'العنوان المحدد غير موجود أو لا ينتمي للأسرة الحالية.',
           };
         }
+
+        geoGovId = addrRow.governorate_id ? String(addrRow.governorate_id).trim() : null;
+        geoCenterId = addrRow.center_id ? String(addrRow.center_id).trim() : null;
+        geoAreaId = addrRow.area_id ? String(addrRow.area_id).trim() : null;
+      }
+
+      if (!geoGovId || !geoCenterId || !geoAreaId) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error:
+            'هذا العنوان غير مكتمل في النظام الجغرافي المركزي (يجب تحديد المحافظة والمركز والمنطقة قبل إرسال الطلب).',
+        };
+      }
+
+      const feeCheck = await this.resolveDeliveryFee(params.restaurantId, {
+        id: params.addressId || 'checkout-address',
+        label: 'عنوان التوصيل',
+        recipientName: params.customerName,
+        phone: params.customerPhone,
+        governorate: '',
+        governorateId: geoGovId,
+        markaz: '',
+        centerId: geoCenterId,
+        areaId: geoAreaId,
+        detailedAddress: params.deliveryAddress,
+        latitude: params.deliveryLatitude,
+        longitude: params.deliveryLongitude,
+      });
+
+      if (!feeCheck.isCovered || feeCheck.fee === null) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: feeCheck.reason || 'أنت خارج نطاق التوصيل',
+        };
       }
 
       // 3. Prepare payload with EXACT parameter names as defined in public.create_bite_bait_order

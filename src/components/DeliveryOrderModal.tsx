@@ -204,7 +204,8 @@ export const DeliveryOrderModal: React.FC<Props> = ({
 
   if (!isOpen) return null;
 
-  const isDeliveryEnabled = (settings?.delivery_enabled ?? true) && tariffState.allowed;
+  const isGlobalDeliveryEnabled = settings?.delivery_enabled === true;
+  const isDeliveryEnabled = isGlobalDeliveryEnabled && tariffState.allowed;
   const resolvedFeeNumber =
     tariffState.allowed && tariffState.deliveryFee !== null ? Number(tariffState.deliveryFee) : null;
   const totalAmount = subtotal + (resolvedFeeNumber ?? 0);
@@ -298,7 +299,7 @@ export const DeliveryOrderModal: React.FC<Props> = ({
   const handleConfirmOrder = async () => {
     setFormError(null);
 
-    if (!settings?.delivery_enabled) {
+    if (settings?.delivery_enabled !== true) {
       setFormError('خدمة التوصيل معطلة حالياً. لا يمكن إنشاء طلبات جديدة في الوقت الحالي.');
       return;
     }
@@ -379,7 +380,7 @@ export const DeliveryOrderModal: React.FC<Props> = ({
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
           {/* Service Disabled Notice */}
-          {!isDeliveryEnabled && (
+          {!isLoading && !isGlobalDeliveryEnabled && (
             <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl flex items-start space-x-2.5 space-x-reverse text-rose-800">
               <Ban className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
               <div>

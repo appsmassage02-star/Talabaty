@@ -1,4 +1,5 @@
 import express from "express";
+import http from "http";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
@@ -772,15 +773,29 @@ app.post("/api/food/create-order", async (req, res) => {
 });
 
 async function startServer() {
+  const httpServer = http.createServer(app);
+
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    const vitePromise = createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === "true" ? false : undefined,
+        hmr: process.env.DISABLE_HMR === "true" ? false : { server: httpServer },
       },
       appType: "spa",
     });
-    app.use(vite.middlewares);
+
+    vitePromise.catch((err) => {
+      console.error("[Vite] Failed to initialize middleware:", err);
+    });
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await vitePromise;
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
@@ -789,7 +804,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Talabat Al-Bayt Server listening on http://localhost:${PORT}`);
   });
 }

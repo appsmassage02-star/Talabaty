@@ -844,6 +844,13 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         return { success: false, message: err };
       }
 
+      if (!details.governorateId || !details.centerId || !details.areaId) {
+        setIsSubmittingOrder(false);
+        const err = 'هذا العنوان غير مكتمل في النظام الجغرافي المركزي (يجب تحديد المحافظة والمركز والمنطقة قبل إرسال الطلب).';
+        triggerNotification(`⚠️ ${err}`);
+        return { success: false, message: err };
+      }
+
       // 3. Invoke real RPC: public.create_bite_bait_order (with client geo/boundary pre-validation)
       const res = await biteAndBaitService.createBiteBaitOrder({
         householdId: resolvedHouseholdId,

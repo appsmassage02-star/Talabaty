@@ -225,8 +225,8 @@ export interface RestaurantSectionSettings {
   section_enabled: boolean;
   section_visibility: SectionVisibility;
   disabled_display_mode: DisabledDisplayMode;
-  global_max_delivery_radius_km: number;
-  no_driver_timeout_minutes: number;
+  global_max_delivery_radius_km?: number;
+  no_driver_timeout_minutes?: number;
   created_at?: string;
   updated_at?: string;
   status_message?: string;

@@ -26,14 +26,14 @@ export const deliveryService = {
    * Fetch central delivery enablement settings (`delivery_enabled`)
    */
   async getSettings(): Promise<DeliverySettings> {
-    const emptySettings: DeliverySettings = {
+    const disabledSettings: DeliverySettings = {
       id: 'default',
-      delivery_enabled: true,
+      delivery_enabled: false,
       default_delivery_fee: 0,
     };
 
     if (!isSupabaseConfigured()) {
-      return emptySettings;
+      return disabledSettings;
     }
 
     try {
@@ -44,12 +44,16 @@ export const deliveryService = {
         .maybeSingle();
 
       if (error || !data) {
-        return emptySettings;
+        return disabledSettings;
       }
-      return data as DeliverySettings;
+
+      return {
+        ...(data as DeliverySettings),
+        delivery_enabled: data.delivery_enabled === true,
+      };
     } catch (err) {
       console.warn('[deliveryService] Exception fetching settings:', err);
-      return emptySettings;
+      return disabledSettings;
     }
   },
 
