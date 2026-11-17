@@ -18,11 +18,10 @@ import type {
   CreateBiteBaitOrderResult,
 } from '../types';
 import {
-  getActiveGovernorates,
-  getActiveCenters,
-  getActiveAreas,
+  checkGpsWithinGeoBoundary,
   detectRestaurantOwnDelivery,
   resolveRestaurantDeliveryScopeAndTariff,
+  validateGeoHierarchySelection,
   validateGpsCoordinates,
   type DeliveryOwnerType,
 } from '../../lib/geoService';
@@ -234,7 +233,7 @@ export const biteAndBaitService = {
   },
 
   // --------------------------------------------------------------------------
-  // 1.1 Verify Geographic Service Area Scope (restaurant_section_service_areas + central geo_* tables)
+  // 1.1 Verify Geographic Service Scope strictly from central `geo_*` + `delivery_area_tariffs` (`ready_food`)
   // --------------------------------------------------------------------------
   async verifyGeographicScope(
     address?: FoodCustomerAddress | null,
@@ -249,27 +248,6 @@ export const biteAndBaitService = {
     }
 
     try {
-      // Step A: Fetch active service areas from restaurant_section_service_areas
-      const { data: activeServiceAreas, error: saError } = await supabase
-        .from('restaurant_section_service_areas')
-        .select('id, governorate_id, center_id, area_id, is_active')
-        .eq('is_active', true);
-
-      if (saError) {
-        return {
-          isServiceable: false,
-          reason: `تعذر التحقق من نطاقات الخدمة في قاعدة البيانات: ${saError.message}`,
-        };
-      }
-
-      // Rule: Absence of active service areas is NOT permission (strict denial)
-      if (!activeServiceAreas || activeServiceAreas.length === 0) {
-        return {
-          isServiceable: false,
-          reason: 'لا يوجد نطاق جغرافي مفعّل لقسم المطاعم في قاعدة البيانات حالياً.',
-        };
-      }
-
       // If address is not provided directly, attempt to resolve user's saved/default address
       let targetAddress = address;
       if (!targetAddress) {
@@ -278,14 +256,34 @@ export const biteAndBaitService = {
         targetAddress = savedAddresses.find((a) => a.isDefault) || savedAddresses[0] || null;
       }
 
+      // Guest / visitor without saved address: check if any active `ready_food` tariff exists in central table
       if (!targetAddress) {
+        const { data: anyReadyFood, error: anyErr } = await supabase
+          .from('delivery_area_tariffs')
+          .select('id')
+          .eq('service_type', 'ready_food')
+          .eq('is_enabled', true)
+          .limit(1);
+
+        if (anyErr) {
+          return {
+            isServiceable: false,
+            reason: `تعذر التحقق من تغطية الأكلات الجاهزة في قاعدة البيانات: ${anyErr.message}`,
+          };
+        }
+
+        if (!anyReadyFood || anyReadyFood.length === 0) {
+          return {
+            isServiceable: false,
+            reason: 'أنت خارج نطاق التوصيل',
+          };
+        }
+
         return {
-          isServiceable: false,
-          reason: 'يرجى إضافة وتحديد عنوان توصيل يحتوي على المحافظة والمركز والمنطقة وإحداثيات GPS للتحقق من التغطية.',
+          isServiceable: true,
         };
       }
 
-      // Strictly require central geo IDs or active hierarchy match in central geo_* tables
       if (!targetAddress.governorateId || !targetAddress.centerId || !targetAddress.areaId) {
         return {
           isServiceable: false,
@@ -293,93 +291,107 @@ export const biteAndBaitService = {
         };
       }
 
-      // Step B: Verify active governorate in central geo_governorates
-      const govs = await getActiveGovernorates(supabase);
-      const matchedGov = govs.find((g) => g.id === targetAddress!.governorateId);
-      if (!matchedGov) {
+      const hierarchyCheck = await validateGeoHierarchySelection(
+        targetAddress.governorateId,
+        targetAddress.centerId,
+        targetAddress.areaId,
+        supabase
+      );
+      if (!hierarchyCheck.valid || !hierarchyCheck.governorate || !hierarchyCheck.center || !hierarchyCheck.area) {
         return {
           isServiceable: false,
-          reason: `المحافظة المختارة (${targetAddress.governorate || 'غير محددة'}) غير مفعّلة أو غير موجودة في geo_governorates.`,
+          reason: hierarchyCheck.reason || 'التسلسل الجغرافي للعنوان غير مفعّل في النظام المركزي.',
         };
       }
 
-      // Step C: Verify active center in central geo_centers
-      const centers = await getActiveCenters(matchedGov.id, supabase);
-      const matchedCenter = centers.find((c) => c.id === targetAddress!.centerId);
-      if (!matchedCenter) {
+      // Check GPS boundary if coordinates are present
+      if (targetAddress.latitude !== undefined && targetAddress.longitude !== undefined) {
+        const gpsCheck = validateGpsCoordinates(targetAddress.latitude, targetAddress.longitude);
+        if (!gpsCheck.valid) {
+          return {
+            isServiceable: false,
+            reason: gpsCheck.reason || 'إحداثيات GPS غير صالحة أو مفقودة على العنوان.',
+          };
+        }
+        const boundaryCheck = checkGpsWithinGeoBoundary(gpsCheck.latitude, gpsCheck.longitude, {
+          area: hierarchyCheck.area,
+          center: hierarchyCheck.center,
+          governorate: hierarchyCheck.governorate,
+        });
+        if (!boundaryCheck.inside) {
+          return {
+            isServiceable: false,
+            reason: boundaryCheck.reason || 'إحداثيات موقعك الجغرافي تقع خارج حدود المنطقة المحددة.',
+            governorateId: hierarchyCheck.governorate.id,
+            centerId: hierarchyCheck.center.id,
+            areaId: hierarchyCheck.area.id,
+          };
+        }
+      }
+
+      // Verify central `delivery_area_tariffs` has at least one enabled `ready_food` tariff covering this location
+      const { data: readyFoodTariffs, error: tariffErr } = await supabase
+        .from('delivery_area_tariffs')
+        .select('id, governorate_id, center_id, area_id, is_enabled')
+        .eq('service_type', 'ready_food')
+        .eq('is_enabled', true);
+
+      if (tariffErr) {
         return {
           isServiceable: false,
-          reason: `المركز/المدينة المختارة (${targetAddress.markaz || 'غير محدد'}) غير مفعّل في geo_centers.`,
-          governorateId: matchedGov.id,
+          reason: `تعذر التحقق من نطاقات التوصيل المركزية: ${tariffErr.message}`,
         };
       }
 
-      // Step D: Verify active area in central geo_areas
-      const areas = await getActiveAreas(matchedGov.id, matchedCenter.id, supabase);
-      const matchedArea = areas.find((a) => a.id === targetAddress!.areaId);
-      if (!matchedArea) {
-        return {
-          isServiceable: false,
-          reason: `المنطقة المختارة (${targetAddress.area || 'غير محددة'}) غير مفعّلة في geo_areas.`,
-          governorateId: matchedGov.id,
-          centerId: matchedCenter.id,
-        };
-      }
+      const rows = (readyFoodTariffs || []) as Array<{
+        id: string;
+        governorate_id?: string | null;
+        center_id?: string | null;
+        area_id?: string | null;
+        is_enabled: boolean;
+      }>;
 
-      // Step E: Hierarchical Scope Matching in restaurant_section_service_areas (including parent_area_id chain)
-      const areaChain: string[] = [matchedArea.id];
-      let parentPtr = matchedArea.parent_area_id || null;
-      let depth = 0;
-      while (parentPtr && depth < 6) {
-        depth += 1;
-        if (!areaChain.includes(parentPtr)) areaChain.push(parentPtr);
-        const parentObj = areas.find((a) => a.id === parentPtr);
-        parentPtr = parentObj?.parent_area_id || null;
-      }
-
-      const areaScope = activeServiceAreas.find((sa: any) => sa.area_id && areaChain.includes(sa.area_id));
-      if (areaScope) {
+      const areaMatch = rows.find((t) => t.area_id === hierarchyCheck.area!.id);
+      if (areaMatch) {
         return {
           isServiceable: true,
           matchedLevel: 'area',
-          governorateId: matchedGov.id,
-          centerId: matchedCenter.id,
-          areaId: matchedArea.id,
+          governorateId: hierarchyCheck.governorate.id,
+          centerId: hierarchyCheck.center.id,
+          areaId: hierarchyCheck.area.id,
         };
       }
 
-      const centerScope = activeServiceAreas.find(
-        (sa: any) => sa.center_id === matchedCenter.id && !sa.area_id
-      );
-      if (centerScope) {
+      const centerMatch = rows.find((t) => t.center_id === hierarchyCheck.center!.id && !t.area_id);
+      if (centerMatch) {
         return {
           isServiceable: true,
           matchedLevel: 'center',
-          governorateId: matchedGov.id,
-          centerId: matchedCenter.id,
-          areaId: matchedArea.id,
+          governorateId: hierarchyCheck.governorate.id,
+          centerId: hierarchyCheck.center.id,
+          areaId: hierarchyCheck.area.id,
         };
       }
 
-      const govScope = activeServiceAreas.find(
-        (sa: any) => sa.governorate_id === matchedGov.id && !sa.center_id && !sa.area_id
+      const govMatch = rows.find(
+        (t) => t.governorate_id === hierarchyCheck.governorate!.id && !t.center_id && !t.area_id
       );
-      if (govScope) {
+      if (govMatch) {
         return {
           isServiceable: true,
           matchedLevel: 'governorate',
-          governorateId: matchedGov.id,
-          centerId: matchedCenter.id,
-          areaId: matchedArea.id,
+          governorateId: hierarchyCheck.governorate.id,
+          centerId: hierarchyCheck.center.id,
+          areaId: hierarchyCheck.area.id,
         };
       }
 
       return {
         isServiceable: false,
-        reason: `العنوان (${matchedArea.name_ar} - ${matchedCenter.name_ar} - ${matchedGov.name_ar}) يقع خارج النطاق الجغرافي المخدوم حالياً بقسم المطاعم.`,
-        governorateId: matchedGov.id,
-        centerId: matchedCenter.id,
-        areaId: matchedArea.id,
+        reason: 'أنت خارج نطاق التوصيل',
+        governorateId: hierarchyCheck.governorate.id,
+        centerId: hierarchyCheck.center.id,
+        areaId: hierarchyCheck.area.id,
       };
     } catch (err: any) {
       return {
@@ -390,13 +402,16 @@ export const biteAndBaitService = {
   },
 
   // --------------------------------------------------------------------------
-  // 1.2 Resolve Restaurant Delivery Scope & Central Tariff (`delivery_area_tariffs` + Case 1 / Case 2)
+  // 1.2 Resolve Restaurant Delivery Scope & Central Tariff (`delivery_area_tariffs` for `ready_food`)
   // --------------------------------------------------------------------------
   async resolveDeliveryFee(
     restaurantId: string,
     address?: FoodCustomerAddress | null
   ): Promise<{
     fee: number | null;
+    baseFee: number | null;
+    adminCommission: number | null;
+    driverNet: number | null;
     isCovered: boolean;
     isFreeDelivery: boolean;
     estimatedDeliveryMinutes: number | null;
@@ -408,6 +423,9 @@ export const biteAndBaitService = {
   }> {
     const blocked = (reason: string) => ({
       fee: null,
+      baseFee: null,
+      adminCommission: null,
+      driverNet: null,
       isCovered: false,
       isFreeDelivery: false,
       estimatedDeliveryMinutes: null,
@@ -459,11 +477,16 @@ export const biteAndBaitService = {
         governorateId: address.governorateId,
         centerId: address.centerId,
         areaId: address.areaId,
+        latitude: gpsCheck.latitude,
+        longitude: gpsCheck.longitude,
         client: supabase,
       });
 
       return {
         fee: scopeAndTariff.customerDeliveryFee,
+        baseFee: scopeAndTariff.baseFee,
+        adminCommission: scopeAndTariff.adminCommission,
+        driverNet: scopeAndTariff.driverNet,
         isCovered: scopeAndTariff.covered,
         isFreeDelivery: scopeAndTariff.isFreeDelivery,
         estimatedDeliveryMinutes: scopeAndTariff.estimatedDeliveryMinutes,
@@ -1441,6 +1464,7 @@ export const biteAndBaitService = {
             phone: o.customer_phone || '',
             governorate: o.delivery_governorate_name_snapshot || '',
             markaz: o.delivery_center_name_snapshot || '',
+            area: o.delivery_area_name || undefined,
             detailedAddress: o.delivery_address || '',
             latitude: lat as number,
             longitude: lng as number,
@@ -1449,7 +1473,7 @@ export const biteAndBaitService = {
           items,
           subtotal: Number(o.food_subtotal) || 0,
           discount: Number(o.discount_amount) || 0,
-          deliveryFee: Number(o.delivery_fee) || 0,
+          deliveryFee: Number(o.customer_delivery_fee ?? o.delivery_fee) || 0,
           totalAmount: Number(o.customer_total) || 0,
           notes: o.cancellation_reason ? `سبب الإلغاء: ${o.cancellation_reason}` : undefined,
           paymentMethod: 'cash_on_delivery',
@@ -1580,7 +1604,59 @@ export const biteAndBaitService = {
         };
       }
 
-      // 2. Prepare payload with EXACT parameter names as defined in public.create_bite_bait_order
+      // 2. Enforce central `ready_food` coverage & GPS boundary before calling create_bite_bait_order RPC
+      let geoGovId = params.governorateId || null;
+      let geoCenterId = params.centerId || null;
+      let geoAreaId = params.areaId || null;
+
+      if ((!geoGovId || !geoCenterId || !geoAreaId) && params.addressId) {
+        const { data: addrRow, error: addrErr } = await supabase
+          .from('household_addresses')
+          .select('*')
+          .eq('id', params.addressId)
+          .maybeSingle();
+
+        if (addrErr) {
+          return {
+            success: false,
+            data: { orderId: '', orderNumber: '' },
+            error: `تعذر التحقق من بيانات عنوان التوصيل: ${addrErr.message}`,
+          };
+        }
+
+        if (addrRow) {
+          geoGovId = addrRow.governorate_id || null;
+          geoCenterId = addrRow.center_id || null;
+          geoAreaId = addrRow.area_id || null;
+        }
+      }
+
+      if (geoGovId && geoCenterId && geoAreaId) {
+        const feeCheck = await this.resolveDeliveryFee(params.restaurantId, {
+          id: params.addressId || 'checkout-address',
+          label: 'عنوان التوصيل',
+          recipientName: params.customerName,
+          phone: params.customerPhone,
+          governorate: '',
+          governorateId: geoGovId,
+          markaz: '',
+          centerId: geoCenterId,
+          areaId: geoAreaId,
+          detailedAddress: params.deliveryAddress,
+          latitude: params.deliveryLatitude,
+          longitude: params.deliveryLongitude,
+        });
+
+        if (!feeCheck.isCovered || feeCheck.fee === null) {
+          return {
+            success: false,
+            data: { orderId: '', orderNumber: '' },
+            error: feeCheck.reason || 'أنت خارج نطاق التوصيل',
+          };
+        }
+      }
+
+      // 3. Prepare payload with EXACT parameter names as defined in public.create_bite_bait_order
       const rpcPayload = {
         p_household_id: params.householdId,
         p_restaurant_id: params.restaurantId,

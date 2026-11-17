@@ -67,7 +67,7 @@ export interface Restaurant {
   tariffResolved?: boolean;
   isAddressCovered?: boolean;
   estimatedDeliveryMinutes?: number | null;
-  applicableDeliveryOwner?: 'restaurant' | 'talabaty' | null;
+  applicableDeliveryOwner?: 'restaurant' | 'platform' | null;
   coverageReason?: string;
   tariffId?: string | null;
   minOrderAmount: number;
@@ -131,7 +131,6 @@ export interface FoodArea {
   id: string;
   governorate_id: string;
   center_id: string;
-  parent_area_id?: string | null;
   name_ar: string;
   name_en?: string;
   is_active: boolean;
@@ -231,16 +230,6 @@ export interface RestaurantSectionSettings {
   created_at?: string;
   updated_at?: string;
   status_message?: string;
-}
-
-export interface RestaurantSectionServiceArea {
-  id: string;
-  governorate_id: string | null;
-  center_id: string | null;
-  area_id: string | null;
-  is_active: boolean;
-  created_at?: string;
-  updated_at?: string;
 }
 
 export interface GeographicVerificationResult {
@@ -417,6 +406,9 @@ export interface CreateBiteBaitOrderParams {
   householdId: string;
   restaurantId: string;
   addressId: string | null;
+  governorateId?: string | null;
+  centerId?: string | null;
+  areaId?: string | null;
   customerName: string;
   customerPhone: string;
   deliveryAddress: string;

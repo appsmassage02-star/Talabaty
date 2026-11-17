@@ -1,6 +1,7 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { cacheManager } from './cacheManager';
 import {
+  checkGpsWithinGeoBoundary,
   resolveCentralTariff,
   validateGeoHierarchySelection,
   validateGpsCoordinates,
@@ -234,6 +235,19 @@ export const deliveryService = {
       };
     }
 
+    // Check GPS containment against boundary (area -> center -> governorate; allowed if no boundary defined)
+    const boundaryCheck = checkGpsWithinGeoBoundary(cleanLatitude, cleanLongitude, {
+      area: hierarchyCheck.area,
+      center: hierarchyCheck.center,
+      governorate: hierarchyCheck.governorate,
+    });
+    if (!boundaryCheck.inside) {
+      return {
+        success: false,
+        message: boundaryCheck.reason || 'إحداثيات GPS تقع خارج حدود المنطقة المحددة.',
+      };
+    }
+
     // If marked default, unset other addresses' default status
     if (address.is_default) {
       try {
@@ -388,69 +402,62 @@ export const deliveryService = {
   async resolveHouseholdDeliveryTariff(address?: Partial<HouseholdAddress> | null): Promise<{
     allowed: boolean;
     deliveryFee: number | null;
+    baseFee: number | null;
+    adminCommission: number | null;
+    driverNet: number | null;
     isFreeDelivery: boolean;
     estimatedDeliveryMinutes: number | null;
     tariffId: string | null;
     reason?: string;
     resolution?: CentralTariffResolution;
   }> {
+    const blocked = (reason: string, resolution?: CentralTariffResolution) => ({
+      allowed: false,
+      deliveryFee: null,
+      baseFee: null,
+      adminCommission: null,
+      driverNet: null,
+      isFreeDelivery: false,
+      estimatedDeliveryMinutes: null,
+      tariffId: null,
+      reason,
+      resolution,
+    });
+
     const settings = await this.getSettings();
     if (!settings.delivery_enabled) {
-      return {
-        allowed: false,
-        deliveryFee: null,
-        isFreeDelivery: false,
-        estimatedDeliveryMinutes: null,
-        tariffId: null,
-        reason: 'خدمة التوصيل معطلة حالياً من قبل الإدارة',
-      };
+      return blocked('خدمة التوصيل معطلة حالياً من قبل الإدارة');
     }
 
     if (!address) {
-      return {
-        allowed: false,
-        deliveryFee: null,
-        isFreeDelivery: false,
-        estimatedDeliveryMinutes: null,
-        tariffId: null,
-        reason: 'يرجى اختيار عنوان توصيل صحيح أولاً',
-      };
+      return blocked('يرجى اختيار عنوان توصيل صحيح أولاً');
     }
 
     const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
     if (!gpsCheck.valid) {
-      return {
-        allowed: false,
-        deliveryFee: null,
-        isFreeDelivery: false,
-        estimatedDeliveryMinutes: null,
-        tariffId: null,
-        reason: 'هذا العنوان لا يحتوي على موقع GPS صالح. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.',
-      };
+      return blocked('هذا العنوان لا يحتوي على موقع GPS صالح. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.');
     }
 
     if (!address.governorate_id || !address.center_id || !address.area_id) {
-      return {
-        allowed: false,
-        deliveryFee: null,
-        isFreeDelivery: false,
-        estimatedDeliveryMinutes: null,
-        tariffId: null,
-        reason: 'العنوان غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تعديل العنوان واستكماله.',
-      };
+      return blocked('العنوان غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تعديل العنوان واستكماله.');
     }
 
     const tariffRes = await resolveCentralTariff({
-      serviceType: 'household',
-      deliveryOwner: 'talabaty',
+      serviceType: 'household_shortages',
+      deliveryOwner: 'platform',
       governorateId: address.governorate_id,
       centerId: address.center_id,
       areaId: address.area_id,
+      latitude: gpsCheck.latitude,
+      longitude: gpsCheck.longitude,
     });
 
     return {
       allowed: tariffRes.covered,
       deliveryFee: tariffRes.customerDeliveryFee,
+      baseFee: tariffRes.baseFee,
+      adminCommission: tariffRes.adminCommission,
+      driverNet: tariffRes.driverNet,
       isFreeDelivery: tariffRes.isFreeDelivery,
       estimatedDeliveryMinutes: tariffRes.estimatedDeliveryMinutes,
       tariffId: tariffRes.tariffId,
@@ -566,15 +573,20 @@ export const deliveryService = {
         customer_name: addrData.full_name || 'المنزل',
         customer_phone: addrData.phone || '',
         country: 'مصر',
-        governorate_id: addrData.governorate_id,
         governorate_name: addrData.governorate_name || '',
-        center_id: addrData.center_id,
         markaz_name: addrData.markaz_name || '',
-        area_id: addrData.area_id,
-        area_name: addrData.area_name || null,
-        latitude: Number(addrData.latitude),
-        longitude: Number(addrData.longitude),
         detailed_address: addrData.detailed_address || '',
+        delivery_latitude: Number(addrData.latitude),
+        delivery_longitude: Number(addrData.longitude),
+        delivery_governorate_id: addrData.governorate_id,
+        delivery_center_id: addrData.center_id,
+        delivery_area_id: addrData.area_id,
+        delivery_area_name: addrData.area_name || null,
+        delivery_tariff_id: tariffCheck.tariffId,
+        delivery_base_fee: tariffCheck.baseFee,
+        delivery_admin_commission: tariffCheck.adminCommission,
+        delivery_driver_net: tariffCheck.driverNet,
+        customer_delivery_fee: deliveryFee,
         delivery_fee: deliveryFee,
         subtotal,
         total_amount: totalAmount,
@@ -585,45 +597,20 @@ export const deliveryService = {
           : {}),
       };
 
-      let { data: orderData, error: orderErr } = await supabase
+      const { data: orderData, error: orderErr } = await supabase
         .from('delivery_orders')
         .insert(orderPayload)
         .select()
         .single();
 
-      // Handle remote schema cache not yet having optional snapshot columns on delivery_orders
-      let safetyRetries = 0;
-      while (orderErr && orderErr.code === 'PGRST204' && safetyRetries < 6) {
-        safetyRetries += 1;
-        const match = /Could not find the '([^']+)' column/i.exec(orderErr.message || '');
-        if (match && match[1] && match[1] in orderPayload) {
-          delete orderPayload[match[1]];
-          const retryRes = await supabase
-            .from('delivery_orders')
-            .insert(orderPayload)
-            .select()
-            .single();
-          orderData = retryRes.data;
-          orderErr = retryRes.error;
-        } else {
-          break;
-        }
-      }
-
-      if (orderErr && orderPayload.invoice_id) {
-        orderPayload.invoice_id = null;
-        const retryRes = await supabase
-          .from('delivery_orders')
-          .insert(orderPayload)
-          .select()
-          .single();
-        orderData = retryRes.data;
-        orderErr = retryRes.error;
-      }
-
       if (orderErr || !orderData) {
         console.error('[deliveryService] Error inserting delivery_orders:', orderErr);
-        throw orderErr || new Error('فشل إدراج طلب التوصيل في قاعدة البيانات');
+        return {
+          success: false,
+          message: orderErr?.message
+            ? `فشل تسجيل طلب التوصيل في قاعدة البيانات: ${orderErr.message}`
+            : 'فشل إدراج طلب التوصيل في قاعدة البيانات',
+        };
       }
 
       const orderId = orderData.id;
@@ -646,6 +633,12 @@ export const deliveryService = {
 
       if (itemsErr) {
         console.error('[deliveryService] CRITICAL: Error inserting delivery_order_items:', itemsErr);
+        // Clean up orphan header order so no partial order exists
+        try {
+          await supabase.from('delivery_orders').delete().eq('id', orderId);
+        } catch {
+          // ignore cleanup failure
+        }
         return {
           success: false,
           message: `فشل حفظ أصناف الطلب في جدول delivery_order_items: ${itemsErr.message || JSON.stringify(itemsErr)}`,
@@ -658,6 +651,12 @@ export const deliveryService = {
         .eq('order_id', orderId);
 
       if (verifyErr) {
+        try {
+          await supabase.from('delivery_order_items').delete().eq('order_id', orderId);
+          await supabase.from('delivery_orders').delete().eq('id', orderId);
+        } catch {
+          // ignore cleanup failure
+        }
         return {
           success: false,
           message: `فشل التحقق من الأصناف المحفوظة في قاعدة البيانات: ${verifyErr.message}`,
@@ -665,9 +664,14 @@ export const deliveryService = {
       }
 
       if (!verifiedItems || verifiedItems.length === 0) {
+        try {
+          await supabase.from('delivery_orders').delete().eq('id', orderId);
+        } catch {
+          // ignore cleanup failure
+        }
         return {
           success: false,
-          message: 'فشل التحقق: تم إنشاء الطلب ولكن لم يتم العثور على أي أصناف في delivery_order_items',
+          message: 'فشل التحقق: لم يتم العثور على أي أصناف في delivery_order_items، تم التراجع عن الطلب.',
         };
       }
 

@@ -11,7 +11,8 @@
 
 -- ------------------------------------------------------------------------------
 -- STEP 1: PRE-EXECUTION DIAGNOSTICS (READ-ONLY)
--- Inspect current trigger/RPC definitions and active `delivery_area_tariffs` rows.
+-- Inspect current trigger/RPC definitions, `delivery_orders` geo/tariff columns,
+-- and active `delivery_area_tariffs` rows.
 -- ------------------------------------------------------------------------------
 SELECT
   p.proname,
@@ -24,6 +25,29 @@ WHERE n.nspname = 'public'
     'create_delivery_order',
     'approve_recurring_order_request'
   );
+
+SELECT
+  column_name,
+  data_type,
+  is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'delivery_orders'
+  AND column_name IN (
+    'delivery_latitude',
+    'delivery_longitude',
+    'delivery_governorate_id',
+    'delivery_center_id',
+    'delivery_area_id',
+    'delivery_area_name',
+    'delivery_tariff_id',
+    'delivery_base_fee',
+    'delivery_admin_commission',
+    'delivery_driver_net',
+    'customer_delivery_fee',
+    'delivery_fee'
+  )
+ORDER BY ordinal_position;
 
 SELECT
   service_type,
@@ -39,30 +63,41 @@ ORDER BY service_type, delivery_owner;
 -- STEP 2: TRANSACTIONAL MIGRATION (CENTRAL GEO + CENTRAL TARIFFS)
 -- Impact Summary:
 -- 1) Adds helper `public.fn_resolve_central_household_tariff(uuid, uuid, uuid)`
---    that validates active geo hierarchy (geo_governorates -> geo_centers -> geo_areas,
---    including parent_area_id walk) and picks the most specific enabled row in
---    `delivery_area_tariffs` for household delivery (`service_type IN (...)`).
+--    that validates the strict 3-level direct hierarchy:
+--      `geo_governorates -> geo_centers -> geo_areas` (NO `parent_area_id`),
+--    and picks the most specific enabled row in `delivery_area_tariffs` matching:
+--      `service_type = 'household_shortages'` AND `delivery_owner = 'platform'`
+--    in strict precedence order: Area -> Center -> Governorate.
 -- 2) Updates trigger `public.fn_enforce_delivery_orders_insert()` so it NO LONGER
 --    overwrites valid central `delivery_area_tariffs` fees (including 0 free delivery)
---    with `delivery_settings.default_delivery_fee` or `15.00`.
+--    with `delivery_settings.default_delivery_fee` or `15.00`, and persists the full
+--    immutable financial & geographic snapshot columns on `delivery_orders`:
+--      `delivery_latitude`, `delivery_longitude`, `delivery_governorate_id`,
+--      `delivery_center_id`, `delivery_area_id`, `delivery_area_name`,
+--      `delivery_tariff_id`, `delivery_base_fee`, `delivery_admin_commission`,
+--      `delivery_driver_net`, `customer_delivery_fee`, `delivery_fee`.
 -- 3) Updates `public.approve_recurring_order_request(...)` and `public.create_delivery_order(...)`
---    to enforce geo_* hierarchy, valid non-zero GPS, and central `delivery_area_tariffs`,
---    copying `governorate_id`, `center_id`, `area_id`, `area_name`, `latitude`, `longitude`
---    into `delivery_orders`.
+--    to enforce `geo_*` 3-level hierarchy, valid non-zero GPS, and central
+--    `delivery_area_tariffs` (`household_shortages` + `platform`), saving all snapshot columns.
 -- ------------------------------------------------------------------------------
 
 BEGIN;
 
--- Ensure snapshot columns exist on delivery_orders (non-destructive IF NOT EXISTS)
+-- Ensure immutable geo & tariff snapshot columns exist on delivery_orders
 ALTER TABLE public.delivery_orders
-  ADD COLUMN IF NOT EXISTS governorate_id UUID,
-  ADD COLUMN IF NOT EXISTS center_id UUID,
-  ADD COLUMN IF NOT EXISTS area_id UUID,
-  ADD COLUMN IF NOT EXISTS area_name TEXT,
-  ADD COLUMN IF NOT EXISTS latitude NUMERIC,
-  ADD COLUMN IF NOT EXISTS longitude NUMERIC;
+  ADD COLUMN IF NOT EXISTS delivery_latitude NUMERIC,
+  ADD COLUMN IF NOT EXISTS delivery_longitude NUMERIC,
+  ADD COLUMN IF NOT EXISTS delivery_governorate_id UUID,
+  ADD COLUMN IF NOT EXISTS delivery_center_id UUID,
+  ADD COLUMN IF NOT EXISTS delivery_area_id UUID,
+  ADD COLUMN IF NOT EXISTS delivery_area_name TEXT,
+  ADD COLUMN IF NOT EXISTS delivery_tariff_id UUID,
+  ADD COLUMN IF NOT EXISTS delivery_base_fee NUMERIC,
+  ADD COLUMN IF NOT EXISTS delivery_admin_commission NUMERIC,
+  ADD COLUMN IF NOT EXISTS delivery_driver_net NUMERIC,
+  ADD COLUMN IF NOT EXISTS customer_delivery_fee NUMERIC;
 
--- 2A. Central Geo Hierarchy & Tariff Resolution Helper for Household Delivery
+-- 2A. Central 3-Level Geo Hierarchy & Tariff Resolution Helper for Household Delivery
 CREATE OR REPLACE FUNCTION public.fn_resolve_central_household_tariff(
   p_governorate_id UUID,
   p_center_id UUID,
@@ -71,6 +106,10 @@ CREATE OR REPLACE FUNCTION public.fn_resolve_central_household_tariff(
 RETURNS TABLE (
   covered BOOLEAN,
   tariff_id UUID,
+  matched_level TEXT,
+  base_fee NUMERIC,
+  admin_commission NUMERIC,
+  driver_net NUMERIC,
   customer_delivery_fee NUMERIC,
   is_free_delivery BOOLEAN,
   governorate_name TEXT,
@@ -86,43 +125,48 @@ DECLARE
   v_gov RECORD;
   v_center RECORD;
   v_area RECORD;
-  v_area_chain UUID[] := ARRAY[]::UUID[];
-  v_ptr UUID;
-  v_guard INT := 0;
   v_tariff RECORD;
+  v_customer_fee NUMERIC;
+  v_base_fee NUMERIC;
+  v_admin_comm NUMERIC;
+  v_driver_net NUMERIC;
+  v_level TEXT;
 BEGIN
   IF p_governorate_id IS NULL OR p_center_id IS NULL OR p_area_id IS NULL THEN
-    RETURN QUERY SELECT false, NULL::UUID, NULL::NUMERIC, false, NULL::TEXT, NULL::TEXT, NULL::TEXT,
+    RETURN QUERY SELECT false, NULL::UUID, NULL::TEXT, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, false,
+      NULL::TEXT, NULL::TEXT, NULL::TEXT,
       'يجب تحديد المحافظة والمركز والمنطقة من النظام الجغرافي المركزي أولاً';
     RETURN;
   END IF;
 
-  -- Validate Governorate
+  -- Level 1: Validate Governorate (`geo_governorates`)
   SELECT g.id, g.name_ar, COALESCE(g.is_active, true) AS is_active
   INTO v_gov
   FROM public.geo_governorates g
   WHERE g.id = p_governorate_id;
 
   IF NOT FOUND OR NOT v_gov.is_active THEN
-    RETURN QUERY SELECT false, NULL::UUID, NULL::NUMERIC, false, NULL::TEXT, NULL::TEXT, NULL::TEXT,
+    RETURN QUERY SELECT false, NULL::UUID, NULL::TEXT, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, false,
+      NULL::TEXT, NULL::TEXT, NULL::TEXT,
       'المحافظة المحددة غير موجودة أو غير مفعّلة في geo_governorates';
     RETURN;
   END IF;
 
-  -- Validate Center belongs to Governorate
+  -- Level 2: Validate Center belongs to Governorate (`geo_centers`)
   SELECT c.id, c.governorate_id, c.name_ar, COALESCE(c.is_active, true) AS is_active
   INTO v_center
   FROM public.geo_centers c
   WHERE c.id = p_center_id;
 
   IF NOT FOUND OR NOT v_center.is_active OR v_center.governorate_id <> v_gov.id THEN
-    RETURN QUERY SELECT false, NULL::UUID, NULL::NUMERIC, false, v_gov.name_ar, NULL::TEXT, NULL::TEXT,
+    RETURN QUERY SELECT false, NULL::UUID, NULL::TEXT, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, false,
+      v_gov.name_ar, NULL::TEXT, NULL::TEXT,
       'المركز المحدد غير مفعّل أو لا يتبع المحافظة المختارة في geo_centers';
     RETURN;
   END IF;
 
-  -- Validate Area belongs to Center & Governorate
-  SELECT a.id, a.governorate_id, a.center_id, a.parent_area_id, a.name_ar, COALESCE(a.is_active, true) AS is_active
+  -- Level 3: Validate Area belongs directly to Center & Governorate (`geo_areas`, NO parent_area_id)
+  SELECT a.id, a.governorate_id, a.center_id, a.name_ar, COALESCE(a.is_active, true) AS is_active
   INTO v_area
   FROM public.geo_areas a
   WHERE a.id = p_area_id;
@@ -131,64 +175,85 @@ BEGIN
      OR NOT v_area.is_active
      OR v_area.center_id <> v_center.id
      OR (v_area.governorate_id IS NOT NULL AND v_area.governorate_id <> v_gov.id) THEN
-    RETURN QUERY SELECT false, NULL::UUID, NULL::NUMERIC, false, v_gov.name_ar, v_center.name_ar, NULL::TEXT,
+    RETURN QUERY SELECT false, NULL::UUID, NULL::TEXT, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, false,
+      v_gov.name_ar, v_center.name_ar, NULL::TEXT,
       'المنطقة المحددة غير مفعّلة أو لا تتبع المركز والمحافظة المختارين في geo_areas';
     RETURN;
   END IF;
 
-  -- Build parent_area_id ancestor chain (child first, up to 6 levels)
-  v_ptr := v_area.id;
-  WHILE v_ptr IS NOT NULL AND v_guard < 6 LOOP
-    v_guard := v_guard + 1;
-    EXIT WHEN v_ptr = ANY(v_area_chain);
-    v_area_chain := array_append(v_area_chain, v_ptr);
-
-    SELECT parent_area_id INTO v_ptr
-    FROM public.geo_areas
-    WHERE id = v_ptr;
-  END LOOP;
-
-  -- Pick most specific active tariff in delivery_area_tariffs (area_chain -> center -> governorate)
+  -- Pick most specific active tariff in delivery_area_tariffs:
+  -- 1) Area (`area_id = v_area.id`)
+  -- 2) Center (`area_id IS NULL AND center_id = v_center.id`)
+  -- 3) Governorate (`area_id IS NULL AND center_id IS NULL AND governorate_id = v_gov.id`)
   SELECT t.*
   INTO v_tariff
   FROM public.delivery_area_tariffs t
   WHERE t.is_enabled = true
-    AND t.service_type IN ('household', 'household_delivery', 'delivery', 'home_delivery', 'groceries')
-    AND (t.delivery_owner IS NULL OR t.delivery_owner = 'talabaty')
+    AND t.service_type = 'household_shortages'
+    AND t.delivery_owner = 'platform'
     AND t.restaurant_id IS NULL
     AND (t.governorate_id IS NULL OR t.governorate_id = v_gov.id)
     AND (t.center_id IS NULL OR t.center_id = v_center.id)
     AND (
-      t.area_id = ANY(v_area_chain)
+      t.area_id = v_area.id
       OR (t.area_id IS NULL AND t.center_id = v_center.id)
       OR (t.area_id IS NULL AND t.center_id IS NULL AND t.governorate_id = v_gov.id)
     )
   ORDER BY
     CASE
-      WHEN t.area_id IS NOT NULL THEN array_position(v_area_chain, t.area_id)
-      WHEN t.center_id IS NOT NULL THEN 100
-      ELSE 200
+      WHEN t.area_id = v_area.id THEN 1
+      WHEN t.area_id IS NULL AND t.center_id = v_center.id THEN 2
+      ELSE 3
     END ASC,
     t.updated_at DESC NULLS LAST
   LIMIT 1;
 
   IF NOT FOUND THEN
-    RETURN QUERY SELECT false, NULL::UUID, NULL::NUMERIC, false, v_gov.name_ar, v_center.name_ar, v_area.name_ar,
+    RETURN QUERY SELECT false, NULL::UUID, NULL::TEXT, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, false,
+      v_gov.name_ar, v_center.name_ar, v_area.name_ar,
       'لا توجد تسعيرة توصيل مفعّلة لهذا النطاق الجغرافي في delivery_area_tariffs';
     RETURN;
   END IF;
 
   IF NOT COALESCE(v_tariff.is_free_delivery, false)
      AND (v_tariff.customer_delivery_fee IS NULL OR v_tariff.customer_delivery_fee < 0) THEN
-    RETURN QUERY SELECT false, v_tariff.id, NULL::NUMERIC, false, v_gov.name_ar, v_center.name_ar, v_area.name_ar,
+    RETURN QUERY SELECT false, v_tariff.id, NULL::TEXT, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC, false,
+      v_gov.name_ar, v_center.name_ar, v_area.name_ar,
       'تسعيرة التوصيل لهذه المنطقة غير مكتملة في النظام المركزي';
     RETURN;
   END IF;
 
+  v_level := CASE
+    WHEN v_tariff.area_id IS NOT NULL THEN 'area'
+    WHEN v_tariff.center_id IS NOT NULL THEN 'center'
+    ELSE 'governorate'
+  END;
+
+  v_customer_fee := CASE
+    WHEN COALESCE(v_tariff.is_free_delivery, false) THEN 0::NUMERIC
+    ELSE v_tariff.customer_delivery_fee
+  END;
+  v_base_fee := CASE
+    WHEN COALESCE(v_tariff.is_free_delivery, false) THEN 0::NUMERIC
+    ELSE COALESCE(v_tariff.base_fee, v_customer_fee)
+  END;
+  v_admin_comm := CASE
+    WHEN COALESCE(v_tariff.is_free_delivery, false) THEN 0::NUMERIC
+    ELSE COALESCE(v_tariff.admin_commission, 0::NUMERIC)
+  END;
+  v_driver_net := CASE
+    WHEN COALESCE(v_tariff.is_free_delivery, false) THEN 0::NUMERIC
+    ELSE COALESCE(v_tariff.driver_net, GREATEST(0::NUMERIC, v_customer_fee - v_admin_comm))
+  END;
+
   RETURN QUERY SELECT
     true,
     v_tariff.id,
-    CASE WHEN COALESCE(v_tariff.is_free_delivery, false) THEN 0::NUMERIC ELSE v_tariff.customer_delivery_fee END,
+    v_level,
+    v_base_fee,
+    v_admin_comm,
+    v_driver_net,
+    v_customer_fee,
     COALESCE(v_tariff.is_free_delivery, false),
     v_gov.name_ar,
     v_center.name_ar,
@@ -199,7 +264,7 @@ $$;
 
 
 -- 2B. Fix BEFORE INSERT Trigger on public.delivery_orders
--- Stops overwriting central tariff / free delivery fees with 15.00!
+-- Stops overwriting central tariff / free delivery fees with 15.00 and locks immutable snapshot!
 CREATE OR REPLACE FUNCTION public.fn_enforce_delivery_orders_insert()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -229,36 +294,41 @@ BEGIN
   END IF;
 
   -- 3. Strict GPS coordinate validation (reject NULL and 0,0)
-  IF NEW.latitude IS NULL OR NEW.longitude IS NULL
-     OR (ABS(NEW.latitude) < 0.0001 AND ABS(NEW.longitude) < 0.0001)
-     OR NEW.latitude < -90 OR NEW.latitude > 90
-     OR NEW.longitude < -180 OR NEW.longitude > 180 THEN
+  IF NEW.delivery_latitude IS NULL OR NEW.delivery_longitude IS NULL
+     OR (ABS(NEW.delivery_latitude) < 0.0001 AND ABS(NEW.delivery_longitude) < 0.0001)
+     OR NEW.delivery_latitude < -90 OR NEW.delivery_latitude > 90
+     OR NEW.delivery_longitude < -180 OR NEW.delivery_longitude > 180 THEN
     RAISE EXCEPTION 'إحداثيات GPS غير صالحة أو مفقودة على طلب التوصيل.';
   END IF;
 
-  -- 4. Validate central geo hierarchy & compute authoritative central delivery fee
+  -- 4. Validate central 3-level geo hierarchy & compute authoritative central delivery fee
   SELECT *
   INTO v_tariff
   FROM public.fn_resolve_central_household_tariff(
-    NEW.governorate_id,
-    NEW.center_id,
-    NEW.area_id
+    NEW.delivery_governorate_id,
+    NEW.delivery_center_id,
+    NEW.delivery_area_id
   );
 
   IF NOT COALESCE(v_tariff.covered, false) OR v_tariff.customer_delivery_fee IS NULL THEN
     RAISE EXCEPTION '%', COALESCE(v_tariff.reason, 'المنطقة غير مغطاة بالتسعيرة المركزية للتوصيل.');
   END IF;
 
-  -- Canonicalize names and enforce server-authoritative central fee (respects 0 EGP free delivery)
+  -- Canonicalize names & persist full central tariff accounting snapshot
   NEW.governorate_name := COALESCE(NULLIF(TRIM(v_tariff.governorate_name), ''), NEW.governorate_name);
   NEW.markaz_name := COALESCE(NULLIF(TRIM(v_tariff.center_name), ''), NEW.markaz_name);
-  NEW.area_name := COALESCE(NULLIF(TRIM(v_tariff.area_name), ''), NEW.area_name);
+  NEW.delivery_area_name := COALESCE(NULLIF(TRIM(v_tariff.area_name), ''), NEW.delivery_area_name);
+  NEW.delivery_tariff_id := v_tariff.tariff_id;
+  NEW.delivery_base_fee := v_tariff.base_fee;
+  NEW.delivery_admin_commission := v_tariff.admin_commission;
+  NEW.delivery_driver_net := v_tariff.driver_net;
+  NEW.customer_delivery_fee := v_tariff.customer_delivery_fee;
   NEW.delivery_fee := v_tariff.customer_delivery_fee;
 
   -- 5. Initial status & total calculation
   NEW.status := 'pending_review';
   NEW.subtotal := COALESCE(NEW.subtotal, 0);
-  NEW.total_amount := NEW.subtotal + NEW.delivery_fee;
+  NEW.total_amount := NEW.subtotal + NEW.customer_delivery_fee;
 
   IF NEW.created_by IS NULL THEN
     NEW.created_by := auth.uid();
@@ -352,15 +422,20 @@ BEGIN
     customer_name,
     customer_phone,
     country,
-    governorate_id,
+    delivery_governorate_id,
     governorate_name,
-    center_id,
+    delivery_center_id,
     markaz_name,
-    area_id,
-    area_name,
-    latitude,
-    longitude,
+    delivery_area_id,
+    delivery_area_name,
+    delivery_latitude,
+    delivery_longitude,
     detailed_address,
+    delivery_tariff_id,
+    delivery_base_fee,
+    delivery_admin_commission,
+    delivery_driver_net,
+    customer_delivery_fee,
     delivery_fee,
     subtotal,
     total_amount,
@@ -385,6 +460,11 @@ BEGIN
     v_addr.latitude,
     v_addr.longitude,
     v_addr.detailed_address,
+    v_tariff.tariff_id,
+    v_tariff.base_fee,
+    v_tariff.admin_commission,
+    v_tariff.driver_net,
+    v_fee,
     v_fee,
     v_subtotal,
     v_total,
@@ -537,15 +617,20 @@ BEGIN
     customer_name,
     customer_phone,
     country,
-    governorate_id,
+    delivery_governorate_id,
     governorate_name,
-    center_id,
+    delivery_center_id,
     markaz_name,
-    area_id,
-    area_name,
-    latitude,
-    longitude,
+    delivery_area_id,
+    delivery_area_name,
+    delivery_latitude,
+    delivery_longitude,
     detailed_address,
+    delivery_tariff_id,
+    delivery_base_fee,
+    delivery_admin_commission,
+    delivery_driver_net,
+    customer_delivery_fee,
     delivery_fee,
     subtotal,
     total_amount,
@@ -568,6 +653,11 @@ BEGIN
     v_address.latitude,
     v_address.longitude,
     v_address.detailed_address,
+    v_tariff.tariff_id,
+    v_tariff.base_fee,
+    v_tariff.admin_commission,
+    v_tariff.driver_net,
+    v_fee,
     v_fee,
     v_subtotal,
     v_total,

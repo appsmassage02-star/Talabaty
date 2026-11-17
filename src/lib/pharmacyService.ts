@@ -1091,10 +1091,12 @@ class PharmacyService {
 
     const tariffRes = await resolveCentralTariff({
       serviceType: "pharmacy",
-      deliveryOwner: "talabaty",
+      deliveryOwner: "platform",
       governorateId: address.governorate_id,
       centerId: address.center_id,
       areaId: address.area_id,
+      latitude: gpsCheck.latitude,
+      longitude: gpsCheck.longitude,
     });
 
     return {

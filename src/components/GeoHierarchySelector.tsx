@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, RefreshCw, MapPinned } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import {
   getActiveAreas,
   getActiveCenters,
@@ -50,9 +50,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
   const [geoError, setGeoError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [legacyApplied, setLegacyApplied] = useState(false);
-
-  // Selected root area vs sub-area (parent_area_id hierarchy)
-  const [selectedPrimaryAreaId, setSelectedPrimaryAreaId] = useState<string>('');
 
   // Keep refs synchronized to prevent stale closures inside async cascade effects
   const valueRef = useRef<GeoSelectionValue>(value);
@@ -134,14 +131,12 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
     if (!requestedGovId) {
       setCenters([]);
       setAreas([]);
-      setSelectedPrimaryAreaId('');
       setLoadingCenters(false);
       return;
     }
 
     setCenters([]);
     setAreas([]);
-    setSelectedPrimaryAreaId('');
     setLoadingCenters(true);
     setGeoError(null);
 
@@ -205,7 +200,7 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
     };
   }, [value.governorateId, reloadNonce, initialLegacyNames?.centerName]);
 
-  // 4) Load areas whenever centerId changes
+  // 4) Load areas whenever centerId changes (direct Governorate -> Center -> Area hierarchy)
   useEffect(() => {
     let active = true;
     const requestedGovId = value.governorateId;
@@ -213,13 +208,11 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
 
     if (!requestedGovId || !requestedCenterId) {
       setAreas([]);
-      setSelectedPrimaryAreaId('');
       setLoadingAreas(false);
       return;
     }
 
     setAreas([]);
-    setSelectedPrimaryAreaId('');
     setLoadingAreas(true);
     setGeoError(null);
 
@@ -239,7 +232,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
         if (currentVal.areaId) {
           const currentArea = list.find((a) => a.id === currentVal.areaId);
           if (!currentArea) {
-            setSelectedPrimaryAreaId('');
             onChangeRef.current({
               ...currentVal,
               areaId: '',
@@ -247,7 +239,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
             });
             return;
           }
-          setSelectedPrimaryAreaId(currentArea.parent_area_id || currentArea.id);
           if (currentVal.areaName !== currentArea.name_ar) {
             onChangeRef.current({
               ...currentVal,
@@ -265,7 +256,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
               normalizeArabicName(a.name_en) === normTarget
           );
           if (matchedArea) {
-            setSelectedPrimaryAreaId(matchedArea.parent_area_id || matchedArea.id);
             onChangeRef.current({
               ...currentVal,
               areaId: matchedArea.id,
@@ -294,18 +284,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
     };
   }, [value.governorateId, value.centerId, reloadNonce, initialLegacyNames?.areaName]);
 
-  const primaryAreas = useMemo(
-    () => areas.filter((a) => !a.parent_area_id),
-    [areas]
-  );
-
-  const subAreas = useMemo(() => {
-    const parentId = selectedPrimaryAreaId || value.areaId;
-    if (!parentId) return [];
-    return areas.filter((a) => a.parent_area_id === parentId);
-  }, [areas, selectedPrimaryAreaId, value.areaId]);
-
-  const effectivePrimaryOptions = primaryAreas.length > 0 ? primaryAreas : areas;
   const selectClass = compact
     ? 'w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-emerald-500 disabled:opacity-60'
     : 'w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none focus:border-emerald-500 disabled:opacity-60';
@@ -341,7 +319,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
               const gov = governorates.find((g) => g.id === nextId);
               setCenters([]);
               setAreas([]);
-              setSelectedPrimaryAreaId('');
               onChange({
                 governorateId: nextId,
                 governorateName: gov?.name_ar || '',
@@ -382,7 +359,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
               const nextId = e.target.value;
               const center = centers.find((c) => c.id === nextId);
               setAreas([]);
-              setSelectedPrimaryAreaId('');
               onChange({
                 ...value,
                 centerId: nextId,
@@ -418,12 +394,11 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
             {loadingAreas && <Loader2 className="w-3 h-3 animate-spin text-emerald-600" />}
           </label>
           <select
-            value={subAreas.length > 0 && selectedPrimaryAreaId ? selectedPrimaryAreaId : value.areaId}
+            value={value.areaId}
             disabled={disabled || !value.centerId || loadingAreas}
             onChange={(e) => {
               const nextId = e.target.value;
               const area = areas.find((a) => a.id === nextId);
-              setSelectedPrimaryAreaId(nextId);
               onChange({
                 ...value,
                 areaId: nextId,
@@ -438,11 +413,11 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
                 ? 'اختر المركز أولاً'
                 : loadingAreas
                 ? 'جاري تحميل المناطق...'
-                : effectivePrimaryOptions.length === 0
+                : areas.length === 0
                 ? 'لا توجد مناطق مفعّلة لهذا المركز'
                 : '-- اختر المنطقة / الحي --'}
             </option>
-            {effectivePrimaryOptions.map((a) => (
+            {areas.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name_ar}
               </option>
@@ -450,46 +425,6 @@ export const GeoHierarchySelector: React.FC<GeoHierarchySelectorProps> = ({
           </select>
         </div>
       </div>
-
-      {/* Optional 4th level: Child Sub-Area if parent_area_id hierarchy exists */}
-      {subAreas.length > 0 && (
-        <div className="space-y-1">
-          <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
-            <MapPinned className="w-3 h-3 text-emerald-600" />
-            <span>النطاق الفرعي (اختياري)</span>
-          </label>
-          <select
-            value={value.areaId === selectedPrimaryAreaId ? '' : value.areaId}
-            disabled={disabled}
-            onChange={(e) => {
-              const nextSubId = e.target.value;
-              if (!nextSubId) {
-                const parent = areas.find((a) => a.id === selectedPrimaryAreaId);
-                onChange({
-                  ...value,
-                  areaId: selectedPrimaryAreaId,
-                  areaName: parent?.name_ar || '',
-                });
-                return;
-              }
-              const sub = areas.find((a) => a.id === nextSubId);
-              onChange({
-                ...value,
-                areaId: nextSubId,
-                areaName: sub?.name_ar || '',
-              });
-            }}
-            className={selectClass}
-          >
-            <option value="">كامل المنطقة الرئيسية</option>
-            {subAreas.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name_ar}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
     </div>
   );
 };

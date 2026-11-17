@@ -509,7 +509,7 @@ export const MyOrdersSection: React.FC = () => {
                             {order.actual_total_amount?.toFixed(2)} {budgetConfig.currency}
                           </div>
                           <div className="text-[10px] text-emerald-600 font-bold">
-                            الفعلي: {order.actual_items_total?.toFixed(2)} + شحن: {order.delivery_fee?.toFixed(2)}
+                            الفعلي: {order.actual_items_total?.toFixed(2)} + شحن: {(order.customer_delivery_fee ?? order.delivery_fee)?.toFixed(2)}
                           </div>
                         </>
                       ) : (
@@ -518,7 +518,7 @@ export const MyOrdersSection: React.FC = () => {
                             {order.total_amount?.toFixed(2)} {budgetConfig.currency}
                           </div>
                           <div className="text-[10px] text-slate-400">
-                            مشتريات: {order.subtotal?.toFixed(2)} + توصيل: {order.delivery_fee?.toFixed(2)}
+                            مشتريات: {order.subtotal?.toFixed(2)} + توصيل: {(order.customer_delivery_fee ?? order.delivery_fee)?.toFixed(2)}
                           </div>
                         </>
                       )}
@@ -698,7 +698,7 @@ export const MyOrdersSection: React.FC = () => {
                           <div className="flex items-center justify-between text-slate-600">
                             <span>تكلفة التوصيل:</span>
                             <span className="font-mono font-bold text-slate-700">
-                              +{order.delivery_fee?.toFixed(2)} {budgetConfig.currency}
+                              +{(order.customer_delivery_fee ?? order.delivery_fee)?.toFixed(2)} {budgetConfig.currency}
                             </span>
                           </div>
                           <div className="pt-1.5 border-t border-slate-100 flex items-center justify-between text-slate-900 font-black text-sm">
@@ -719,7 +719,7 @@ export const MyOrdersSection: React.FC = () => {
                           <div className="flex items-center justify-between text-slate-600">
                             <span>تكلفة التوصيل:</span>
                             <span className="font-mono font-bold text-emerald-700">
-                              +{order.delivery_fee?.toFixed(2)} {budgetConfig.currency}
+                              +{(order.customer_delivery_fee ?? order.delivery_fee)?.toFixed(2)} {budgetConfig.currency}
                             </span>
                           </div>
                           <div className="pt-1.5 border-t border-slate-100 flex items-center justify-between text-slate-900 font-black text-sm">

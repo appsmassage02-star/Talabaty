@@ -7,6 +7,7 @@ export interface GeoGovernorate {
   name_en?: string | null;
   is_active?: boolean;
   sort_order?: number;
+  boundary?: unknown | null;
 }
 
 export interface GeoCenter {
@@ -16,21 +17,22 @@ export interface GeoCenter {
   name_en?: string | null;
   is_active?: boolean;
   sort_order?: number;
+  boundary?: unknown | null;
 }
 
 export interface GeoArea {
   id: string;
   governorate_id: string;
   center_id: string;
-  parent_area_id?: string | null;
   name_ar: string;
   name_en?: string | null;
   is_active?: boolean;
   sort_order?: number;
+  boundary?: unknown | null;
 }
 
-export type ServiceCategoryType = 'household' | 'pharmacy' | 'restaurant';
-export type DeliveryOwnerType = 'talabaty' | 'restaurant';
+export type ServiceCategoryType = 'household_shortages' | 'pharmacy' | 'ready_food';
+export type DeliveryOwnerType = 'platform' | 'restaurant';
 
 export interface DeliveryAreaTariff {
   id: string;
@@ -44,6 +46,10 @@ export interface DeliveryAreaTariff {
   is_enabled: boolean;
   is_free_delivery: boolean;
   customer_delivery_fee: number | null;
+  base_fee?: number | null;
+  admin_commission?: number | null;
+  driver_net?: number | null;
+  driver_net_fee?: number | null;
   free_delivery_cost_bearer?: string | null;
   estimated_delivery_minutes?: number | null;
 }
@@ -52,11 +58,18 @@ export interface CentralTariffResolution {
   covered: boolean;
   tariffId: string | null;
   customerDeliveryFee: number | null;
+  baseFee: number | null;
+  adminCommission: number | null;
+  driverNet: number | null;
   isFreeDelivery: boolean;
   freeDeliveryCostBearer: string | null;
   estimatedDeliveryMinutes: number | null;
-  matchedLevel: 'area' | 'parent_area' | 'center' | 'governorate' | null;
+  matchedLevel: 'area' | 'center' | 'governorate' | null;
   applicableDeliveryOwner: DeliveryOwnerType | null;
+  boundaryChecked?: boolean;
+  boundaryLevel?: 'area' | 'center' | 'governorate' | null;
+  boundaryFailed?: boolean;
+  queryFailed?: boolean;
   reason?: string;
 }
 
@@ -69,6 +82,13 @@ export interface GpsValidationResult {
   valid: boolean;
   latitude: number | null;
   longitude: number | null;
+  reason?: string;
+}
+
+export interface BoundaryCheckResult {
+  checked: boolean;
+  inside: boolean;
+  level: 'area' | 'center' | 'governorate' | null;
   reason?: string;
 }
 
@@ -87,12 +107,6 @@ export interface GeoHierarchyValidationResult {
   center?: GeoCenter;
   area?: GeoArea;
 }
-
-const SERVICE_TYPE_CANDIDATES: Record<ServiceCategoryType, string[]> = {
-  household: ['household', 'household_delivery', 'delivery', 'home_delivery', 'groceries'],
-  pharmacy: ['pharmacy', 'pharmacy_delivery'],
-  restaurant: ['restaurant', 'restaurants', 'food', 'bite_and_bait'],
-};
 
 function getClient(client?: SupabaseClient): SupabaseClient {
   const c = client || supabase;
@@ -225,9 +239,334 @@ export function normalizeArabicName(input?: string | null): string {
     .replace(/\s+/g, ' ');
 }
 
+// ---------------------------------------------------------------------------
+// Boundary Geometry Evaluation (GeoJSON Polygon / MultiPolygon / Feature / BBox / Circle)
+// ---------------------------------------------------------------------------
+
+type LngLat = [number, number];
+
+function parseBoundaryValue(raw: unknown): any {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === 'object') {
+    if (Array.isArray(raw) && raw.length === 0) return null;
+    if (!Array.isArray(raw) && Object.keys(raw as Record<string, unknown>).length === 0) {
+      return null;
+    }
+    return raw;
+  }
+  return null;
+}
+
+function toLngLatPoint(pt: any): LngLat | null {
+  if (Array.isArray(pt) && pt.length >= 2) {
+    const lng = Number(pt[0]);
+    const lat = Number(pt[1]);
+    if (Number.isFinite(lng) && Number.isFinite(lat)) return [lng, lat];
+    return null;
+  }
+  if (pt && typeof pt === 'object') {
+    const latRaw = pt.lat ?? pt.latitude;
+    const lngRaw = pt.lng ?? pt.lon ?? pt.longitude;
+    const lat = Number(latRaw);
+    const lng = Number(lngRaw);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return [lng, lat];
+  }
+  return null;
+}
+
+function normalizeRing(rawRing: unknown): LngLat[] | null {
+  if (!Array.isArray(rawRing) || rawRing.length < 3) return null;
+  const pts: LngLat[] = [];
+  for (const item of rawRing) {
+    const pt = toLngLatPoint(item);
+    if (!pt) return null;
+    pts.push(pt);
+  }
+  return pts.length >= 3 ? pts : null;
+}
+
+function isPointOnSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): boolean {
+  const eps = 1e-11;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= eps * eps) {
+    const pxDx = px - ax;
+    const pyDy = py - ay;
+    return pxDx * pxDx + pyDy * pyDy <= eps * eps;
+  }
+  const cross = (px - ax) * dy - (py - ay) * dx;
+  if (Math.abs(cross) > eps * Math.sqrt(lenSq)) return false;
+  const dot = (px - ax) * dx + (py - ay) * dy;
+  if (dot < -eps) return false;
+  return dot <= lenSq + eps;
+}
+
+function isPointInRing(lng: number, lat: number, ring: LngLat[]): boolean {
+  let inside = false;
+  const n = ring.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+
+    if (isPointOnSegment(lng, lat, xi, yi, xj, yj)) {
+      return true;
+    }
+
+    const intersect =
+      yi > lat !== yj > lat &&
+      lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function isPointInPolygonRings(lng: number, lat: number, ringsRaw: unknown): boolean | null {
+  if (!Array.isArray(ringsRaw) || ringsRaw.length === 0) return null;
+
+  // Handle simple array of points passed directly as polygon: [[lng, lat], ...] or [{lat, lng}, ...]
+  const firstPt = toLngLatPoint(ringsRaw[0]);
+  if (firstPt) {
+    const singleRing = normalizeRing(ringsRaw);
+    if (!singleRing) return null;
+    return isPointInRing(lng, lat, singleRing);
+  }
+
+  // Standard GeoJSON Polygon: [outerRing, ...holeRings]
+  const outerRing = normalizeRing(ringsRaw[0]);
+  if (!outerRing) return null;
+  if (!isPointInRing(lng, lat, outerRing)) return false;
+
+  for (let i = 1; i < ringsRaw.length; i += 1) {
+    const hole = normalizeRing(ringsRaw[i]);
+    if (hole && isPointInRing(lng, lat, hole)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function haversineDistanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function evaluateSingleBoundaryObject(
+  lat: number,
+  lng: number,
+  boundaryObj: any
+): boolean | null {
+  if (!boundaryObj) return null;
+
+  if (Array.isArray(boundaryObj)) {
+    return isPointInPolygonRings(lng, lat, boundaryObj);
+  }
+
+  if (typeof boundaryObj !== 'object') return null;
+
+  const type = String(boundaryObj.type || '').trim().toLowerCase();
+
+  if (type === 'feature' && boundaryObj.geometry) {
+    return evaluateSingleBoundaryObject(lat, lng, boundaryObj.geometry);
+  }
+
+  if (type === 'featurecollection' && Array.isArray(boundaryObj.features)) {
+    let hasAnyGeometry = false;
+    for (const feature of boundaryObj.features) {
+      const res = evaluateSingleBoundaryObject(lat, lng, feature);
+      if (res !== null) {
+        hasAnyGeometry = true;
+        if (res === true) return true;
+      }
+    }
+    return hasAnyGeometry ? false : null;
+  }
+
+  if (type === 'polygon' && Array.isArray(boundaryObj.coordinates)) {
+    return isPointInPolygonRings(lng, lat, boundaryObj.coordinates);
+  }
+
+  if (type === 'multipolygon' && Array.isArray(boundaryObj.coordinates)) {
+    let hasValidPoly = false;
+    for (const polyCoords of boundaryObj.coordinates) {
+      const res = isPointInPolygonRings(lng, lat, polyCoords);
+      if (res !== null) {
+        hasValidPoly = true;
+        if (res === true) return true;
+      }
+    }
+    return hasValidPoly ? false : null;
+  }
+
+  if (type === 'circle' || boundaryObj.radius_m !== undefined || boundaryObj.radiusMeters !== undefined) {
+    const centerPt = toLngLatPoint(boundaryObj.center || boundaryObj.coordinates);
+    const radiusM = Number(boundaryObj.radius_m ?? boundaryObj.radiusMeters ?? boundaryObj.radius);
+    if (centerPt && Number.isFinite(radiusM) && radiusM > 0) {
+      const dist = haversineDistanceMeters(lat, lng, centerPt[1], centerPt[0]);
+      return dist <= radiusM;
+    }
+  }
+
+  if (
+    boundaryObj.minLat !== undefined &&
+    boundaryObj.maxLat !== undefined &&
+    boundaryObj.minLng !== undefined &&
+    boundaryObj.maxLng !== undefined
+  ) {
+    return (
+      lat >= Number(boundaryObj.minLat) &&
+      lat <= Number(boundaryObj.maxLat) &&
+      lng >= Number(boundaryObj.minLng) &&
+      lng <= Number(boundaryObj.maxLng)
+    );
+  }
+
+  if (
+    boundaryObj.south !== undefined &&
+    boundaryObj.north !== undefined &&
+    boundaryObj.west !== undefined &&
+    boundaryObj.east !== undefined
+  ) {
+    return (
+      lat >= Number(boundaryObj.south) &&
+      lat <= Number(boundaryObj.north) &&
+      lng >= Number(boundaryObj.west) &&
+      lng <= Number(boundaryObj.east)
+    );
+  }
+
+  if (Array.isArray(boundaryObj.coordinates)) {
+    return isPointInPolygonRings(lng, lat, boundaryObj.coordinates);
+  }
+
+  if (Array.isArray(boundaryObj.polygon)) {
+    return isPointInPolygonRings(lng, lat, boundaryObj.polygon);
+  }
+
+  if (Array.isArray(boundaryObj.rings)) {
+    return isPointInPolygonRings(lng, lat, boundaryObj.rings);
+  }
+
+  return null;
+}
+
+/**
+ * Evaluates whether client GPS (latitude, longitude) lies inside the geographic `boundary`.
+ * Priority:
+ *   1) `geo_areas.boundary`
+ *   2) `geo_centers.boundary` (if area has no boundary)
+ *   3) `geo_governorates.boundary` (if center has no boundary)
+ * If NO level has a usable boundary -> returns `{ checked: false, inside: true, level: null }`
+ * so delivery relies strictly on central geo IDs and `delivery_area_tariffs` without blocking.
+ * Never infers or overrides selected area/center/governorate from GPS.
+ */
+export function checkGpsWithinGeoBoundary(
+  latitude: number | null | undefined,
+  longitude: number | null | undefined,
+  hierarchy: {
+    area?: Pick<GeoArea, 'name_ar' | 'boundary'> | null;
+    center?: Pick<GeoCenter, 'name_ar' | 'boundary'> | null;
+    governorate?: Pick<GeoGovernorate, 'name_ar' | 'boundary'> | null;
+  }
+): BoundaryCheckResult {
+  const candidates: Array<{
+    level: 'area' | 'center' | 'governorate';
+    labelAr: string;
+    nameAr: string;
+    parsed: any;
+  }> = [
+    {
+      level: 'area',
+      labelAr: 'المنطقة',
+      nameAr: hierarchy.area?.name_ar || '',
+      parsed: parseBoundaryValue(hierarchy.area?.boundary),
+    },
+    {
+      level: 'center',
+      labelAr: 'المركز / المدينة',
+      nameAr: hierarchy.center?.name_ar || '',
+      parsed: parseBoundaryValue(hierarchy.center?.boundary),
+    },
+    {
+      level: 'governorate',
+      labelAr: 'المحافظة',
+      nameAr: hierarchy.governorate?.name_ar || '',
+      parsed: parseBoundaryValue(hierarchy.governorate?.boundary),
+    },
+  ];
+
+  const gpsCheck = validateGpsCoordinates(latitude, longitude);
+
+  for (const candidate of candidates) {
+    if (!candidate.parsed) continue;
+
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      return {
+        checked: true,
+        inside: false,
+        level: candidate.level,
+        reason: gpsCheck.reason || 'إحداثيات GPS غير صالحة للتحقق من النطاق الجغرافي.',
+      };
+    }
+
+    const evaluation = evaluateSingleBoundaryObject(
+      gpsCheck.latitude,
+      gpsCheck.longitude,
+      candidate.parsed
+    );
+
+    if (evaluation === null) {
+      continue;
+    }
+
+    if (evaluation) {
+      return {
+        checked: true,
+        inside: true,
+        level: candidate.level,
+      };
+    }
+
+    const targetName = candidate.nameAr ? ` (${candidate.nameAr})` : '';
+    return {
+      checked: true,
+      inside: false,
+      level: candidate.level,
+      reason: `إحداثيات موقعك الجغرافي (GPS) تقع خارج حدود ${candidate.labelAr}${targetName} المحددة.`,
+    };
+  }
+
+  return {
+    checked: false,
+    inside: true,
+    level: null,
+  };
+}
+
 /**
  * Resolves active governorates strictly from central `geo_governorates` table.
- * Never selects `code` or unverified columns; handles optional `is_active`/`sort_order` cleanly.
  */
 export async function getActiveGovernorates(client?: SupabaseClient): Promise<GeoGovernorate[]> {
   const db = getClient(client);
@@ -254,6 +593,7 @@ export async function getActiveGovernorates(client?: SupabaseClient): Promise<Ge
       name_en: row.name_en ?? null,
       is_active: row.is_active !== false,
       sort_order: typeof row.sort_order === 'number' ? row.sort_order : Number(row.sort_order) || 0,
+      boundary: row.boundary ?? null,
     }));
 
   return sortGeoRows(normalized);
@@ -261,7 +601,6 @@ export async function getActiveGovernorates(client?: SupabaseClient): Promise<Ge
 
 /**
  * Resolves active centers strictly from central `geo_centers` filtered by `governorate_id`.
- * Never selects `geo_centers.code` or any unverified column.
  */
 export async function getActiveCenters(
   governorateId: string,
@@ -305,6 +644,7 @@ export async function getActiveCenters(
       name_en: row.name_en ?? null,
       is_active: row.is_active !== false,
       sort_order: typeof row.sort_order === 'number' ? row.sort_order : Number(row.sort_order) || 0,
+      boundary: row.boundary ?? null,
     }));
 
   return sortGeoRows(normalized);
@@ -312,7 +652,7 @@ export async function getActiveCenters(
 
 /**
  * Resolves active areas strictly from central `geo_areas` filtered by `governorate_id` and `center_id`.
- * Never selects unverified columns such as `code`.
+ * Strictly 3-level direct hierarchy: Governorate -> Center -> Area (no `parent_area_id`).
  */
 export async function getActiveAreas(
   governorateId: string,
@@ -357,11 +697,11 @@ export async function getActiveAreas(
       id: String(row.id),
       governorate_id: String(row.governorate_id || governorateId),
       center_id: String(row.center_id),
-      parent_area_id: row.parent_area_id ? String(row.parent_area_id) : null,
       name_ar: String(row.name_ar),
       name_en: row.name_en ?? null,
       is_active: row.is_active !== false,
       sort_order: typeof row.sort_order === 'number' ? row.sort_order : Number(row.sort_order) || 0,
+      boundary: row.boundary ?? null,
     }));
 
   return sortGeoRows(normalized);
@@ -369,7 +709,7 @@ export async function getActiveAreas(
 
 /**
  * Validates that (governorateId, centerId, areaId) all exist in central `geo_*` tables,
- * are active (`is_active !== false`), and respect strict parent-child hierarchy:
+ * are active (`is_active !== false`), and respect strict 3-level parent-child hierarchy:
  * center.governorate_id === governorateId AND area.center_id === centerId AND area.governorate_id === governorateId.
  */
 export async function validateGeoHierarchySelection(
@@ -450,6 +790,7 @@ export async function validateGeoHierarchySelection(
       name_en: govRow.name_en ?? null,
       is_active: govRow.is_active !== false,
       sort_order: Number(govRow.sort_order) || 0,
+      boundary: govRow.boundary ?? null,
     },
     center: {
       id: String(centerRow.id),
@@ -458,55 +799,25 @@ export async function validateGeoHierarchySelection(
       name_en: centerRow.name_en ?? null,
       is_active: centerRow.is_active !== false,
       sort_order: Number(centerRow.sort_order) || 0,
+      boundary: centerRow.boundary ?? null,
     },
     area: {
       id: String(areaRow.id),
       governorate_id: String(areaRow.governorate_id || govRow.id),
       center_id: String(areaRow.center_id),
-      parent_area_id: areaRow.parent_area_id ? String(areaRow.parent_area_id) : null,
       name_ar: String(areaRow.name_ar || ''),
       name_en: areaRow.name_en ?? null,
       is_active: areaRow.is_active !== false,
       sort_order: Number(areaRow.sort_order) || 0,
+      boundary: areaRow.boundary ?? null,
     },
   };
 }
 
 /**
- * Collects area ancestor chain (areaId -> parent_area_id -> ...) so hierarchical area tariffs/scopes match cleanly.
- */
-async function resolveAreaAncestorIds(
-  areaId: string | null | undefined,
-  client?: SupabaseClient
-): Promise<string[]> {
-  if (!areaId) return [];
-  const db = getClient(client);
-  const chain: string[] = [];
-  let currentId: string | null | undefined = areaId;
-  let guard = 0;
-
-  while (currentId && guard < 6) {
-    guard += 1;
-    if (chain.includes(currentId)) break;
-    chain.push(currentId);
-
-    const { data, error } = await db
-      .from('geo_areas')
-      .select('*')
-      .eq('id', currentId)
-      .maybeSingle();
-
-    if (error || !data) break;
-    currentId = (data as Record<string, any>).parent_area_id || null;
-  }
-
-  return chain;
-}
-
-/**
  * Picks the most specific matching tariff from `delivery_area_tariffs` rows.
- * Specificity precedence:
- * 1) area_id match (exact area first, then parent_area chain)
+ * Specificity precedence (NO `parent_area_id`):
+ * 1) area_id match
  * 2) center_id match (with null area_id)
  * 3) governorate_id match (with null center_id & null area_id)
  * Within each level, prefers explicit `restaurant_id` match over generic `restaurant_id IS NULL`.
@@ -515,9 +826,10 @@ function pickMostSpecificTariff(
   tariffs: DeliveryAreaTariff[],
   governorateId: string,
   centerId: string,
-  areaChain: string[],
-  restaurantId?: string | null
-): { tariff: DeliveryAreaTariff; matchedLevel: 'area' | 'parent_area' | 'center' | 'governorate' } | null {
+  areaId: string,
+  restaurantId?: string | null,
+  requireExactRestaurantMatch = false
+): { tariff: DeliveryAreaTariff; matchedLevel: 'area' | 'center' | 'governorate' } | null {
   const rankRestaurantMatch = (t: DeliveryAreaTariff): number => {
     if (restaurantId && t.restaurant_id === restaurantId) return 2;
     if (!t.restaurant_id) return 1;
@@ -526,26 +838,24 @@ function pickMostSpecificTariff(
 
   const eligible = tariffs.filter((t) => {
     if (t.is_enabled === false) return false;
-    if (t.restaurant_id && restaurantId && t.restaurant_id !== restaurantId) return false;
-    if (t.restaurant_id && !restaurantId) return false;
+    if (requireExactRestaurantMatch) {
+      if (!restaurantId || t.restaurant_id !== restaurantId) return false;
+    } else {
+      if (t.restaurant_id && restaurantId && t.restaurant_id !== restaurantId) return false;
+      if (t.restaurant_id && !restaurantId) return false;
+    }
     if (t.governorate_id && t.governorate_id !== governorateId) return false;
     if (t.center_id && t.center_id !== centerId) return false;
     return true;
   });
 
-  // 1) Area chain (index 0 = exact area, index > 0 = parent_area)
-  for (let idx = 0; idx < areaChain.length; idx += 1) {
-    const targetAreaId = areaChain[idx];
-    const matches = eligible
-      .filter((t) => t.area_id === targetAreaId)
-      .sort((a, b) => rankRestaurantMatch(b) - rankRestaurantMatch(a));
+  // 1) Area level
+  const areaMatches = eligible
+    .filter((t) => t.area_id === areaId)
+    .sort((a, b) => rankRestaurantMatch(b) - rankRestaurantMatch(a));
 
-    if (matches.length > 0) {
-      return {
-        tariff: matches[0],
-        matchedLevel: idx === 0 ? 'area' : 'parent_area',
-      };
-    }
+  if (areaMatches.length > 0) {
+    return { tariff: areaMatches[0], matchedLevel: 'area' };
   }
 
   // 2) Center level (center_id matches and area_id is null)
@@ -570,104 +880,138 @@ function pickMostSpecificTariff(
 }
 
 /**
- * Resolves central delivery tariff from `delivery_area_tariffs`.
- * Never reads or computes `admin_commission` or `driver_net_fee` on the client.
- * Never returns a hardcoded fallback delivery fee when covered tariff is missing.
+ * Resolves central delivery tariff from `delivery_area_tariffs` using exact `service_type` and `delivery_owner`.
+ * Enforces:
+ * - Active 3-level `geo_*` hierarchy validation
+ * - GPS boundary containment (`geo_areas.boundary` -> `geo_centers.boundary` -> `geo_governorates.boundary`)
+ * - Tariff precedence: Area -> Center -> Governorate
+ * - Exposes tariff snapshot values (`tariffId`, `baseFee`, `adminCommission`, `driverNet`, `customerDeliveryFee`)
+ * - Never falls back to hardcoded fees or legacy tables.
  */
 export async function resolveCentralTariff(params: {
   serviceType: ServiceCategoryType;
-  deliveryOwner?: DeliveryOwnerType;
+  deliveryOwner: DeliveryOwnerType;
   restaurantId?: string | null;
+  requireExactRestaurantMatch?: boolean;
   governorateId?: string | null;
   centerId?: string | null;
   areaId?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   client?: SupabaseClient;
 }): Promise<CentralTariffResolution> {
   const {
     serviceType,
     deliveryOwner,
     restaurantId,
+    requireExactRestaurantMatch = false,
     governorateId,
     centerId,
     areaId,
+    latitude,
+    longitude,
     client,
   } = params;
 
+  const emptyFailure = (
+    reason: string,
+    extra: Partial<CentralTariffResolution> = {}
+  ): CentralTariffResolution => ({
+    covered: false,
+    tariffId: null,
+    customerDeliveryFee: null,
+    baseFee: null,
+    adminCommission: null,
+    driverNet: null,
+    isFreeDelivery: false,
+    freeDeliveryCostBearer: null,
+    estimatedDeliveryMinutes: null,
+    matchedLevel: null,
+    applicableDeliveryOwner: deliveryOwner || null,
+    reason,
+    ...extra,
+  });
+
   if (!governorateId || !centerId || !areaId) {
-    return {
-      covered: false,
-      tariffId: null,
-      customerDeliveryFee: null,
-      isFreeDelivery: false,
-      freeDeliveryCostBearer: null,
-      estimatedDeliveryMinutes: null,
-      matchedLevel: null,
-      applicableDeliveryOwner: deliveryOwner || null,
-      reason: 'يجب تحديد المحافظة والمركز والمنطقة من النظام الجغرافي المعتمد أولاً',
-    };
+    return emptyFailure('يجب تحديد المحافظة والمركز والمنطقة من النظام الجغرافي المعتمد أولاً');
   }
 
   const db = getClient(client);
   const hierarchyCheck = await validateGeoHierarchySelection(governorateId, centerId, areaId, db);
   if (!hierarchyCheck.valid) {
-    return {
-      covered: false,
-      tariffId: null,
-      customerDeliveryFee: null,
-      isFreeDelivery: false,
-      freeDeliveryCostBearer: null,
-      estimatedDeliveryMinutes: null,
-      matchedLevel: null,
-      applicableDeliveryOwner: deliveryOwner || null,
-      reason: hierarchyCheck.reason || 'التسلسل الجغرافي للعنوان غير صحيح أو غير مفعّل',
-    };
+    return emptyFailure(
+      hierarchyCheck.reason || 'التسلسل الجغرافي للعنوان غير صحيح أو غير مفعّل',
+      { boundaryFailed: true }
+    );
   }
 
-  const serviceCandidates = SERVICE_TYPE_CANDIDATES[serviceType];
+  // Enforce GPS boundary check when coordinates are supplied
+  let boundaryCheck: BoundaryCheckResult = { checked: false, inside: true, level: null };
+  const hasCoordArgs = 'latitude' in params || 'longitude' in params;
+  if (hasCoordArgs) {
+    const gpsCheck = validateGpsCoordinates(latitude, longitude);
+    if (!gpsCheck.valid) {
+      return emptyFailure(
+        gpsCheck.reason || 'إحداثيات GPS مطلوبة للتحقق من النطاق الجغرافي.',
+        { boundaryFailed: true }
+      );
+    }
+    boundaryCheck = checkGpsWithinGeoBoundary(gpsCheck.latitude, gpsCheck.longitude, {
+      area: hierarchyCheck.area,
+      center: hierarchyCheck.center,
+      governorate: hierarchyCheck.governorate,
+    });
+    if (!boundaryCheck.inside) {
+      return emptyFailure(
+        boundaryCheck.reason || 'موقعك الجغرافي يقع خارج حدود المنطقة المحددة.',
+        {
+          boundaryChecked: boundaryCheck.checked,
+          boundaryLevel: boundaryCheck.level,
+          boundaryFailed: true,
+        }
+      );
+    }
+  }
 
-  const { data, error } = await db
+  let query = db
     .from('delivery_area_tariffs')
-    .select(
-      'id, service_type, delivery_owner, restaurant_id, scope_level, governorate_id, center_id, area_id, is_enabled, is_free_delivery, customer_delivery_fee, free_delivery_cost_bearer, estimated_delivery_minutes'
-    )
-    .in('service_type', serviceCandidates)
+    .select('*')
+    .eq('service_type', serviceType)
+    .eq('delivery_owner', deliveryOwner)
     .eq('is_enabled', true);
 
+  if (requireExactRestaurantMatch && restaurantId) {
+    query = query.eq('restaurant_id', restaurantId);
+  }
+
+  const { data, error } = await query;
+
   if (error) {
-    return {
-      covered: false,
-      tariffId: null,
-      customerDeliveryFee: null,
-      isFreeDelivery: false,
-      freeDeliveryCostBearer: null,
-      estimatedDeliveryMinutes: null,
-      matchedLevel: null,
-      applicableDeliveryOwner: deliveryOwner || null,
-      reason: `تعذر جلب تسعيرة التوصيل المركزية: ${error.message}`,
-    };
+    return emptyFailure(`تعذر جلب تسعيرة التوصيل المركزية: ${error.message}`, {
+      boundaryChecked: boundaryCheck.checked,
+      boundaryLevel: boundaryCheck.level,
+      queryFailed: true,
+    });
   }
 
-  let rows = (data || []) as DeliveryAreaTariff[];
+  const rows = ((data || []) as DeliveryAreaTariff[]).filter(
+    (r) => r.service_type === serviceType && r.delivery_owner === deliveryOwner && r.is_enabled !== false
+  );
 
-  if (deliveryOwner) {
-    rows = rows.filter((r) => !r.delivery_owner || r.delivery_owner === deliveryOwner);
-  }
-
-  const areaChain = await resolveAreaAncestorIds(areaId, db);
-  const picked = pickMostSpecificTariff(rows, governorateId, centerId, areaChain, restaurantId);
+  const picked = pickMostSpecificTariff(
+    rows,
+    governorateId,
+    centerId,
+    areaId,
+    restaurantId,
+    requireExactRestaurantMatch
+  );
 
   if (!picked) {
-    return {
-      covered: false,
-      tariffId: null,
-      customerDeliveryFee: null,
-      isFreeDelivery: false,
-      freeDeliveryCostBearer: null,
-      estimatedDeliveryMinutes: null,
-      matchedLevel: null,
-      applicableDeliveryOwner: deliveryOwner || null,
-      reason: 'لا توجد تسعيرة توصيل مفعّلة لهذا النطاق الجغرافي حالياً',
-    };
+    return emptyFailure('لا توجد تسعيرة توصيل مفعّلة لهذا النطاق الجغرافي حالياً', {
+      boundaryChecked: boundaryCheck.checked,
+      boundaryLevel: boundaryCheck.level,
+    });
   }
 
   const tariff = picked.tariff;
@@ -678,24 +1022,36 @@ export async function resolveCentralTariff(params: {
     ? Number(tariff.customer_delivery_fee)
     : null;
 
+  const baseFeeRaw = tariff.base_fee !== null && tariff.base_fee !== undefined ? Number(tariff.base_fee) : null;
+  const adminCommissionRaw =
+    tariff.admin_commission !== null && tariff.admin_commission !== undefined
+      ? Number(tariff.admin_commission)
+      : null;
+  const driverNetRaw =
+    tariff.driver_net !== null && tariff.driver_net !== undefined
+      ? Number(tariff.driver_net)
+      : tariff.driver_net_fee !== null && tariff.driver_net_fee !== undefined
+      ? Number(tariff.driver_net_fee)
+      : null;
+
   if (!isFree && (fee === null || !Number.isFinite(fee) || fee < 0)) {
-    return {
-      covered: false,
+    return emptyFailure('تسعيرة التوصيل لهذه المنطقة غير مكتملة في النظام المركزي', {
       tariffId: tariff.id,
-      customerDeliveryFee: null,
-      isFreeDelivery: false,
-      freeDeliveryCostBearer: tariff.free_delivery_cost_bearer || null,
-      estimatedDeliveryMinutes: tariff.estimated_delivery_minutes ?? null,
       matchedLevel: picked.matchedLevel,
-      applicableDeliveryOwner: (tariff.delivery_owner as DeliveryOwnerType) || deliveryOwner || null,
-      reason: 'تسعيرة التوصيل لهذه المنطقة غير مكتملة في النظام المركزي',
-    };
+      boundaryChecked: boundaryCheck.checked,
+      boundaryLevel: boundaryCheck.level,
+      applicableDeliveryOwner: (tariff.delivery_owner as DeliveryOwnerType) || deliveryOwner,
+    });
   }
 
   return {
     covered: true,
     tariffId: tariff.id,
     customerDeliveryFee: fee,
+    baseFee: baseFeeRaw !== null && Number.isFinite(baseFeeRaw) ? baseFeeRaw : fee,
+    adminCommission:
+      adminCommissionRaw !== null && Number.isFinite(adminCommissionRaw) ? adminCommissionRaw : 0,
+    driverNet: driverNetRaw !== null && Number.isFinite(driverNetRaw) ? driverNetRaw : null,
     isFreeDelivery: isFree,
     freeDeliveryCostBearer: tariff.free_delivery_cost_bearer || null,
     estimatedDeliveryMinutes:
@@ -703,12 +1059,14 @@ export async function resolveCentralTariff(params: {
         ? Number(tariff.estimated_delivery_minutes)
         : null,
     matchedLevel: picked.matchedLevel,
-    applicableDeliveryOwner: (tariff.delivery_owner as DeliveryOwnerType) || deliveryOwner || null,
+    applicableDeliveryOwner: (tariff.delivery_owner as DeliveryOwnerType) || deliveryOwner,
+    boundaryChecked: boundaryCheck.checked,
+    boundaryLevel: boundaryCheck.level,
   };
 }
 
 /**
- * Inspects authentic database restaurant fields to determine if a restaurant has its own delivery fleet enabled.
+ * Inspects restaurant record flags for UI display only (tariff resolution always queries `delivery_area_tariffs` directly).
  */
 export function detectRestaurantOwnDelivery(restaurantRow: Record<string, any> | null | undefined): boolean {
   if (!restaurantRow || typeof restaurantRow !== 'object') return false;
@@ -745,200 +1103,137 @@ export function detectRestaurantOwnDelivery(restaurantRow: Record<string, any> |
 }
 
 /**
- * Resolves restaurant delivery scope + central tariff strictly according to Case 1 & Case 2:
+ * Resolves ready-made food (`service_type = "ready_food"`) coverage & central tariff strictly from `delivery_area_tariffs`:
+ * 1) Check restaurant tariff: `service_type = "ready_food"`, `delivery_owner = "restaurant"`, `restaurant_id = restaurant.id`.
+ *    - If covered -> use restaurant tariff.
+ * 2) Otherwise check platform tariff: `service_type = "ready_food"`, `delivery_owner = "platform"`.
+ *    - If covered -> use platform tariff.
+ * 3) If in neither -> block order and return "أنت خارج نطاق التوصيل".
  *
- * Case 1 (`hasOwnDelivery === true`):
- *  - Check `restaurant_service_areas` for this restaurant and address geo hierarchy.
- *  - Inside `restaurant_service_areas` -> restaurant delivery applies (using central tariff).
- *  - Outside `restaurant_service_areas` -> check Talabaty coverage in `delivery_area_tariffs`.
- *    - Covered -> Talabaty delivery applies.
- *    - Not covered -> blocked.
- *
- * Case 2 (`hasOwnDelivery === false`):
- *  - Do NOT treat `restaurant_service_areas` as available.
- *  - Check Talabaty coverage in `delivery_area_tariffs` for this restaurant / area.
- *    - Covered -> allowed via Talabaty.
- *    - Not covered -> blocked.
- *
- * Note: Client NEVER sets or overrides `fulfillment_route` in DB/RPC calls.
+ * Forbidden: Never reads `restaurant_service_areas`, `restaurant_section_service_areas`, or `restaurant_area_delivery_fees`.
  */
 export async function resolveRestaurantDeliveryScopeAndTariff(params: {
   restaurant: Record<string, any>;
   governorateId?: string | null;
   centerId?: string | null;
   areaId?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   client?: SupabaseClient;
 }): Promise<RestaurantScopeAndTariffResult> {
-  const { restaurant, governorateId, centerId, areaId, client } = params;
+  const { restaurant, governorateId, centerId, areaId, latitude, longitude, client } = params;
   const restaurantId = String(restaurant?.id || '');
-  const hasOwnDelivery =
+  const hasOwnDeliveryFlag =
     typeof restaurant?.hasOwnDelivery === 'boolean'
       ? restaurant.hasOwnDelivery
       : detectRestaurantOwnDelivery(restaurant);
 
+  const blocked = (
+    reason: string,
+    extra: Partial<RestaurantScopeAndTariffResult> = {}
+  ): RestaurantScopeAndTariffResult => ({
+    covered: false,
+    hasOwnDelivery: hasOwnDeliveryFlag,
+    inRestaurantScope: false,
+    tariffId: null,
+    customerDeliveryFee: null,
+    baseFee: null,
+    adminCommission: null,
+    driverNet: null,
+    isFreeDelivery: false,
+    freeDeliveryCostBearer: null,
+    estimatedDeliveryMinutes: null,
+    matchedLevel: null,
+    applicableDeliveryOwner: null,
+    reason,
+    ...extra,
+  });
+
   if (!restaurantId) {
-    return {
-      covered: false,
-      hasOwnDelivery,
-      inRestaurantScope: false,
-      tariffId: null,
-      customerDeliveryFee: null,
-      isFreeDelivery: false,
-      freeDeliveryCostBearer: null,
-      estimatedDeliveryMinutes: null,
-      matchedLevel: null,
-      applicableDeliveryOwner: null,
-      reason: 'بيانات المطعم غير مكتملة',
-    };
+    return blocked('بيانات المطعم غير مكتملة');
   }
 
   if (!governorateId || !centerId || !areaId) {
-    return {
-      covered: false,
-      hasOwnDelivery,
-      inRestaurantScope: false,
-      tariffId: null,
-      customerDeliveryFee: null,
-      isFreeDelivery: false,
-      freeDeliveryCostBearer: null,
-      estimatedDeliveryMinutes: null,
-      matchedLevel: null,
-      applicableDeliveryOwner: null,
-      reason: 'يرجى تحديد عنوان يحتوي على المحافظة والمركز والمنطقة للتحقق من نطاق التوصيل والتسعيرة',
-    };
+    return blocked('يرجى تحديد عنوان يحتوي على المحافظة والمركز والمنطقة للتحقق من نطاق التوصيل والتسعيرة');
   }
 
   const db = getClient(client);
-  const areaChain = await resolveAreaAncestorIds(areaId, db);
+  const coordProps =
+    'latitude' in params || 'longitude' in params
+      ? { latitude, longitude }
+      : {};
 
-  // Case 1: Restaurant supports own delivery -> verify `restaurant_service_areas` first
-  if (hasOwnDelivery) {
-    const { data: scopeRows, error: scopeErr } = await db
-      .from('restaurant_service_areas')
-      .select('id, governorate_id, center_id, area_id, is_active')
-      .eq('restaurant_id', restaurantId)
-      .eq('is_active', true);
-
-    if (scopeErr) {
-      return {
-        covered: false,
-        hasOwnDelivery: true,
-        inRestaurantScope: false,
-        tariffId: null,
-        customerDeliveryFee: null,
-        isFreeDelivery: false,
-        freeDeliveryCostBearer: null,
-        estimatedDeliveryMinutes: null,
-        matchedLevel: null,
-        applicableDeliveryOwner: null,
-        reason: `تعذر التحقق من نطاق توصيل المطعم: ${scopeErr.message}`,
-      };
-    }
-
-    const activeScopes = (scopeRows || []) as Array<{
-      id: string;
-      governorate_id?: string | null;
-      center_id?: string | null;
-      area_id?: string | null;
-      is_active: boolean;
-    }>;
-
-    const matchedInRestaurantScope = activeScopes.some((s) => {
-      if (s.area_id && areaChain.includes(s.area_id)) return true;
-      if (!s.area_id && s.center_id && s.center_id === centerId) return true;
-      if (!s.area_id && !s.center_id && s.governorate_id && s.governorate_id === governorateId) return true;
-      return false;
-    });
-
-    if (matchedInRestaurantScope) {
-      // Inside restaurant own-delivery scope -> resolve central tariff with restaurant owner preference
-      const restaurantTariff = await resolveCentralTariff({
-        serviceType: 'restaurant',
-        deliveryOwner: 'restaurant',
-        restaurantId,
-        governorateId,
-        centerId,
-        areaId,
-        client: db,
-      });
-
-      if (restaurantTariff.covered) {
-        return {
-          ...restaurantTariff,
-          hasOwnDelivery: true,
-          inRestaurantScope: true,
-          applicableDeliveryOwner: 'restaurant',
-        };
-      }
-
-      return {
-        ...restaurantTariff,
-        covered: false,
-        hasOwnDelivery: true,
-        inRestaurantScope: true,
-        applicableDeliveryOwner: 'restaurant',
-        reason:
-          restaurantTariff.reason ||
-          'العنوان داخل نطاق المطعم لكن تسعيرة التوصيل المركزية للمطعم غير مفعّلة لهذه المنطقة',
-      };
-    }
-
-    // Outside restaurant scope -> verify Talabaty coverage in `delivery_area_tariffs`
-    const talabatyTariff = await resolveCentralTariff({
-      serviceType: 'restaurant',
-      deliveryOwner: 'talabaty',
-      restaurantId,
-      governorateId,
-      centerId,
-      areaId,
-      client: db,
-    });
-
-    if (talabatyTariff.covered) {
-      return {
-        ...talabatyTariff,
-        hasOwnDelivery: true,
-        inRestaurantScope: false,
-        applicableDeliveryOwner: 'talabaty',
-      };
-    }
-
-    return {
-      ...talabatyTariff,
-      covered: false,
-      hasOwnDelivery: true,
-      inRestaurantScope: false,
-      applicableDeliveryOwner: null,
-      reason: 'عنوانك خارج نطاق توصيل المطعم وخارج نطاق تغطية توصيل طلباتي لهذه المنطقة',
-    };
-  }
-
-  // Case 2: Restaurant own delivery is disabled -> ignore `restaurant_service_areas`, check Talabaty coverage only
-  const talabatyTariff = await resolveCentralTariff({
-    serviceType: 'restaurant',
-    deliveryOwner: 'talabaty',
+  // Step 1: Check restaurant-owned tariff in `delivery_area_tariffs`
+  const restaurantTariff = await resolveCentralTariff({
+    serviceType: 'ready_food',
+    deliveryOwner: 'restaurant',
     restaurantId,
+    requireExactRestaurantMatch: true,
     governorateId,
     centerId,
     areaId,
+    ...coordProps,
     client: db,
   });
 
-  if (talabatyTariff.covered) {
+  if (restaurantTariff.boundaryFailed || restaurantTariff.queryFailed) {
     return {
-      ...talabatyTariff,
-      hasOwnDelivery: false,
+      ...restaurantTariff,
+      covered: false,
+      hasOwnDelivery: hasOwnDeliveryFlag,
       inRestaurantScope: false,
-      applicableDeliveryOwner: 'talabaty',
+      applicableDeliveryOwner: null,
     };
   }
 
+  if (restaurantTariff.covered) {
+    return {
+      ...restaurantTariff,
+      hasOwnDelivery: true,
+      inRestaurantScope: true,
+      applicableDeliveryOwner: 'restaurant',
+    };
+  }
+
+  // Step 2: Check platform-owned tariff in `delivery_area_tariffs`
+  const platformTariff = await resolveCentralTariff({
+    serviceType: 'ready_food',
+    deliveryOwner: 'platform',
+    restaurantId,
+    requireExactRestaurantMatch: false,
+    governorateId,
+    centerId,
+    areaId,
+    ...coordProps,
+    client: db,
+  });
+
+  if (platformTariff.boundaryFailed || platformTariff.queryFailed) {
+    return {
+      ...platformTariff,
+      covered: false,
+      hasOwnDelivery: hasOwnDeliveryFlag,
+      inRestaurantScope: false,
+      applicableDeliveryOwner: null,
+    };
+  }
+
+  if (platformTariff.covered) {
+    return {
+      ...platformTariff,
+      hasOwnDelivery: hasOwnDeliveryFlag,
+      inRestaurantScope: false,
+      applicableDeliveryOwner: 'platform',
+    };
+  }
+
+  // Step 3: Covered by neither restaurant nor platform
   return {
-    ...talabatyTariff,
+    ...platformTariff,
     covered: false,
-    hasOwnDelivery: false,
+    hasOwnDelivery: hasOwnDeliveryFlag,
     inRestaurantScope: false,
     applicableDeliveryOwner: null,
-    reason: 'هذه المنطقة غير مغطاة بتوصيل طلباتي لهذا المطعم حالياً',
+    reason: 'أنت خارج نطاق التوصيل',
   };
 }

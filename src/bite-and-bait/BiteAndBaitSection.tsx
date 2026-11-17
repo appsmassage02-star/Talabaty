@@ -782,6 +782,9 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     customerPhone: string;
     address: string;
     addressId: string | null;
+    governorateId?: string;
+    centerId?: string;
+    areaId?: string;
     latitude: number;
     longitude: number;
     idempotencyKey: string;
@@ -841,11 +844,14 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         return { success: false, message: err };
       }
 
-      // 3. Invoke real RPC: public.create_bite_bait_order
+      // 3. Invoke real RPC: public.create_bite_bait_order (with client geo/boundary pre-validation)
       const res = await biteAndBaitService.createBiteBaitOrder({
         householdId: resolvedHouseholdId,
         restaurantId: checkoutGroup.restaurantId,
         addressId: details.addressId,
+        governorateId: details.governorateId,
+        centerId: details.centerId,
+        areaId: details.areaId,
         customerName: details.customerName,
         customerPhone: details.customerPhone,
         deliveryAddress: details.address,

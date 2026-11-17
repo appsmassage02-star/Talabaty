@@ -25,6 +25,9 @@ interface BiteBaitCheckoutViewProps {
     customerPhone: string;
     address: string;
     addressId: string | null;
+    governorateId: string;
+    centerId: string;
+    areaId: string;
     latitude: number;
     longitude: number;
     idempotencyKey: string;
@@ -129,9 +132,12 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
     if (selectedAddressId) {
       const addr = savedAddresses.find((a) => a.id === selectedAddressId);
       if (!addr) return null;
+      const customGpsValid = Boolean(
+        customGpsCoords && validateGpsCoordinates(customGpsCoords.lat, customGpsCoords.lng).valid
+      );
       const savedGpsValid = validateGpsCoordinates(addr.latitude, addr.longitude).valid;
-      const effLat = savedGpsValid ? addr.latitude : customGpsCoords?.lat ?? 0;
-      const effLng = savedGpsValid ? addr.longitude : customGpsCoords?.lng ?? 0;
+      const effLat = customGpsValid ? customGpsCoords!.lat : savedGpsValid ? addr.latitude : 0;
+      const effLng = customGpsValid ? customGpsCoords!.lng : savedGpsValid ? addr.longitude : 0;
       return {
         ...addr,
         latitude: effLat,
@@ -217,27 +223,7 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
 
       setIsCheckingCoverage(true);
       try {
-        // 1. Verify general geographic serviceability using central geo_* tables
-        const scopeRes = await biteAndBaitService.verifyGeographicScope(
-          targetAddr,
-          householdId,
-          userId
-        );
-        if (!scopeRes.isServiceable) {
-          setIsAddressCovered(false);
-          setTariffResolved(true);
-          setCurrentDeliveryFee(null);
-          setIsFreeDelivery(false);
-          setEstimatedDeliveryMinutes(null);
-          setApplicableDeliveryOwner(null);
-          setCoverageError(
-            scopeRes.reason ||
-              'المنطقة المحددة تقع خارج النطاق الجغرافي المخدوم حالياً لقسم المطاعم.'
-          );
-          return;
-        }
-
-        // 2. Resolve restaurant delivery scope (Case 1 / Case 2) and central tariff
+        // Resolve restaurant `ready_food` scope & central tariff (checks geo_* hierarchy, boundary, restaurant -> platform)
         const feeRes = await biteAndBaitService.resolveDeliveryFee(restaurantId, targetAddr);
 
         if (!feeRes.isCovered || feeRes.fee === null) {
@@ -247,9 +233,7 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
           setIsFreeDelivery(false);
           setEstimatedDeliveryMinutes(null);
           setApplicableDeliveryOwner(feeRes.applicableDeliveryOwner);
-          setCoverageError(
-            feeRes.reason || `المطعم (${restaurantName}) لا يغطي هذه المنطقة حالياً.`
-          );
+          setCoverageError(feeRes.reason || 'أنت خارج نطاق التوصيل');
         } else {
           setIsAddressCovered(true);
           setTariffResolved(true);
@@ -284,13 +268,13 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
       const addr = savedAddresses.find((a) => a.id === selectedAddressId);
       if (addr) {
         const savedGps = validateGpsCoordinates(addr.latitude, addr.longitude);
-        if (savedGps.valid && savedGps.latitude !== null && savedGps.longitude !== null) {
+        if (customGpsCoords && validateGpsCoordinates(customGpsCoords.lat, customGpsCoords.lng).valid) {
+          setGpsStatusMessage(
+            `✓ تم تحديد موقع التوصيل الحالي: (${customGpsCoords.lat.toFixed(5)}, ${customGpsCoords.lng.toFixed(5)})`
+          );
+        } else if (savedGps.valid && savedGps.latitude !== null && savedGps.longitude !== null) {
           setGpsStatusMessage(
             `✓ إحداثيات GPS المعتمدة للعنوان: (${savedGps.latitude.toFixed(5)}, ${savedGps.longitude.toFixed(5)})`
-          );
-        } else if (customGpsCoords && validateGpsCoordinates(customGpsCoords.lat, customGpsCoords.lng).valid) {
-          setGpsStatusMessage(
-            `✓ تم تحديد موقع التوصيل: (${customGpsCoords.lat.toFixed(5)}, ${customGpsCoords.lng.toFixed(5)})`
           );
         } else {
           setGpsStatusMessage(
@@ -451,21 +435,7 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
       return;
     }
 
-    // Re-run authoritative scope & central tariff checks right before calling create_bite_bait_order RPC
-    const freshScope = await biteAndBaitService.verifyGeographicScope(
-      targetAddressSnapshot,
-      householdId,
-      userId
-    );
-    if (!freshScope.isServiceable) {
-      setIsAddressCovered(false);
-      const msg =
-        freshScope.reason || 'العنوان المختار خارج النطاق الجغرافي المخدوم لقسم المطاعم.';
-      setCoverageError(msg);
-      setValidationError(msg);
-      return;
-    }
-
+    // Re-run authoritative central `ready_food` scope & boundary check right before calling create_bite_bait_order RPC
     const freshCheck = await biteAndBaitService.resolveDeliveryFee(
       restaurantId,
       targetAddressSnapshot
@@ -473,9 +443,7 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
     if (!freshCheck.isCovered || freshCheck.fee === null) {
       setIsAddressCovered(false);
       setCurrentDeliveryFee(null);
-      const msg =
-        freshCheck.reason ||
-        'لا يمكن إتمام الطلب لأن المنطقة غير مشمولة بالتغطية أو لا توجد لها تسعيرة مفعّلة.';
+      const msg = freshCheck.reason || 'أنت خارج نطاق التوصيل';
       setCoverageError(msg);
       setValidationError(msg);
       return;
@@ -487,6 +455,9 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
       customerPhone: customerPhone.trim(),
       address: addressText.trim(),
       addressId: selectedAddressId || null,
+      governorateId: targetAddressSnapshot.governorateId!,
+      centerId: targetAddressSnapshot.centerId!,
+      areaId: targetAddressSnapshot.areaId!,
       latitude: gpsCheck.latitude,
       longitude: gpsCheck.longitude,
       idempotencyKey,
@@ -1005,7 +976,7 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
               >
                 <span style={{ fontSize: '18px' }}>🚫</span>
                 <span>
-                  {coverageError || 'العنوان المختار غير مغطى بالتوصيل حالياً لهذا المطعم.'}
+                  {coverageError || 'أنت خارج نطاق التوصيل'}
                 </span>
               </div>
             )}
