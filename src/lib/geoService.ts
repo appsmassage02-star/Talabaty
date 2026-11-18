@@ -105,6 +105,7 @@ export interface GeoAddressInput {
 
 export interface GeoHierarchyValidationResult {
   valid: boolean;
+  errorCategory?: QuoteErrorCategory | null;
   reason?: string;
   governorate?: GeoGovernorate;
   center?: GeoCenter;
@@ -724,7 +725,16 @@ export async function validateGeoHierarchySelection(
   if (!governorateId?.trim() || !centerId?.trim() || !areaId?.trim()) {
     return {
       valid: false,
+      errorCategory: 'missing_geo_data',
       reason: 'يجب تحديد المحافظة والمركز والمنطقة من النظام الجغرافي المعتمد أولاً',
+    };
+  }
+
+  if (!isValidUuid(governorateId) || !isValidUuid(centerId) || !isValidUuid(areaId)) {
+    return {
+      valid: false,
+      errorCategory: 'invalid_geo_id',
+      reason: 'معرّفات المحافظة أو المركز أو المنطقة غير صالحة (UUID غير صحيح).',
     };
   }
 
@@ -737,19 +747,32 @@ export async function validateGeoHierarchySelection(
   ]);
 
   if (govRes.error) {
-    return { valid: false, reason: formatGeoQueryError('geo_governorates', govRes.error).message };
+    return {
+      valid: false,
+      errorCategory: 'rpc_error',
+      reason: formatGeoQueryError('geo_governorates', govRes.error).message,
+    };
   }
   if (centerRes.error) {
-    return { valid: false, reason: formatGeoQueryError('geo_centers', centerRes.error).message };
+    return {
+      valid: false,
+      errorCategory: 'rpc_error',
+      reason: formatGeoQueryError('geo_centers', centerRes.error).message,
+    };
   }
   if (areaRes.error) {
-    return { valid: false, reason: formatGeoQueryError('geo_areas', areaRes.error).message };
+    return {
+      valid: false,
+      errorCategory: 'rpc_error',
+      reason: formatGeoQueryError('geo_areas', areaRes.error).message,
+    };
   }
 
   const govRow = govRes.data as Record<string, any> | null;
   if (!govRow || !govRow.id || govRow.is_active === false) {
     return {
       valid: false,
+      errorCategory: 'invalid_geo_id',
       reason: 'المحافظة المحددة غير موجودة أو غير مفعّلة في النظام الجغرافي المركزي (geo_governorates).',
     };
   }
@@ -758,12 +781,14 @@ export async function validateGeoHierarchySelection(
   if (!centerRow || !centerRow.id || centerRow.is_active === false) {
     return {
       valid: false,
+      errorCategory: 'invalid_geo_id',
       reason: 'المركز / المدينة المحددة غير موجودة أو غير مفعّلة في النظام الجغرافي المركزي (geo_centers).',
     };
   }
   if (String(centerRow.governorate_id || '') !== String(govRow.id)) {
     return {
       valid: false,
+      errorCategory: 'invalid_geo_id',
       reason: 'المركز المحدد لا يتبع المحافظة المختارة في النظام الجغرافي المركزي.',
     };
   }
@@ -772,6 +797,7 @@ export async function validateGeoHierarchySelection(
   if (!areaRow || !areaRow.id || areaRow.is_active === false) {
     return {
       valid: false,
+      errorCategory: 'invalid_geo_id',
       reason: 'المنطقة المحددة غير موجودة أو غير مفعّلة في النظام الجغرافي المركزي (geo_areas).',
     };
   }
@@ -781,6 +807,7 @@ export async function validateGeoHierarchySelection(
   ) {
     return {
       valid: false,
+      errorCategory: 'invalid_geo_id',
       reason: 'المنطقة المحددة لا تتبع المركز والمحافظة المختارين في النظام الجغرافي المركزي.',
     };
   }
