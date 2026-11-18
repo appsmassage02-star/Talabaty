@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 import { DeliveryOrderModal } from "./DeliveryOrderModal";
 import { deliveryService } from "../lib/deliveryService";
+import { useSectionSettings } from "../lib/useSectionSettings";
+import { DELIVERY_STOPPED_BANNER_TEXT } from "../lib/sectionSettingsService";
 import { isSupabaseConfigured, supabase } from "../lib/supabase";
 
 interface DistributionCalculation {
@@ -52,6 +54,12 @@ export const AddInvoiceModal: React.FC = () => {
   const [paymentMethod, setPaymentMethod] = useState<"cash">("cash");
   const [formError, setFormError] = useState<string | null>(null);
   const [isDeliveryModalOpen, setIsDeliveryModalOpen] = useState<boolean>(false);
+
+  const { settings: sectionSettings, isLoading: isLoadingSectionSettings } = useSectionSettings();
+  const hhSetting = sectionSettings.household_shortages;
+  const hhSectionUnavailable = !isLoadingSectionSettings && (!hhSetting.loaded || !hhSetting.section_enabled);
+  const hhDeliveryStopped =
+    hhSetting.loaded && hhSetting.section_enabled && !hhSetting.delivery_enabled;
 
   // Products in the current invoice
   const [products, setProducts] = useState<InvoiceProduct[]>([]);
@@ -397,6 +405,20 @@ export const AddInvoiceModal: React.FC = () => {
   const handleOpenDeliveryModal = (e: React.MouseEvent) => {
     e.preventDefault();
     setFormError(null);
+
+    if (hhSectionUnavailable) {
+      setFormError(
+        !hhSetting.loaded
+          ? "تعذر التحقق من إعدادات قسم نواقص المنزل؛ لا يمكن بدء طلب توصيل جديد حالياً."
+          : "قسم نواقص المنزل متوقف حالياً ولا يمكن بدء طلبات جديدة منه."
+      );
+      return;
+    }
+
+    if (hhDeliveryStopped) {
+      setFormError(DELIVERY_STOPPED_BANNER_TEXT);
+      return;
+    }
 
     if (products.length === 0) {
       setFormError("يرجى اختيار صنف واحد على الأقل من النواقص أو إضافة منتجات للفاتورة أولاً.");
@@ -936,11 +958,13 @@ export const AddInvoiceModal: React.FC = () => {
             <button
               type="button"
               onClick={handleOpenDeliveryModal}
-              disabled={products.length === 0}
+              disabled={products.length === 0 || hhSectionUnavailable || hhDeliveryStopped}
               className="w-full py-3.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-2xl text-xs sm:text-sm shadow-md shadow-blue-500/20 flex items-center justify-center space-x-1.5 space-x-reverse transition-all"
             >
               <Truck className="w-4 h-4 text-blue-200 shrink-0 ml-1.5" />
-              <span>التوصيل للمنزل</span>
+              <span>
+                {hhDeliveryStopped ? DELIVERY_STOPPED_BANNER_TEXT : "التوصيل للمنزل"}
+              </span>
             </button>
           </div>
         </form>

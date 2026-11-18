@@ -24,6 +24,8 @@ import {
   Edit3,
 } from 'lucide-react';
 import { deliveryService } from '../lib/deliveryService';
+import { useSectionSettings } from '../lib/useSectionSettings';
+import { DELIVERY_STOPPED_BANNER_TEXT } from '../lib/sectionSettingsService';
 
 export const RecurringOrdersModal: React.FC = () => {
   const {
@@ -92,6 +94,12 @@ export const RecurringOrdersModal: React.FC = () => {
     isFreeDelivery: false,
     estimatedDeliveryMinutes: null,
   });
+
+  const { settings: sectionSettings, isLoading: isLoadingSectionSettings } = useSectionSettings();
+  const hhSetting = sectionSettings.household_shortages;
+  const isHhSectionBlocked = !isLoadingSectionSettings && (!hhSetting.loaded || !hhSetting.section_enabled);
+  const isHhDeliveryStopped =
+    hhSetting.loaded && hhSetting.section_enabled && !hhSetting.delivery_enabled;
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -260,6 +268,18 @@ export const RecurringOrdersModal: React.FC = () => {
   // Approve Draft and Convert to Delivery
   const handleApproveDraft = async () => {
     if (!activeDraft) return;
+    if (isHhSectionBlocked) {
+      showToast(
+        !hhSetting.loaded
+          ? 'تعذر التحقق من إعدادات قسم نواقص المنزل من الخادم.'
+          : 'قسم نواقص المنزل متوقف حالياً ولا يمكن بدء طلبات جديدة منه.'
+      );
+      return;
+    }
+    if (isHhDeliveryStopped) {
+      showToast(DELIVERY_STOPPED_BANNER_TEXT);
+      return;
+    }
     if (!selectedAddressId) {
       showToast('يرجى اختيار عنوان التوصيل');
       return;
@@ -851,6 +871,24 @@ export const RecurringOrdersModal: React.FC = () => {
                     />
                   </div>
 
+                  {isHhDeliveryStopped && (
+                    <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 font-bold flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-amber-600" />
+                      <span>{DELIVERY_STOPPED_BANNER_TEXT} — لا يمكن تحويل المسودة لطلب توصيل جديد حالياً.</span>
+                    </div>
+                  )}
+
+                  {isHhSectionBlocked && (
+                    <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-bold flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                      <span>
+                        {!hhSetting.loaded
+                          ? 'تعذر التحقق من إعدادات قسم نواقص المنزل؛ لا يمكن اعتماد طلب التوصيل حالياً.'
+                          : 'قسم نواقص المنزل متوقف حالياً ولا يمكن بدء طلبات جديدة منه.'}
+                      </span>
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between pt-2 border-t border-slate-100">
                     <button
                       onClick={() => rejectDraftRequest(activeDraft.id, 'رفض بواسطة المسؤول')}
@@ -863,6 +901,8 @@ export const RecurringOrdersModal: React.FC = () => {
                       onClick={handleApproveDraft}
                       disabled={
                         isProcessing ||
+                        isHhSectionBlocked ||
+                        isHhDeliveryStopped ||
                         !selectedAddressId ||
                         tariffStatus.loading ||
                         !tariffStatus.allowed

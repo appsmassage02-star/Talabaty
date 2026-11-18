@@ -1,22 +1,18 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { useApp } from "../context/AppContext";
 import { usePharmacy } from "../lib/usePharmacy";
-import { biteAndBaitService } from "../bite-and-bait/services/biteAndBaitService";
-import { RestaurantSectionSettings, GeographicVerificationResult } from "../bite-and-bait/types";
-import { CATEGORY_IMAGE_PRESETS } from "../data/categories";
+import { useSectionSettings } from "../lib/useSectionSettings";
+import { DELIVERY_STOPPED_BANNER_TEXT } from "../lib/sectionSettingsService";
 import {
   ChevronLeft,
   Sparkles,
-  Tag,
-  Plus,
-  Image as ImageIcon,
   Pill,
-  FileText,
   Clock,
   Ban,
   Lock,
   AlertCircle,
   UtensilsCrossed,
+  RefreshCw,
 } from "lucide-react";
 
 export const CategoryGridView: React.FC = () => {
@@ -30,44 +26,18 @@ export const CategoryGridView: React.FC = () => {
   } = useApp();
 
   const { serviceSettings, activeOrders } = usePharmacy();
+  const {
+    settings: sectionSettings,
+    isLoading: isLoadingSections,
+    refreshAll: refreshSectionSettings,
+  } = useSectionSettings();
+
   const [disabledNotice, setDisabledNotice] = useState<string | null>(null);
   const actionablePharmacyOrdersCount = activeOrders.length;
-
-  // Food section settings & geographic scope
-  const [foodSettings, setFoodSettings] = useState<RestaurantSectionSettings | null>(null);
-  const [foodGeoScope, setFoodGeoScope] = useState<GeographicVerificationResult | null>(null);
-  const [isLoadingFoodSettings, setIsLoadingFoodSettings] = useState<boolean>(true);
 
   useEffect(() => {
     refreshActiveStateFromCache();
   }, [refreshActiveStateFromCache]);
-
-  useEffect(() => {
-    let isMounted = true;
-    setIsLoadingFoodSettings(true);
-    Promise.all([
-      biteAndBaitService.getSectionSettings(),
-      biteAndBaitService.verifyGeographicScope(),
-    ])
-      .then(([settingsRes, geoRes]) => {
-        if (isMounted) {
-          setFoodSettings(settingsRes.success ? settingsRes.data : null);
-          setFoodGeoScope(geoRes);
-        }
-      })
-      .catch((err) => {
-        console.warn("[CategoryGridView] Error loading food section settings:", err);
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoadingFoodSettings(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
 
   // Count missing items per category
   const getMissingCount = (catId: string) => {
@@ -85,30 +55,66 @@ export const CategoryGridView: React.FC = () => {
     return categories.find((c) => c.id === "pharmacy");
   }, [categories]);
 
-  // Single central source for pharmacy image: global_categories.image_url
   const pharmacyImageUrl = pharmacyCategory?.imageUrl || "";
-
-  // Single central source for pharmacy name: global_categories.name_ar
   const pharmacyTitle = pharmacyCategory?.nameAr || "الصيدلية";
+  const pharmacyDisplayWidth = serviceSettings.displayWidth;
 
-  const pharmacyStatus = serviceSettings.status; // "active" | "disabled" | "hidden"
-  const isPharmacyDisabled = pharmacyStatus === "disabled";
-  const isPharmacyHidden = pharmacyStatus === "hidden";
-  const pharmacyDisplayWidth = serviceSettings.displayWidth; // "full" | "half" from pharmacy_settings.display_width
+  // Independent per-section settings strictly from `public.app_section_settings`
+  const hhSetting = sectionSettings.household_shortages;
+  const pharmacyCentral = sectionSettings.pharmacy;
+  const foodCentral = sectionSettings.ready_food;
 
-  // Food Section Operational & Visibility Rules:
-  // Note: For preview and continuous access, keep food section visible so user can access Ready Food (الأكلات الجاهزة)
-  const isFoodOperational = Boolean(foodSettings?.section_enabled) && Boolean(foodGeoScope?.isServiceable);
-  // Do not hide the section during preview mode so user can always access and test it
-  const isFoodSectionHidden = false;
-  const isFoodDisabledDisplay = !isLoadingFoodSettings && !isFoodOperational && foodSettings?.disabled_display_mode === "show_disabled";
+  // 1. Household Shortages (`household_shortages`)
+  const isHouseholdLoaded = hhSetting.loaded;
+  const isHouseholdHidden = isHouseholdLoaded && !hhSetting.section_visible;
+  const isHouseholdSectionDisabled = isHouseholdLoaded && !hhSetting.section_enabled;
+  const isHouseholdDeliveryStopped =
+    isHouseholdLoaded &&
+    hhSetting.section_visible &&
+    hhSetting.section_enabled &&
+    !hhSetting.delivery_enabled;
+  const isHouseholdError = !isLoadingSections && !isHouseholdLoaded;
+
+  // 2. Ready Food (`ready_food`) — never conflated with geographic coverage
+  const isFoodLoaded = foodCentral.loaded;
+  const isFoodSectionHidden = isFoodLoaded && !foodCentral.section_visible;
+  const isFoodSectionDisabled = isFoodLoaded && !foodCentral.section_enabled;
+  const isFoodDeliveryStopped =
+    isFoodLoaded &&
+    foodCentral.section_visible &&
+    foodCentral.section_enabled &&
+    !foodCentral.delivery_enabled;
+  const isFoodOperational =
+    isFoodLoaded &&
+    foodCentral.section_visible &&
+    foodCentral.section_enabled &&
+    foodCentral.delivery_enabled;
+
+  // 3. Pharmacy (`pharmacy`)
+  const isPharmacyLoaded = pharmacyCentral.loaded;
+  const isPharmacyHidden = isPharmacyLoaded && !pharmacyCentral.section_visible;
+  const isPharmacyDisabled =
+    !isLoadingSections && (!isPharmacyLoaded || !pharmacyCentral.section_enabled);
+  const isPharmacyDeliveryStopped =
+    isPharmacyLoaded &&
+    pharmacyCentral.section_visible &&
+    pharmacyCentral.section_enabled &&
+    !pharmacyCentral.delivery_enabled;
+
+  const showTempNotice = (msg: string) => {
+    setDisabledNotice(msg);
+    setTimeout(() => setDisabledNotice(null), 4000);
+  };
 
   const handlePharmacyClick = () => {
-    if (isPharmacyDisabled) {
-      setDisabledNotice(
-        "خدمة الصيدلية معطلة حالياً بقرار من الإدارة لأعمال الصيانة والتحديث."
+    if (isLoadingSections && !isPharmacyLoaded) return;
+    // Allow viewing active orders even if section is disabled, while new orders remain blocked inside PharmacySection
+    if (isPharmacyDisabled && actionablePharmacyOrdersCount === 0) {
+      showTempNotice(
+        !isPharmacyLoaded
+          ? "تعذر التحقق من إعدادات قسم الصيدلية من الخادم؛ بدء الطلبات غير متاح حالياً."
+          : "قسم الصيدلية متوقف حالياً ولا يمكن بدء طلبات جديدة منه."
       );
-      setTimeout(() => setDisabledNotice(null), 3500);
       return;
     }
     setSelectedCategory(null);
@@ -116,6 +122,13 @@ export const CategoryGridView: React.FC = () => {
   };
 
   const handleFoodClick = () => {
+    if (isLoadingSections && !isFoodLoaded) return;
+    if (!isFoodLoaded) {
+      showTempNotice(
+        "تعذر التحقق من إعدادات قسم الأكلات الجاهزة من الخادم؛ لا يمكن بدء طلبات جديدة حالياً."
+      );
+      return;
+    }
     setSelectedCategory(null);
     setActiveTab("food");
   };
@@ -161,82 +174,119 @@ export const CategoryGridView: React.FC = () => {
         </div>
       </div>
 
-      {/* 1. Main Categories Grid (Pure regular categories without pharmacy) */}
-      <div className="grid grid-cols-2 gap-3 sm:gap-3.5">
-        {categories
-          .filter(
-            (c) =>
-              c.isActive !== false &&
-              Boolean(c.nameAr) &&
-              c.id !== "pharmacy"
-          )
-          .map((category) => {
-            const count = getMissingCount(category.id);
-            const fallbackImg =
-              "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80";
-            return (
+      {/* 1. Household Shortages (`household_shortages`) Section Status & Grid */}
+      {!isHouseholdHidden && (
+        <div className="space-y-3">
+          {isHouseholdError && (
+            <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-2xl flex items-center justify-between gap-2 text-xs font-bold">
+              <div className="flex items-center space-x-2 space-x-reverse">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>
+                  تعذر التحقق من إعدادات قسم نواقص المنزل؛ بدء طلبات التوصيل متوقف مؤقتاً لحين استعادة الاتصال.
+                </span>
+              </div>
               <button
-                key={category.id}
-                onClick={() => setSelectedCategory(category.id)}
-                className="group bg-white rounded-2xl border border-slate-200 text-right flex flex-col justify-between overflow-hidden shadow-2xs hover:shadow-md hover:border-emerald-400 transition-all cursor-pointer relative"
+                type="button"
+                onClick={() => refreshSectionSettings()}
+                className="px-2.5 py-1 bg-rose-600 text-white rounded-lg text-[11px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
               >
-                {/* Category REAL Image Container */}
-                <div className="relative h-28 w-full overflow-hidden bg-slate-100">
-                  <img
-                    src={category.imageUrl || fallbackImg}
-                    alt={category.nameAr}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                    loading="lazy"
-                    onError={(e) => {
-                      const target = e.currentTarget as HTMLImageElement;
-                      if (target.src !== fallbackImg) {
-                        target.src = fallbackImg;
-                      }
-                    }}
-                  />
-
-                  {/* Subtle gradient overlay */}
-                  <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-900/25 to-transparent" />
-
-                  {/* Missing Items Badge overlay */}
-                  <div className="absolute top-2 right-2">
-                    {count > 0 ? (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-600 text-white shadow-sm flex items-center space-x-1 space-x-reverse border border-white/40">
-                        <span>{count} ناقص</span>
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-600/90 text-white shadow-sm border border-white/30 backdrop-blur-xs">
-                        متوفر
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Category Title on image overlay */}
-                  <div className="absolute inset-x-0 bottom-0 min-h-[46px] h-11 px-2.5 py-1 text-white flex items-center justify-center bg-gradient-to-t from-slate-950/90 via-slate-950/60 to-transparent">
-                    <h3 className="font-bold text-xs sm:text-sm text-center leading-snug drop-shadow-md line-clamp-2 w-full">
-                      {category.nameAr}
-                    </h3>
-                  </div>
-                </div>
-
-                {/* Bottom Details & Action */}
-                <div className="p-3 space-y-2 flex-1 flex flex-col justify-between bg-white">
-                  <p className="text-[11px] text-slate-500 line-clamp-1 leading-relaxed">
-                    {category.description}
-                  </p>
-
-                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-emerald-700 font-bold">
-                    <span>تصفح وإضافة</span>
-                    <ChevronLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-1" />
-                  </div>
-                </div>
+                <RefreshCw className="w-3 h-3" />
+                <span>تحديث</span>
               </button>
-            );
-          })}
-      </div>
+            </div>
+          )}
 
-      {/* Dedicated Ready-Food & Restaurants Section */}
+          {isHouseholdSectionDisabled && (
+            <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-2xl flex items-center space-x-2 space-x-reverse text-xs font-bold">
+              <Ban className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>قسم نواقص المنزل متوقف حالياً ولا يمكن بدء طلبات جديدة منه.</span>
+            </div>
+          )}
+
+          {isHouseholdDeliveryStopped && (
+            <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded-2xl flex items-center space-x-2 space-x-reverse text-xs font-bold">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>{DELIVERY_STOPPED_BANNER_TEXT} — يمكنك متابعة تصفح الأقسام وقائمة النواقص بشكل طبيعي.</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-3 sm:gap-3.5">
+            {categories
+              .filter(
+                (c) =>
+                  c.isActive !== false &&
+                  Boolean(c.nameAr) &&
+                  c.id !== "pharmacy"
+              )
+              .map((category) => {
+                const count = getMissingCount(category.id);
+                const fallbackImg =
+                  "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=800&q=80";
+                return (
+                  <button
+                    key={category.id}
+                    onClick={() => setSelectedCategory(category.id)}
+                    className="group bg-white rounded-2xl border border-slate-200 text-right flex flex-col justify-between overflow-hidden shadow-2xs hover:shadow-md hover:border-emerald-400 transition-all cursor-pointer relative"
+                  >
+                    {/* Category REAL Image Container */}
+                    <div className="relative h-28 w-full overflow-hidden bg-slate-100">
+                      <img
+                        src={category.imageUrl || fallbackImg}
+                        alt={category.nameAr}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        loading="lazy"
+                        onError={(e) => {
+                          const target = e.currentTarget as HTMLImageElement;
+                          if (target.src !== fallbackImg) {
+                            target.src = fallbackImg;
+                          }
+                        }}
+                      />
+
+                      {/* Subtle gradient overlay */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-900/25 to-transparent" />
+
+                      {/* Missing Items Badge overlay */}
+                      <div className="absolute top-2 right-2">
+                        {count > 0 ? (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-600 text-white shadow-sm flex items-center space-x-1 space-x-reverse border border-white/40">
+                            <span>{count} ناقص</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-600/90 text-white shadow-sm border border-white/30 backdrop-blur-xs">
+                            متوفر
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Category Title on image overlay */}
+                      <div className="absolute inset-x-0 bottom-0 min-h-[46px] h-11 px-2.5 py-1 text-white flex items-center justify-center bg-gradient-to-t from-slate-950/90 via-slate-950/60 to-transparent">
+                        <h3 className="font-bold text-xs sm:text-sm text-center leading-snug drop-shadow-md line-clamp-2 w-full">
+                          {category.nameAr}
+                        </h3>
+                      </div>
+                    </div>
+
+                    {/* Bottom Details & Action */}
+                    <div className="p-3 space-y-2 flex-1 flex flex-col justify-between bg-white">
+                      <p className="text-[11px] text-slate-500 line-clamp-1 leading-relaxed">
+                        {category.description}
+                      </p>
+
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-emerald-700 font-bold">
+                        <span>تصفح وإضافة</span>
+                        <ChevronLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-1" />
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+          </div>
+        </div>
+      )}
+
+      {/* 2. Dedicated Ready-Food & Restaurants Section (`ready_food`) */}
       {!isFoodSectionHidden && (
         <div className="space-y-3 pt-2">
           <div className="relative flex items-center justify-center my-3">
@@ -250,7 +300,11 @@ export const CategoryGridView: React.FC = () => {
           <div className="w-full">
             <button
               onClick={handleFoodClick}
-              className="group w-full bg-white rounded-2xl border-2 border-amber-400 hover:border-amber-500 hover:shadow-md text-right flex flex-col sm:flex-row sm:items-stretch justify-between overflow-hidden shadow-2xs transition-all relative cursor-pointer"
+              className={`group w-full bg-white rounded-2xl border-2 text-right flex flex-col sm:flex-row sm:items-stretch justify-between overflow-hidden shadow-2xs transition-all relative cursor-pointer ${
+                isFoodSectionDisabled || (!isLoadingSections && !isFoodLoaded)
+                  ? "border-slate-300 opacity-90 hover:border-slate-400"
+                  : "border-amber-400 hover:border-amber-500 hover:shadow-md"
+              }`}
             >
               <div className="relative overflow-hidden bg-slate-900 sm:w-56 sm:h-auto h-32 shrink-0">
                 <img
@@ -277,32 +331,50 @@ export const CategoryGridView: React.FC = () => {
 
               <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between bg-white">
                 <div>
-                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 mb-0.5">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 mb-0.5 gap-2 flex-wrap">
                     <div className="flex items-center space-x-1.5 space-x-reverse text-amber-800">
                       <UtensilsCrossed className="w-3.5 h-3.5 text-amber-600" />
                       <span>مشويات، بيتزا، برجر، شاورما، أكلات شرقية وحلويات</span>
                     </div>
-                    {isLoadingFoodSettings ? (
+                    {isLoadingSections && !isFoodLoaded ? (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
                         جاري التحقق... ⏳
+                      </span>
+                    ) : !isFoodLoaded ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-50 text-rose-700 border border-rose-200">
+                        تعذر التحقق من الحالة
+                      </span>
+                    ) : isFoodSectionDisabled ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-50 text-rose-700 border border-rose-200">
+                        القسم متوقف مؤقتاً
+                      </span>
+                    ) : isFoodDeliveryStopped ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-50 text-amber-900 border border-amber-300">
+                        {DELIVERY_STOPPED_BANNER_TEXT}
                       </span>
                     ) : isFoodOperational ? (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-200">
                         متاح للطلب 🟢
                       </span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-50 text-amber-800 border border-amber-200">
-                        الخدمة معطلة مؤقتاً
-                      </span>
-                    )}
+                    ) : null}
                   </div>
                   <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
-                    قسم الأكلات الجاهزة والمطاعم المعتمدة: تصفح الوجبات وقوائم الطعام واطلب مباشرة مع تجربة واجهة بايت آند بيت الحديثة.
+                    {isFoodSectionDisabled
+                      ? "هذا القسم متوقف حالياً ولا يسمح ببدء طلبات جديدة. يمكنك متابعة طلباتك القائمة."
+                      : isFoodDeliveryStopped
+                      ? `${DELIVERY_STOPPED_BANNER_TEXT} — يمكنك تصفح المطاعم وقوائم الطعام وطلباتك الحالية.`
+                      : "قسم الأكلات الجاهزة والمطاعم المعتمدة: تصفح الوجبات وقوائم الطعام واطلب مباشرة مع تجربة واجهة بايت آند بيت الحديثة."}
                   </p>
                 </div>
 
                 <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-amber-700">
-                  <span>فتح قسم الأكلات الجاهزة (بايت آند بيت)</span>
+                  <span>
+                    {isFoodSectionDisabled
+                      ? "عرض الطلبات وحالة القسم"
+                      : isFoodDeliveryStopped
+                      ? "تصفح المطاعم (التوصيل متوقف مؤقتاً)"
+                      : "فتح قسم الأكلات الجاهزة (بايت آند بيت)"}
+                  </span>
                   <ChevronLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-1" />
                 </div>
               </div>
@@ -311,7 +383,7 @@ export const CategoryGridView: React.FC = () => {
         </div>
       )}
 
-      {/* 2. Clear Divider Line & 3. Dedicated Pharmacy Section (Requirement 1, 2, 3) */}
+      {/* 3. Dedicated Pharmacy Section (`pharmacy`) */}
       {!isPharmacyHidden && (
         <div className="space-y-3 pt-3">
           {/* Distinct Divider Line */}
@@ -330,10 +402,12 @@ export const CategoryGridView: React.FC = () => {
           >
             <button
               onClick={handlePharmacyClick}
-              disabled={isPharmacyDisabled}
+              disabled={isPharmacyDisabled && actionablePharmacyOrdersCount === 0}
               className={`group w-full bg-white rounded-2xl border-2 text-right flex flex-col justify-between overflow-hidden shadow-2xs transition-all relative ${
-                isPharmacyDisabled
+                isPharmacyDisabled && actionablePharmacyOrdersCount === 0
                   ? "grayscale contrast-90 opacity-80 border-slate-300 cursor-not-allowed"
+                  : isPharmacyDeliveryStopped || isPharmacyDisabled
+                  ? "border-amber-400 hover:shadow-md hover:border-amber-500 cursor-pointer"
                   : "border-emerald-500/80 hover:shadow-md hover:border-emerald-600 cursor-pointer"
               } ${
                 pharmacyDisplayWidth === "full"
@@ -341,10 +415,10 @@ export const CategoryGridView: React.FC = () => {
                   : ""
               }`}
             >
-              {/* Prominent Stamp for Disabled State (Requirement 3: معطل) */}
-              {isPharmacyDisabled && (
+              {/* Prominent Stamp for Disabled State when no active orders */}
+              {isPharmacyDisabled && actionablePharmacyOrdersCount === 0 && (
                 <div className="absolute inset-0 bg-slate-900/35 backdrop-blur-[1px] flex items-center justify-center pointer-events-none z-20">
-                  <span className="px-5 py-2 rounded-2xl text-sm sm:text-base font-black bg-rose-600 text-white shadow-2xl border-2 border-white tracking-wider flex items-center space-x-2 space-x-reverse rotate-[-6deg] animate-pulse">
+                  <span className="px-5 py-2 rounded-2xl text-sm sm:text-base font-black bg-rose-600 text-white shadow-2xl border-2 border-white tracking-wider flex items-center space-x-2 space-x-reverse rotate-[-6deg]">
                     <Ban className="w-5 h-5 text-white" />
                     <span>معطل</span>
                   </span>
@@ -365,7 +439,7 @@ export const CategoryGridView: React.FC = () => {
                     alt={pharmacyTitle}
                     referrerPolicy="no-referrer"
                     className={`w-full h-full object-cover transition-transform duration-500 ${
-                      isPharmacyDisabled
+                      isPharmacyDisabled && actionablePharmacyOrdersCount === 0
                         ? "grayscale opacity-75"
                         : "opacity-90 group-hover:scale-105"
                     }`}
@@ -386,10 +460,18 @@ export const CategoryGridView: React.FC = () => {
 
                 {/* Badge overlay */}
                 <div className="absolute top-2 right-2">
-                  {isPharmacyDisabled ? (
+                  {isLoadingSections && !isPharmacyLoaded ? (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800/80 text-white shadow-sm border border-white/40">
+                      جاري التحقق... ⏳
+                    </span>
+                  ) : isPharmacyDisabled ? (
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-white shadow-sm flex items-center space-x-1 space-x-reverse border border-white/40">
                       <Lock className="w-2.5 h-2.5 text-amber-400" />
                       <span>الخدمة معطلة</span>
+                    </span>
+                  ) : isPharmacyDeliveryStopped ? (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-amber-950 shadow-sm border border-white/50">
+                      {DELIVERY_STOPPED_BANNER_TEXT}
                     </span>
                   ) : actionablePharmacyOrdersCount > 0 ? (
                     <span
@@ -397,7 +479,14 @@ export const CategoryGridView: React.FC = () => {
                       className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-rose-600 text-white shadow-md flex items-center space-x-1 space-x-reverse border border-white/50 animate-pulse"
                     >
                       <Clock className="w-2.5 h-2.5" />
-                      <span>{actionablePharmacyOrdersCount} {actionablePharmacyOrdersCount === 1 ? "طلب جاري" : actionablePharmacyOrdersCount === 2 ? "طلبان جاريان" : "طلبات جارية"}</span>
+                      <span>
+                        {actionablePharmacyOrdersCount}{" "}
+                        {actionablePharmacyOrdersCount === 1
+                          ? "طلب جاري"
+                          : actionablePharmacyOrdersCount === 2
+                          ? "طلبان جاريان"
+                          : "طلبات جارية"}
+                      </span>
                     </span>
                   ) : (
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-teal-600/90 text-white shadow-sm flex items-center space-x-1 space-x-reverse border border-white/40">
@@ -418,35 +507,53 @@ export const CategoryGridView: React.FC = () => {
               {/* Bottom/Side Details & Action */}
               <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between bg-white">
                 <div>
-                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 mb-0.5">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 mb-0.5 gap-2 flex-wrap">
                     <div className="flex items-center space-x-1.5 space-x-reverse">
                       <Pill className="w-3.5 h-3.5 text-emerald-600" />
                       <span>طلب علاج بالروشتة وتوصيل فوري</span>
                     </div>
-                    {actionablePharmacyOrdersCount > 0 && !isPharmacyDisabled && (
+                    {isPharmacyDeliveryStopped ? (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-50 text-amber-900 border border-amber-300">
+                        {DELIVERY_STOPPED_BANNER_TEXT}
+                      </span>
+                    ) : actionablePharmacyOrdersCount > 0 && !isPharmacyDisabled ? (
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-100 text-rose-700 border border-rose-200">
                         {actionablePharmacyOrdersCount} جاري
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
                     {isPharmacyDisabled
-                      ? "الخدمة معطلة مؤقتاً لأعمال الصيانة والتحديث. لا يمكن تقديم طلبات جديدة حالياً."
+                      ? actionablePharmacyOrdersCount > 0
+                        ? "القسم متوقف للطلبات الجديدة حالياً، ويمكنك الدخول لمتابعة طلباتك الجارية."
+                        : "الخدمة معطلة مؤقتاً. لا يمكن تقديم طلبات جديدة حالياً."
+                      : isPharmacyDeliveryStopped
+                      ? `${DELIVERY_STOPPED_BANNER_TEXT} — يمكنك تصفح الروشتات المحفوظة وطلباتك الحالية.`
                       : "ارفع صورة الروشتة أو اكتب الأدوية، ويتولى مندوب الصيدلية شراءها وتوصيلها حتى باب المنزل مع الفاتورة الرسمية."}
                   </p>
                 </div>
 
                 <div
                   className={`pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold ${
-                    isPharmacyDisabled ? "text-slate-400" : "text-emerald-700"
+                    isPharmacyDisabled && actionablePharmacyOrdersCount === 0
+                      ? "text-slate-400"
+                      : "text-emerald-700"
                   }`}
                 >
                   <span>
-                    {isPharmacyDisabled ? "الخدمة غير متاحة" : "فتح الصيدلية"}
+                    {isPharmacyDisabled && actionablePharmacyOrdersCount === 0
+                      ? "الخدمة غير متاحة"
+                      : isPharmacyDisabled
+                      ? "متابعة طلبات الصيدلية الجارية"
+                      : isPharmacyDeliveryStopped
+                      ? "تصفح الصيدلية والروشتات"
+                      : "فتح الصيدلية"}
                   </span>
                   <ChevronLeft
                     className={`w-3.5 h-3.5 transition-transform ${
-                      isPharmacyDisabled ? "" : "group-hover:-translate-x-1"
+                      isPharmacyDisabled && actionablePharmacyOrdersCount === 0
+                        ? ""
+                        : "group-hover:-translate-x-1"
                     }`}
                   />
                 </div>
@@ -458,3 +565,4 @@ export const CategoryGridView: React.FC = () => {
     </div>
   );
 };
+

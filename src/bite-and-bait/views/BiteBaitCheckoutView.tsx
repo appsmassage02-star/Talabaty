@@ -35,6 +35,9 @@ interface BiteBaitCheckoutViewProps {
   }) => Promise<{ success: boolean; message?: string }>;
   onNavigateBackToCart: () => void;
   isSubmitting?: boolean;
+  isDeliveryDisabled?: boolean;
+  isSectionDisabled?: boolean;
+  sectionNotice?: string;
 }
 
 const EMPTY_GEO: GeoSelectionValue = {
@@ -60,6 +63,9 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
   onSubmitOrder,
   onNavigateBackToCart,
   isSubmitting = false,
+  isDeliveryDisabled = false,
+  isSectionDisabled = false,
+  sectionNotice,
 }) => {
   // Select initial address (default saved address or first saved address if available)
   const defaultSavedAddr =
@@ -396,6 +402,18 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
     if (isSubmitting) return;
     setValidationError(null);
 
+    if (isSectionDisabled) {
+      setValidationError(
+        sectionNotice || 'قسم الأكلات الجاهزة متوقف حالياً ولا يمكن بدء طلبات جديدة منه.'
+      );
+      return;
+    }
+
+    if (isDeliveryDisabled) {
+      setValidationError('خدمة التوصيل متوقفة مؤقتًا');
+      return;
+    }
+
     if (!customerName.trim()) {
       setValidationError('يرجى إدخال اسم العميل المستلم لتأكيد الطلب.');
       return;
@@ -471,6 +489,8 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
 
   const canSubmit = Boolean(
     !isSubmitting &&
+      !isSectionDisabled &&
+      !isDeliveryDisabled &&
       !isCheckingCoverage &&
       isAddressCovered &&
       tariffResolved &&
@@ -957,6 +977,32 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
               </div>
             </div>
 
+            {/* Centralized Section / Delivery Stopped Banner (Distinct from Geo Coverage) */}
+            {(isSectionDisabled || isDeliveryDisabled) && (
+              <div
+                style={{
+                  background: isSectionDisabled ? '#fef2f2' : '#fffbeb',
+                  border: isSectionDisabled ? '1.5px solid #fca5a5' : '1.5px solid #f59e0b',
+                  borderRadius: '12px',
+                  padding: '12px 14px',
+                  marginTop: '4px',
+                  color: isSectionDisabled ? '#991b1b' : '#92400e',
+                  fontSize: '12.5px',
+                  fontWeight: 800,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <span style={{ fontSize: '18px' }}>{isSectionDisabled ? '🔒' : '🛵'}</span>
+                <span>
+                  {isSectionDisabled
+                    ? sectionNotice || 'قسم الأكلات الجاهزة متوقف حالياً ولا يمكن إنشاء طلبات جديدة منه.'
+                    : 'خدمة التوصيل متوقفة مؤقتًا'}
+                </span>
+              </div>
+            )}
+
             {/* Coverage Error Banner */}
             {(!isAddressCovered || coverageError) && !isCheckingCoverage && (
               <div
@@ -996,11 +1042,20 @@ export const BiteBaitCheckoutView: React.FC<BiteBaitCheckoutViewProps> = ({
                 opacity: !canSubmit ? 0.65 : 1,
                 cursor: !canSubmit ? 'not-allowed' : 'pointer',
                 pointerEvents: isSubmitting ? 'none' : 'auto',
-                background: !isAddressCovered && !isCheckingCoverage ? '#94a3b8' : undefined,
+                background:
+                  (!isAddressCovered && !isCheckingCoverage) ||
+                  isDeliveryDisabled ||
+                  isSectionDisabled
+                    ? '#94a3b8'
+                    : undefined,
               }}
             >
               {isSubmitting ? (
                 <span>جاري تسجيل الطلب لدى المطعم في قاعدة البيانات... ⏳</span>
+              ) : isSectionDisabled ? (
+                <span>القسم متوقف حالياً 🔒</span>
+              ) : isDeliveryDisabled ? (
+                <span>خدمة التوصيل متوقفة مؤقتًا</span>
               ) : isCheckingCoverage ? (
                 <span>جاري التحقق من نطاق التغطية والتسعيرة المركزية... 🔍</span>
               ) : !canSubmit ? (

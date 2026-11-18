@@ -469,7 +469,11 @@ export const PharmacyOrderDetailModal: React.FC<
               <div className="flex justify-between text-slate-600">
                 <span>رسوم التوصيل:</span>
                 <span className="font-bold text-slate-800">
-                  {order.deliveryFee ? `${order.deliveryFee} ج.م` : "25 ج.م"}
+                  {order.deliveryFee !== undefined && order.deliveryFee !== null
+                    ? Number(order.deliveryFee) === 0
+                      ? "توصيل مجاني (0 ج.م)"
+                      : `${order.deliveryFee} ج.م`
+                    : "غير محددة"}
                 </span>
               </div>
 

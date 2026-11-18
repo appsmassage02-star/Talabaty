@@ -8,6 +8,9 @@ export interface PharmacyConfig {
   displayWidth: PharmacyWidth;
   nameAr: string;
   imageUrl: string;
+  deliveryEnabled?: boolean;
+  loaded?: boolean;
+  error?: string | null;
 }
 
 export type PharmacyOrderStatus =

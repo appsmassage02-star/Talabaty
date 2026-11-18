@@ -22,6 +22,10 @@ import './styles/bite-and-bait.css';
 import { useApp } from '../context/AppContext';
 import { biteAndBaitService } from './services/biteAndBaitService';
 import { validateGpsCoordinates, type DeliveryOwnerType } from '../lib/geoService';
+import {
+  DELIVERY_STOPPED_BANNER_TEXT,
+  sectionSettingsService,
+} from '../lib/sectionSettingsService';
 
 import {
   PREVIEW_RESTAURANTS,
@@ -292,6 +296,36 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     loadFavorites,
     loadOrders,
   ]);
+
+  // Live subscription to centralized `public.app_section_settings` (`ready_food`) + foreground refresh
+  useEffect(() => {
+    if (forcePreviewMode) return;
+    const unsubscribe = sectionSettingsService.subscribe((snapshot) => {
+      const central = snapshot.ready_food;
+      if (!central.loaded) {
+        if (central.error) {
+          setSettingsError(central.error);
+        }
+        return;
+      }
+      setSettingsError(null);
+      setSectionSettings({
+        id: central.section_key,
+        section_enabled: central.section_enabled,
+        section_visibility: central.section_visible ? 'visible' : 'hidden',
+        section_visible: central.section_visible,
+        delivery_enabled: central.delivery_enabled,
+        disabled_display_mode: 'show_disabled',
+        updated_at: central.updated_at || undefined,
+        status_message: !central.section_enabled
+          ? 'قسم الأكلات الجاهزة متوقف حالياً ولا يمكن بدء طلبات جديدة منه.'
+          : !central.delivery_enabled
+          ? DELIVERY_STOPPED_BANNER_TEXT
+          : undefined,
+      });
+    });
+    return () => unsubscribe();
+  }, [forcePreviewMode]);
 
   // Lazy-load restaurant menu strictly on-demand when restaurant is opened
   const loadRestaurantMenu = useCallback(
@@ -753,6 +787,14 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   };
 
   const handleProceedToCheckoutRestaurant = (restaurantId: string) => {
+    if (isSectionHardDisabled) {
+      triggerNotification(`القسم غير متاح للطلب حالياً: ${disabledNotice}`);
+      return;
+    }
+    if (isDeliveryStopped) {
+      triggerNotification(DELIVERY_STOPPED_BANNER_TEXT);
+      return;
+    }
     const group = restaurantGroups.find((g) => g.restaurantId === restaurantId);
     if (!group || group.items.length === 0) {
       triggerNotification('لا توجد عناصر لهذا المطعم في السلة.');
@@ -1011,16 +1053,24 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
   };
 
   // --------------------------------------------------------------------------
-  // Check Section Enabled / Disabled State (restaurant_section_settings)
+  // Check Section & Delivery Enabled State (`public.app_section_settings` -> `ready_food`)
   // --------------------------------------------------------------------------
   const isSectionHardDisabled =
     isSectionDisabled ||
     Boolean(settingsError) ||
-    (sectionSettings ? !sectionSettings.section_enabled : false);
+    !sectionSettings ||
+    sectionSettings.section_enabled !== true;
+
+  const isDeliveryStopped = Boolean(
+    !isSectionHardDisabled &&
+      sectionSettings &&
+      sectionSettings.delivery_enabled === false
+  );
 
   const disabledNotice =
+    (settingsError ? `تعذر استرجاع إعدادات القسم: ${settingsError}` : undefined) ||
     (sectionSettings && sectionSettings.status_message) ||
-    (settingsError ? `تعذر استرجاع إعدادات القسم: ${settingsError}` : disabledMessage);
+    disabledMessage;
 
   // 1. Explicit Loading State for Section Settings
   if (isLoadingSettings) {
@@ -1044,8 +1094,8 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     );
   }
 
-  // 2. Explicit Error State with Retry Button (Section strictly disabled on error)
-  if (settingsError) {
+  // 2. Explicit Error State (unless user is tracking existing active orders)
+  if (settingsError && currentView !== 'orders') {
     return (
       <div className="bite-and-bait-scope" style={{ padding: '30px 20px' }}>
         <div
@@ -1070,7 +1120,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
               تفاصيل الخطأ: {settingsError}
             </span>
           </p>
-          <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+          <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
             <button
               type="button"
               onClick={onBackToAppHome}
@@ -1086,6 +1136,22 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
               }}
             >
               ← العودة للرئيسية
+            </button>
+            <button
+              type="button"
+              onClick={() => setCurrentView('orders')}
+              style={{
+                background: '#0f172a',
+                color: '#ffffff',
+                border: 'none',
+                padding: '8px 18px',
+                borderRadius: '10px',
+                fontSize: '12.5px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              عرض طلباتي ({activeOrders.length})
             </button>
             <button
               type="button"
@@ -1109,8 +1175,8 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     );
   }
 
-  // 3. Section Visibility: Hidden
-  if (sectionSettings && sectionSettings.section_visibility === 'hidden') {
+  // 3. Section Visibility: Hidden (keep existing orders view accessible if user has orders)
+  if (sectionSettings && sectionSettings.section_visibility === 'hidden' && currentView !== 'orders') {
     return (
       <div className="bite-and-bait-scope" style={{ padding: '30px 20px' }}>
         <div
@@ -1129,24 +1195,44 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             قسم بايت آند بيت مخفي حالياً
           </h3>
           <p style={{ fontSize: '12.5px', color: '#64748b', margin: '0 0 16px', lineHeight: 1.5 }}>
-            تم ضبط رؤية هذا القسم على (مخفي) في جدول إعدادات النظام restaurant_section_settings.
+            تم ضبط رؤية هذا القسم على (مخفي) في جدول إعدادات الأقسام المركزية.
           </p>
-          <button
-            type="button"
-            onClick={onBackToAppHome}
-            style={{
-              background: '#f1f5f9',
-              color: '#0f172a',
-              border: '1px solid #cbd5e1',
-              padding: '8px 18px',
-              borderRadius: '10px',
-              fontSize: '12.5px',
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
-          >
-            ← العودة للرئيسية
-          </button>
+          <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={onBackToAppHome}
+              style={{
+                background: '#f1f5f9',
+                color: '#0f172a',
+                border: '1px solid #cbd5e1',
+                padding: '8px 18px',
+                borderRadius: '10px',
+                fontSize: '12.5px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              ← العودة للرئيسية
+            </button>
+            {activeOrders.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setCurrentView('orders')}
+                style={{
+                  background: '#0f172a',
+                  color: '#ffffff',
+                  border: 'none',
+                  padding: '8px 18px',
+                  borderRadius: '10px',
+                  fontSize: '12.5px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                متابعة طلباتي ({activeOrders.length})
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -1209,37 +1295,70 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         filter: isGrayscaleMode ? 'grayscale(100%)' : 'none',
       }}
     >
-      {/* Read-Only Status & Database Integration Banner */}
+      {/* Centralized `app_section_settings` Status Banner (`ready_food`) */}
       <div
         style={{
-          background: 'linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%)',
-          border: '1.5px solid #10b981',
+          background: isSectionHardDisabled
+            ? 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)'
+            : isDeliveryStopped
+            ? 'linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%)'
+            : 'linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%)',
+          border: isSectionHardDisabled
+            ? '1.5px solid #fca5a5'
+            : isDeliveryStopped
+            ? '1.5px solid #f59e0b'
+            : '1.5px solid #10b981',
           borderRadius: '16px',
           padding: '10px 16px',
           marginBottom: '14px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          boxShadow: '0 2px 10px rgba(16, 185, 129, 0.1)',
+          boxShadow: '0 2px 10px rgba(15, 23, 42, 0.06)',
           flexWrap: 'wrap',
           gap: '8px',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '18px' }}>🚀</span>
+          <span style={{ fontSize: '18px' }}>
+            {isSectionHardDisabled ? '🔒' : isDeliveryStopped ? '🛵' : '🚀'}
+          </span>
           <div>
-            <div style={{ fontSize: '13px', fontWeight: 800, color: '#065f46' }}>
-              قسم بايت آند بيت – ربط إنشاء الطلبات بقاعدة البيانات الفعلية (RPC: create_bite_bait_order)
+            <div
+              style={{
+                fontSize: '13px',
+                fontWeight: 800,
+                color: isSectionHardDisabled ? '#991b1b' : isDeliveryStopped ? '#92400e' : '#065f46',
+              }}
+            >
+              {isSectionHardDisabled
+                ? 'قسم الأكلات الجاهزة متوقف حالياً'
+                : isDeliveryStopped
+                ? DELIVERY_STOPPED_BANNER_TEXT
+                : 'قسم بايت آند بيت – نظام الطلبات والتسعيرة المركزية'}
             </div>
-            <div style={{ fontSize: '11px', color: '#047857' }}>
-              يتم تسجيل وتوثيق الطلبات رسمياً في Supabase مع التحقق من عضوية الأسرة والـ GPS ومنع التكرار.
+            <div
+              style={{
+                fontSize: '11px',
+                color: isSectionHardDisabled ? '#b91c1c' : isDeliveryStopped ? '#b45309' : '#047857',
+              }}
+            >
+              {isSectionHardDisabled
+                ? disabledNotice
+                : isDeliveryStopped
+                ? 'يمكنك تصفح المطاعم وقوائم الطعام وطلباتك الحالية، ويُمنع إنشاء طلب توصيل جديد مؤقتاً.'
+                : 'يتم تسجيل وتوثيق الطلبات رسمياً في Supabase مع التحقق من عضوية الأسرة والـ GPS ومنع التكرار.'}
             </div>
           </div>
         </div>
 
         <span
           style={{
-            background: '#10b981',
+            background: isSectionHardDisabled
+              ? '#dc2626'
+              : isDeliveryStopped
+              ? '#d97706'
+              : '#10b981',
             color: '#ffffff',
             fontSize: '11px',
             fontWeight: 800,
@@ -1247,7 +1366,11 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             borderRadius: '50px',
           }}
         >
-          إنشاء الطلبات مفعل ✅
+          {isSectionHardDisabled
+            ? 'القسم متوقف'
+            : isDeliveryStopped
+            ? DELIVERY_STOPPED_BANNER_TEXT
+            : 'إنشاء الطلبات مفعل ✅'}
         </span>
       </div>
 
@@ -1277,7 +1400,7 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
         </div>
       )}
 
-      {/* Section Disabled Notice if disabled in restaurant_section_settings */}
+      {/* Section Disabled Notice when section_enabled = false */}
       {isSectionHardDisabled && (
         <div
           style={{
@@ -1636,6 +1759,9 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
             onSubmitOrder={handleOrderSubmit}
             onNavigateBackToCart={() => setCurrentView('cart')}
             isSubmitting={isSubmittingOrder}
+            isDeliveryDisabled={isDeliveryStopped}
+            isSectionDisabled={isSectionHardDisabled}
+            sectionNotice={disabledNotice}
           />
         ) : (
           <BiteBaitEmptyState

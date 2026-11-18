@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import { cacheManager } from "./cacheManager";
 import { processDocumentImage } from "./imageUtils";
+import { sectionSettingsService } from "./sectionSettingsService";
 import {
   resolveCentralTariff,
   validateGpsCoordinates,
@@ -216,60 +217,78 @@ class PharmacyService {
   // =========================================================================
 
   /**
-   * Fetch current pharmacy service and section visibility settings
+   * Fetch current pharmacy service, delivery, and section visibility settings
+   * STRICTLY from central `public.app_section_settings` (section_key = 'pharmacy').
+   * Legacy `pharmacy_settings` / `pharmacy_config` cache may only hold purely visual layout (`displayWidth`, `nameAr`, `imageUrl`),
+   * NEVER availability/visibility/delivery status (fail-closed on query error).
    */
-  async getSettings(): Promise<PharmacyConfig & { serviceEnabled: boolean; sectionVisible: boolean }> {
-    try {
-      const { data, error } = await supabase
-        .from("pharmacy_settings")
-        .select("*")
-        .limit(1)
-        .maybeSingle();
+  async getSettings(): Promise<
+    PharmacyConfig & {
+      serviceEnabled: boolean;
+      sectionVisible: boolean;
+      deliveryEnabled: boolean;
+      loaded: boolean;
+      error: string | null;
+    }
+  > {
+    const central = await sectionSettingsService.fetchSectionSetting("pharmacy");
 
-      const serviceEnabled = data?.service_enabled ?? true;
-      const sectionVisible = data?.section_visible ?? true;
+    const serviceEnabled = central.loaded && central.section_enabled === true;
+    const sectionVisible = central.loaded && central.section_visible === true;
+    const deliveryEnabled = central.loaded && central.delivery_enabled === true;
 
-      let status: PharmacyStatus = "active";
+    let status: PharmacyStatus = "disabled";
+    if (central.loaded) {
       if (!sectionVisible) {
         status = "hidden";
       } else if (!serviceEnabled) {
         status = "disabled";
+      } else {
+        status = "active";
       }
-
-      const dbWidth = (data as any)?.display_width;
-      const cached = cacheManager.getGlobalCache<any>("pharmacy_config");
-      const displayWidth: PharmacyWidth =
-        dbWidth === "half" || dbWidth === "full"
-          ? dbWidth
-          : cached?.displayWidth === "half"
-          ? "half"
-          : "full";
-      const nameAr = (data as any)?.name_ar || cached?.nameAr || "الصيدلية";
-      const imageUrl = (data as any)?.image_url || cached?.imageUrl || "";
-
-      return {
-        serviceEnabled,
-        sectionVisible,
-        status,
-        displayWidth,
-        nameAr,
-        imageUrl,
-      };
-    } catch {
-      const cached = cacheManager.getGlobalCache<any>("pharmacy_config");
-      return {
-        serviceEnabled: true,
-        sectionVisible: true,
-        status: "active",
-        displayWidth: cached?.displayWidth === "half" ? "half" : "full",
-        nameAr: cached?.nameAr || "الصيدلية",
-        imageUrl: cached?.imageUrl || "",
-      };
     }
+
+    let dbWidth: string | undefined;
+    let dbNameAr: string | undefined;
+    let dbImageUrl: string | undefined;
+    try {
+      const { data: layoutRow } = await supabase
+        .from("pharmacy_settings")
+        .select("display_width, name_ar, image_url")
+        .limit(1)
+        .maybeSingle();
+      dbWidth = (layoutRow as any)?.display_width;
+      dbNameAr = (layoutRow as any)?.name_ar;
+      dbImageUrl = (layoutRow as any)?.image_url;
+    } catch {
+      // Visual layout metadata only; ignore silently without ever modifying operational availability
+    }
+
+    const cachedLayout = cacheManager.getGlobalCache<any>("pharmacy_config");
+    const displayWidth: PharmacyWidth =
+      dbWidth === "half" || dbWidth === "full"
+        ? dbWidth
+        : cachedLayout?.displayWidth === "half"
+        ? "half"
+        : "full";
+    const nameAr = dbNameAr || cachedLayout?.nameAr || "الصيدلية";
+    const imageUrl = dbImageUrl || cachedLayout?.imageUrl || "";
+
+    return {
+      serviceEnabled,
+      sectionVisible,
+      deliveryEnabled,
+      loaded: central.loaded,
+      error: central.error,
+      status,
+      displayWidth,
+      nameAr,
+      imageUrl,
+    };
   }
 
   /**
-   * Admin: Update pharmacy service configuration
+   * Update pharmacy visual layout config only (availability comes exclusively from `app_section_settings`)
    */
   async updateSettings(
     settings: Partial<PharmacyConfig>
@@ -278,53 +297,32 @@ class PharmacyService {
       if (
         settings.displayWidth !== undefined ||
         settings.nameAr !== undefined ||
-        settings.imageUrl !== undefined ||
-        settings.status !== undefined
+        settings.imageUrl !== undefined
       ) {
         const existing = cacheManager.getGlobalCache<any>("pharmacy_config") || {};
         cacheManager.setGlobalCache("pharmacy_config", {
-          ...existing,
-          ...settings,
+          displayWidth: settings.displayWidth ?? existing.displayWidth,
+          nameAr: settings.nameAr ?? existing.nameAr,
+          imageUrl: settings.imageUrl ?? existing.imageUrl,
         });
+      }
+
+      if (settings.displayWidth === undefined) {
+        return { success: true };
       }
 
       const updates: any = {
         updated_at: new Date().toISOString(),
+        display_width: settings.displayWidth === "half" ? "half" : "full",
       };
 
-      if (settings.status !== undefined) {
-        if (settings.status === "hidden") {
-          updates.section_visible = false;
-        } else if (settings.status === "disabled") {
-          updates.section_visible = true;
-          updates.service_enabled = false;
-        } else {
-          updates.section_visible = true;
-          updates.service_enabled = true;
-        }
-      }
-
-      if (settings.displayWidth !== undefined) {
-        updates.display_width = settings.displayWidth === "half" ? "half" : "full";
-      }
-
-      let { error } = await supabase
+      const { error } = await supabase
         .from("pharmacy_settings")
         .update(updates)
         .eq("id", "00000000-0000-0000-0000-000000000001");
 
-      if (error && (error.message?.includes("display_width") || error.code === "42703")) {
-        console.warn("[PharmacyService] display_width column not applied yet in remote DB, falling back:", error);
-        delete updates.display_width;
-        const retryRes = await supabase
-          .from("pharmacy_settings")
-          .update(updates)
-          .eq("id", "00000000-0000-0000-0000-000000000001");
-        error = retryRes.error;
-      }
-
       if (error) {
-        console.warn("[PharmacyService] updateSettings warning:", error);
+        console.warn("[PharmacyService] updateSettings layout warning:", error);
       }
       return { success: !error };
     } catch (err: any) {
@@ -1128,6 +1126,12 @@ class PharmacyService {
     this.inFlightCreateOrder = true;
 
     try {
+      // Fresh DB verification against `public.app_section_settings` right before order creation
+      const sectionGuard = await sectionSettingsService.verifyOrderAllowed("pharmacy");
+      if (!sectionGuard.allowed) {
+        throw new Error(sectionGuard.reason);
+      }
+
       const orderId = crypto.randomUUID();
       const title = params.title?.trim() || "طلب روشتة علاج";
       const pharmacyName = params.pharmacyName?.trim() || null;

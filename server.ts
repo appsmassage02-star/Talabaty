@@ -485,40 +485,39 @@ app.post("/api/food/create-order", async (req, res) => {
       return res.status(400).json({ success: false, message: "يرجى إدخال رقم هاتف للتواصل." });
     }
 
-    // 2. Check restaurant_section_settings
-    const { data: settingsData } = await serverSupabase
-      .from("restaurant_section_settings")
-      .select("*")
-      .limit(1);
+    // 2. Check centralized public.app_section_settings (`ready_food`)
+    const { data: settings, error: settingsErr } = await serverSupabase
+      .from("app_section_settings")
+      .select("section_key, section_enabled, section_visible, delivery_enabled, updated_at")
+      .eq("section_key", "ready_food")
+      .maybeSingle();
 
-    const settings = settingsData?.[0];
-    if (!settings || !settings.section_enabled) {
+    if (settingsErr || !settings) {
       return res.status(400).json({
         success: false,
-        message: "قسم المطاعم متوقف حالياً من قِبل إدارة التطبيق (section_enabled = false).",
+        message: "تعذر التحقق من إعدادات قسم الأكلات الجاهزة؛ لا يمكن إرسال الطلب حالياً.",
       });
     }
-    if (settings.section_visibility === "hidden") {
+    if (settings.section_visible !== true) {
       return res.status(400).json({
         success: false,
-        message: "قسم المطاعم غير متاح حالياً (القسم مخفي في الإعدادات).",
+        message: "قسم الأكلات الجاهزة غير متاح للعرض حالياً.",
       });
     }
-
-    // 3. Verify Geographic Service Area Scope
-    const { data: activeServiceAreas, error: saErr } = await serverSupabase
-      .from("restaurant_section_service_areas")
-      .select("id, governorate_id, center_id, area_id, is_active")
-      .eq("is_active", true);
-
-    if (saErr || !activeServiceAreas || activeServiceAreas.length === 0) {
+    if (settings.section_enabled !== true) {
       return res.status(400).json({
         success: false,
-        message: "لا يوجد نطاق جغرافي مفعّل لقسم المطاعم في قاعدة البيانات حالياً.",
+        message: "قسم الأكلات الجاهزة متوقف حالياً ولا يمكن إنشاء طلبات جديدة منه.",
+      });
+    }
+    if (settings.delivery_enabled !== true) {
+      return res.status(400).json({
+        success: false,
+        message: "خدمة التوصيل متوقفة مؤقتًا",
       });
     }
 
-    // 4. Verify Restaurant in DB
+    // 3. Verify Restaurant in DB (Geographic scope & central tariff are resolved below via resolveRestaurantDeliveryScopeAndTariff)
     const { data: dbRestaurant, error: restErr } = await serverSupabase
       .from("restaurants")
       .select("*")

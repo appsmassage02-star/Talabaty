@@ -25,6 +25,7 @@ import {
   validateGpsCoordinates,
   type DeliveryOwnerType,
 } from '../../lib/geoService';
+import { sectionSettingsService } from '../../lib/sectionSettingsService';
 
 export interface ServiceResult<T> {
   success: boolean;
@@ -158,7 +159,7 @@ export function normalizeArabicText(text?: string | null): string {
  */
 export const biteAndBaitService = {
   // --------------------------------------------------------------------------
-  // 1. Read Restaurant Section Settings (restaurant_section_settings)
+  // 1. Read Ready-Food Section Settings STRICTLY from `public.app_section_settings` (`ready_food`)
   // --------------------------------------------------------------------------
   async getSectionSettings(): Promise<ServiceResult<RestaurantSectionSettings | null>> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -171,50 +172,31 @@ export const biteAndBaitService = {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('restaurant_section_settings')
-        .select(
-          'id, section_enabled, section_visibility, disabled_display_mode, created_at, updated_at'
-        );
+      const central = await sectionSettingsService.fetchSectionSetting('ready_food');
 
-      if (error) {
+      if (!central.loaded) {
         return {
           success: false,
           data: null,
-          error: `تعذر قراءة إعدادات قسم المطاعم (restaurant_section_settings): ${error.message}`,
-          errorCode: error.code,
+          error:
+            central.error ||
+            'تعذر قراءة إعدادات قسم الأكلات الجاهزة من الجدول المركزي (app_section_settings).',
         };
       }
 
-      if (!data || data.length === 0) {
-        return {
-          success: false,
-          data: null,
-          error: 'جدول إعدادات القسم (restaurant_section_settings) فارغ ولا يحتوي على سجل تهيئة.',
-        };
-      }
-
-      if (data.length > 1) {
-        return {
-          success: false,
-          data: null,
-          error: 'يوجد أكثر من سجل في جدول إعدادات القسم دون تحديد السجل النشط.',
-        };
-      }
-
-      const row = data[0];
       const settings: RestaurantSectionSettings = {
-        id: row.id,
-        section_enabled: Boolean(row.section_enabled),
-        section_visibility: row.section_visibility === 'hidden' ? 'hidden' : 'visible',
-        disabled_display_mode: ['show_disabled', 'grayscale', 'hide'].includes(row.disabled_display_mode)
-          ? row.disabled_display_mode
-          : 'show_disabled',
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        status_message: row.section_enabled
-          ? undefined
-          : 'قسم المطاعم معطل حالياً من قِبل إدارة التطبيق (section_enabled = false).',
+        id: central.section_key,
+        section_enabled: central.section_enabled,
+        section_visibility: central.section_visible ? 'visible' : 'hidden',
+        section_visible: central.section_visible,
+        delivery_enabled: central.delivery_enabled,
+        disabled_display_mode: 'show_disabled',
+        updated_at: central.updated_at || undefined,
+        status_message: !central.section_enabled
+          ? 'قسم الأكلات الجاهزة متوقف حالياً ولا يمكن بدء طلبات جديدة منه.'
+          : !central.delivery_enabled
+          ? 'خدمة التوصيل متوقفة مؤقتًا'
+          : undefined,
       };
 
       return {
@@ -225,7 +207,7 @@ export const biteAndBaitService = {
       return {
         success: false,
         data: null,
-        error: err?.message || 'استثناء غير متوقع أثناء فحص إعدادات قسم المطاعم.',
+        error: err?.message || 'استثناء غير متوقع أثناء فحص إعدادات قسم الأكلات الجاهزة.',
       };
     }
   },
@@ -1561,6 +1543,16 @@ export const biteAndBaitService = {
     }
 
     try {
+      // 0. Fresh DB verification against `public.app_section_settings` (`ready_food`) before creating order
+      const sectionGuard = await sectionSettingsService.verifyOrderAllowed('ready_food');
+      if (!sectionGuard.allowed) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: sectionGuard.reason,
+        };
+      }
+
       // 1. Mandatory Parameters Validation
       if (!params.householdId) {
         return {

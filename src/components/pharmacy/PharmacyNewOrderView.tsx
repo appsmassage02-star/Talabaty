@@ -52,6 +52,9 @@ interface PharmacyNewOrderViewProps {
   }) => Promise<any>;
   onCancel: () => void;
   onAddPharmacy: (name: string) => Promise<string[]>;
+  settingsLoaded?: boolean;
+  sectionEnabled?: boolean;
+  deliveryEnabled?: boolean;
 }
 
 const PHARMACY_UNITS: PharmacyUnit[] = ["علبة", "شريط", "قطعة", "أمبول"];
@@ -71,6 +74,9 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
   onCreateOrder,
   onCancel,
   onAddPharmacy,
+  settingsLoaded = true,
+  sectionEnabled = true,
+  deliveryEnabled = true,
 }) => {
   // Title
   const [title, setTitle] = useState(initialPrescription?.title || "");
@@ -511,6 +517,19 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
 
   // 2. Save & Send to Driver (Create Order)
   const handleSaveAndSendToDriver = async () => {
+    if (!settingsLoaded || !sectionEnabled) {
+      setErrorMessage(
+        !settingsLoaded
+          ? "تعذر التحقق من إعدادات قسم الصيدلية من الخادم؛ لا يمكن إرسال طلبات جديدة حالياً."
+          : "قسم الصيدلية متوقف حالياً ولا يمكن بدء طلبات جديدة منه."
+      );
+      return;
+    }
+    if (!deliveryEnabled) {
+      setErrorMessage("خدمة التوصيل متوقفة مؤقتًا");
+      return;
+    }
+
     if (!validate()) return;
 
     if (!selectedAddressId) {
@@ -609,6 +628,24 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
         <div className="bg-rose-50 border border-rose-200 text-rose-700 p-3 rounded-xl text-xs font-bold flex items-center space-x-2 space-x-reverse animate-in shake">
           <AlertCircle className="w-4 h-4 text-rose-500 shrink-0" />
           <span>{errorMessage}</span>
+        </div>
+      )}
+
+      {(!settingsLoaded || !sectionEnabled) && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 p-3 rounded-xl text-xs font-bold flex items-center space-x-2 space-x-reverse">
+          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>
+            {!settingsLoaded
+              ? "تعذر التحقق من حالة قسم الصيدلية؛ يمكنك حفظ الروشتة فقط دون إرسال طلب توصيل."
+              : "قسم الصيدلية متوقف حالياً ولا يمكن إرسال طلبات جديدة منه. يمكنك حفظ الروشتة للمرات القادمة."}
+          </span>
+        </div>
+      )}
+
+      {settingsLoaded && sectionEnabled && !deliveryEnabled && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded-xl text-xs font-bold flex items-center space-x-2 space-x-reverse">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>خدمة التوصيل متوقفة مؤقتًا — يمكنك حفظ الروشتة فقط ولا يمكن إرسال طلب توصيل جديد حالياً.</span>
         </div>
       )}
 
@@ -1308,6 +1345,9 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
             onClick={handleSaveAndSendToDriver}
             disabled={
               isSubmitting ||
+              !settingsLoaded ||
+              !sectionEnabled ||
+              !deliveryEnabled ||
               pharmacyTariff.loading ||
               !pharmacyTariff.allowed ||
               pharmacyTariff.deliveryFee === null
@@ -1315,7 +1355,13 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
             className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-sm hover:shadow transition-all cursor-pointer"
           >
             <Send className="w-4 h-4" />
-            <span>حفظ وإرسال للسائق</span>
+            <span>
+              {settingsLoaded && sectionEnabled && !deliveryEnabled
+                ? "خدمة التوصيل متوقفة مؤقتًا"
+                : !settingsLoaded || !sectionEnabled
+                ? "الخدمة غير متاحة"
+                : "حفظ وإرسال للسائق"}
+            </span>
           </button>
         </div>
       </div>

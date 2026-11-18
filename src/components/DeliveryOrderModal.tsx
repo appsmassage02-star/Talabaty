@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { deliveryService } from '../lib/deliveryService';
+import {
+  DELIVERY_STOPPED_BANNER_TEXT,
+  sectionSettingsService,
+} from '../lib/sectionSettingsService';
 import { validateGpsCoordinates } from '../lib/geoService';
 import { HouseholdAddress, DeliverySettings, InvoiceProduct } from '../types';
 import {
@@ -148,8 +152,24 @@ export const DeliveryOrderModal: React.FC<Props> = ({
 
     fetchData();
 
+    const unsubscribeSection = sectionSettingsService.subscribe((snapshot) => {
+      if (!isMounted) return;
+      const hh = snapshot.household_shortages;
+      setSettings((prev) => ({
+        id: 'household_shortages',
+        delivery_enabled: hh.loaded && hh.delivery_enabled === true,
+        section_enabled: hh.loaded && hh.section_enabled === true,
+        section_visible: hh.loaded && hh.section_visible === true,
+        loaded: hh.loaded,
+        error: hh.error,
+        default_delivery_fee: prev?.default_delivery_fee ?? 0,
+        updated_at: hh.updated_at || undefined,
+      }));
+    });
+
     return () => {
       isMounted = false;
+      unsubscribeSection();
     };
   }, [isOpen, household?.id, supabaseUser?.id]);
 
@@ -204,7 +224,9 @@ export const DeliveryOrderModal: React.FC<Props> = ({
 
   if (!isOpen) return null;
 
-  const isGlobalDeliveryEnabled = settings?.delivery_enabled === true;
+  const isSectionLoaded = settings?.loaded === true;
+  const isSectionEnabled = isSectionLoaded && settings?.section_enabled === true;
+  const isGlobalDeliveryEnabled = isSectionEnabled && settings?.delivery_enabled === true;
   const isDeliveryEnabled = isGlobalDeliveryEnabled && tariffState.allowed;
   const resolvedFeeNumber =
     tariffState.allowed && tariffState.deliveryFee !== null ? Number(tariffState.deliveryFee) : null;
@@ -299,8 +321,18 @@ export const DeliveryOrderModal: React.FC<Props> = ({
   const handleConfirmOrder = async () => {
     setFormError(null);
 
-    if (settings?.delivery_enabled !== true) {
-      setFormError('خدمة التوصيل معطلة حالياً. لا يمكن إنشاء طلبات جديدة في الوقت الحالي.');
+    // Fresh DB check against centralized `public.app_section_settings` right before creating order
+    const guard = await sectionSettingsService.verifyOrderAllowed('household_shortages');
+    if (!guard.allowed) {
+      setSettings((prev) => ({
+        ...(prev || { id: 'household_shortages', default_delivery_fee: 0 }),
+        loaded: guard.setting.loaded,
+        section_enabled: guard.setting.section_enabled,
+        section_visible: guard.setting.section_visible,
+        delivery_enabled: guard.setting.delivery_enabled,
+        error: guard.setting.error,
+      }));
+      setFormError(guard.reason);
       return;
     }
 
@@ -379,14 +411,38 @@ export const DeliveryOrderModal: React.FC<Props> = ({
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
-          {/* Service Disabled Notice */}
-          {!isLoading && !isGlobalDeliveryEnabled && (
+          {/* Centralized Section & Delivery Status Notice (`app_section_settings`) */}
+          {!isLoading && !isSectionLoaded && (
             <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl flex items-start space-x-2.5 space-x-reverse text-rose-800">
               <Ban className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
               <div>
-                <h4 className="text-xs font-black">خدمة التوصيل معطلة حالياً</h4>
+                <h4 className="text-xs font-black">تعذر التحقق من إعدادات التوصيل</h4>
                 <p className="text-[11px] text-rose-700 mt-0.5">
-                  تم إيقاف استقبال طلبات الدليفري الجديدة مؤقتاً بواسطة الإدارة. يمكنك حفظ الفاتورة كشراء شخصي عادي.
+                  {settings?.error || 'لا يمكن التحقق من حالة قسم نواقص المنزل حالياً. يرجى المحاولة مرة أخرى أو حفظ الفاتورة كشراء شخصي.'}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {!isLoading && isSectionLoaded && !isSectionEnabled && (
+            <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl flex items-start space-x-2.5 space-x-reverse text-rose-800">
+              <Ban className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-xs font-black">القسم متوقف حالياً</h4>
+                <p className="text-[11px] text-rose-700 mt-0.5">
+                  قسم نواقص المنزل متوقف حالياً ولا يمكن إنشاء طلبات جديدة منه.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {!isLoading && isSectionLoaded && isSectionEnabled && !isGlobalDeliveryEnabled && (
+            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-2xl flex items-start space-x-2.5 space-x-reverse text-amber-900">
+              <Ban className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-xs font-black">{DELIVERY_STOPPED_BANNER_TEXT}</h4>
+                <p className="text-[11px] text-amber-800 mt-0.5">
+                  {DELIVERY_STOPPED_BANNER_TEXT}. لا يمكن إنشاء طلب توصيل جديد حالياً، ويمكنك حفظ الفاتورة كشراء شخصي عادي.
                 </p>
               </div>
             </div>

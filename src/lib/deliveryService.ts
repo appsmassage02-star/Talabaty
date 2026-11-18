@@ -1,5 +1,6 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { cacheManager } from './cacheManager';
+import { sectionSettingsService } from './sectionSettingsService';
 import {
   checkGpsWithinGeoBoundary,
   resolveCentralTariff,
@@ -17,76 +18,37 @@ import {
 
 /**
  * Unified Delivery Service for Talabaty Household Client
- * - Central `delivery_settings.delivery_enabled` check
+ * - Central `public.app_section_settings` (`household_shortages`) check
  * - Household Addresses with mandatory `geo_*` hierarchy IDs + valid GPS telemetry
  * - Centralized `delivery_area_tariffs` resolution (NO hardcoded delivery fees)
  */
 export const deliveryService = {
   /**
-   * Fetch central delivery enablement settings (`delivery_enabled`)
+   * Fetch central household_shortages settings strictly from `public.app_section_settings`
+   * (fail-closed: never assumes enabled on error or missing row)
    */
   async getSettings(): Promise<DeliverySettings> {
-    const disabledSettings: DeliverySettings = {
-      id: 'default',
-      delivery_enabled: false,
+    const central = await sectionSettingsService.fetchSectionSetting('household_shortages');
+    return {
+      id: 'household_shortages',
+      delivery_enabled: central.loaded && central.delivery_enabled === true,
+      section_enabled: central.loaded && central.section_enabled === true,
+      section_visible: central.loaded && central.section_visible === true,
+      loaded: central.loaded,
+      error: central.error,
       default_delivery_fee: 0,
+      updated_at: central.updated_at || undefined,
     };
-
-    if (!isSupabaseConfigured()) {
-      return disabledSettings;
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('delivery_settings')
-        .select('id, delivery_enabled, default_delivery_fee, updated_by, updated_at')
-        .limit(1)
-        .maybeSingle();
-
-      if (error || !data) {
-        return disabledSettings;
-      }
-
-      return {
-        ...(data as DeliverySettings),
-        delivery_enabled: data.delivery_enabled === true,
-      };
-    } catch (err) {
-      console.warn('[deliveryService] Exception fetching settings:', err);
-      return disabledSettings;
-    }
   },
 
   /**
-   * Toggle delivery enabled state or update default fee (Admin Only)
+   * Section settings are managed centrally from the Admin Panel in `public.app_section_settings`.
    */
-  async toggleService(enabled: boolean, defaultFee?: number): Promise<{ success: boolean; message?: string }> {
-    if (!isSupabaseConfigured()) {
-      return { success: false, message: 'قاعدة بيانات Supabase غير مهيأة' };
-    }
-    try {
-      const { data, error } = await supabase.rpc('toggle_delivery_service', {
-        p_enabled: enabled,
-        p_default_fee: defaultFee ?? null,
-      });
-      if (error) {
-        // Fallback to direct table update if RPC not provisioned yet
-        const { error: updErr } = await supabase
-          .from('delivery_settings')
-          .update({
-            delivery_enabled: enabled,
-            ...(defaultFee !== undefined ? { default_delivery_fee: defaultFee } : {}),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', 'default');
-
-        if (updErr) throw updErr;
-        return { success: true };
-      }
-      return (data as { success: boolean; message?: string }) || { success: true };
-    } catch (err: any) {
-      return { success: false, message: err.message || 'فشل تحديث إعدادات التوصيل' };
-    }
+  async toggleService(): Promise<{ success: boolean; message?: string }> {
+    return {
+      success: false,
+      message: 'إعدادات الأقسام والتوصيل تُدار مركزياً عبر جدول app_section_settings من لوحة الإدارة فقط.',
+    };
   },
 
   /**
@@ -428,10 +390,9 @@ export const deliveryService = {
       resolution,
     });
 
-    const settings = await this.getSettings();
-    if (!settings.delivery_enabled) {
-      return blocked('خدمة التوصيل معطلة حالياً من قبل الإدارة');
-    }
+    // Note: Section/delivery enablement (`app_section_settings`) is evaluated independently
+    // from geographic coverage & tariffs so `delivery_enabled = false` is never conflated
+    // with "outside geographic delivery coverage".
 
     if (!address) {
       return blocked('يرجى اختيار عنوان توصيل صحيح أولاً');
@@ -491,12 +452,12 @@ export const deliveryService = {
     userId?: string;
     addressSnapshot?: HouseholdAddress;
   }): Promise<{ success: boolean; order_id?: string; message?: string }> {
-    // 1. Verify delivery is currently enabled
-    const settings = await this.getSettings();
-    if (!settings.delivery_enabled) {
+    // 1. Fresh DB guard against `public.app_section_settings` (`household_shortages`)
+    const sectionGuard = await sectionSettingsService.verifyOrderAllowed('household_shortages');
+    if (!sectionGuard.allowed) {
       return {
         success: false,
-        message: 'خدمة التوصيل معطلة حالياً. لا يمكن إنشاء طلبات جديدة في الوقت الحالي.',
+        message: sectionGuard.reason,
       };
     }
 

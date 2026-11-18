@@ -2,6 +2,7 @@ import { supabase, isSupabaseConfigured } from './supabase';
 import { cacheManager } from './cacheManager';
 import { syncManager } from './syncManager';
 import { deliveryService } from './deliveryService';
+import { sectionSettingsService } from './sectionSettingsService';
 import {
   HouseholdAddress,
   RecurringOrder,
@@ -362,6 +363,10 @@ export const recurringOrderService = {
     }
 
     try {
+      const sectionGuard = await sectionSettingsService.verifyOrderAllowed('household_shortages');
+      if (!sectionGuard.allowed) {
+        return { success: false, message: sectionGuard.reason };
+      }
       const { data: addrData, error: addrErr } = await supabase
         .from('household_addresses')
         .select('*')

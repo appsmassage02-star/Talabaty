@@ -6,6 +6,7 @@ import {
   PharmacyConfig,
 } from "../types/pharmacy";
 import { pharmacyService } from "./pharmacyService";
+import { sectionSettingsService } from "./sectionSettingsService";
 import { useApp } from "../context/AppContext";
 
 export type PharmacySectionTab =
@@ -28,11 +29,20 @@ export function usePharmacy() {
   const [selectedOrderForDetail, setSelectedOrderForDetail] =
     useState<PharmacyOrder | null>(null);
   const [serviceSettings, setServiceSettings] = useState<
-    PharmacyConfig & { serviceEnabled: boolean; sectionVisible: boolean }
+    PharmacyConfig & {
+      serviceEnabled: boolean;
+      sectionVisible: boolean;
+      deliveryEnabled: boolean;
+      loaded: boolean;
+      error: string | null;
+    }
   >({
-    serviceEnabled: true,
-    sectionVisible: true,
-    status: "active",
+    serviceEnabled: false,
+    sectionVisible: false,
+    deliveryEnabled: false,
+    loaded: false,
+    error: null,
+    status: "disabled",
     displayWidth: "full",
     nameAr: "الصيدلية",
     imageUrl: "",
@@ -91,8 +101,35 @@ export function usePharmacy() {
       loadData(true);
     });
 
+    // Subscribe to centralized `public.app_section_settings` (Realtime + foreground resume)
+    const unsubscribeSection = sectionSettingsService.subscribe((snapshot) => {
+      const central = snapshot.pharmacy;
+      if (!isMountedRef.current) return;
+      const serviceEnabled = central.loaded && central.section_enabled === true;
+      const sectionVisible = central.loaded && central.section_visible === true;
+      const deliveryEnabled = central.loaded && central.delivery_enabled === true;
+      const status = !central.loaded
+        ? "disabled"
+        : !sectionVisible
+        ? "hidden"
+        : !serviceEnabled
+        ? "disabled"
+        : "active";
+
+      setServiceSettings((prev) => ({
+        ...prev,
+        serviceEnabled,
+        sectionVisible,
+        deliveryEnabled,
+        loaded: central.loaded,
+        error: central.error,
+        status,
+      }));
+    });
+
     return () => {
       unsubscribe();
+      unsubscribeSection();
     };
   }, [loadData]);
 
@@ -413,15 +450,9 @@ export function usePharmacy() {
     updateSettings: async (newConfig: Partial<PharmacyConfig>) => {
       setServiceSettings((prev) => ({
         ...prev,
-        ...newConfig,
-        serviceEnabled:
-          newConfig.status !== undefined
-            ? newConfig.status === "active"
-            : prev.serviceEnabled,
-        sectionVisible:
-          newConfig.status !== undefined
-            ? newConfig.status !== "hidden"
-            : prev.sectionVisible,
+        ...(newConfig.displayWidth !== undefined ? { displayWidth: newConfig.displayWidth } : {}),
+        ...(newConfig.nameAr !== undefined ? { nameAr: newConfig.nameAr } : {}),
+        ...(newConfig.imageUrl !== undefined ? { imageUrl: newConfig.imageUrl } : {}),
       }));
       const res = await pharmacyService.updateSettings(newConfig);
       return res;

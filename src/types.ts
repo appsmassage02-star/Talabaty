@@ -194,6 +194,10 @@ export type DeliveryOrderStatus =
 export interface DeliverySettings {
   id: string;
   delivery_enabled: boolean;
+  section_enabled?: boolean;
+  section_visible?: boolean;
+  loaded?: boolean;
+  error?: string | null;
   default_delivery_fee: number;
   updated_by?: string | null;
   updated_at?: string;

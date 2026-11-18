@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo } from "react";
 import { useApp } from "../context/AppContext";
 import { MissingItem, HouseholdAddress, InvoiceProduct } from "../types";
 import { deliveryService } from "../lib/deliveryService";
+import { useSectionSettings } from "../lib/useSectionSettings";
+import { DELIVERY_STOPPED_BANNER_TEXT } from "../lib/sectionSettingsService";
 import { DeliveryOrderModal } from "./DeliveryOrderModal";
 import {
   ClipboardList,
@@ -96,6 +98,11 @@ export const MissingItemsView: React.FC = () => {
     activeRole === "admin" || homePermissions.canAddInvoice;
 
   // Household Delivery Order State
+  const { settings: sectionSettings, isLoading: isLoadingSectionSettings } = useSectionSettings();
+  const hhSetting = sectionSettings.household_shortages;
+  const hhSectionUnavailable = !isLoadingSectionSettings && (!hhSetting.loaded || !hhSetting.section_enabled);
+  const hhDeliveryStopped =
+    hhSetting.loaded && hhSetting.section_enabled && !hhSetting.delivery_enabled;
   const [isDeliveryModalOpen, setIsDeliveryModalOpen] = useState(false);
   const [deliveryFeedback, setDeliveryFeedback] = useState<string | null>(null);
   const [isSubmittingDeliveryOrder, setIsSubmittingDeliveryOrder] = useState(false);
@@ -253,20 +260,55 @@ export const MissingItemsView: React.FC = () => {
           <button
             id="btn-order-household-delivery"
             onClick={() => {
+              if (hhSectionUnavailable) {
+                setDeliveryFeedback(
+                  !hhSetting.loaded
+                    ? "تعذر التحقق من إعدادات قسم نواقص المنزل؛ لا يمكن بدء طلب جديد حالياً."
+                    : "قسم نواقص المنزل متوقف حالياً ولا يمكن بدء طلبات جديدة منه."
+                );
+                setTimeout(() => setDeliveryFeedback(null), 4000);
+                return;
+              }
+              if (hhDeliveryStopped) {
+                setDeliveryFeedback(DELIVERY_STOPPED_BANNER_TEXT);
+                setTimeout(() => setDeliveryFeedback(null), 4000);
+                return;
+              }
               if (activeItems.length === 0) {
-                alert("لا توجد أغراض نشطة في قائمة النواقص لإرسالها للطلب");
+                setDeliveryFeedback("لا توجد أغراض نشطة في قائمة النواقص لإرسالها للطلب");
+                setTimeout(() => setDeliveryFeedback(null), 3500);
                 return;
               }
               setIsDeliveryModalOpen(true);
             }}
-            disabled={activeItems.length === 0}
+            disabled={activeItems.length === 0 || hhSectionUnavailable || hhDeliveryStopped}
             className="flex items-center justify-center space-x-1.5 space-x-reverse px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-xs transition-colors cursor-pointer"
           >
             <Truck className="w-4 h-4 ml-1" />
-            <span>طلب توصيل للمنزل</span>
+            <span>
+              {hhDeliveryStopped ? DELIVERY_STOPPED_BANNER_TEXT : "طلب توصيل للمنزل"}
+            </span>
           </button>
         </div>
       </div>
+
+      {hhDeliveryStopped && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded-2xl flex items-center space-x-2 space-x-reverse text-xs font-bold">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>{DELIVERY_STOPPED_BANNER_TEXT} — يمكنك تصفح قائمة النواقص وتعديلها بشكل طبيعي.</span>
+        </div>
+      )}
+
+      {hhSectionUnavailable && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 px-4 py-3 rounded-2xl flex items-center space-x-2 space-x-reverse text-xs font-bold">
+          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>
+            {!hhSetting.loaded
+              ? "تعذر التحقق من إعدادات قسم نواقص المنزل؛ لا يمكن بدء طلبات توصيل جديدة حالياً."
+              : "قسم نواقص المنزل متوقف حالياً ولا يمكن بدء طلبات جديدة منه."}
+          </span>
+        </div>
+      )}
 
       {/* Category Filter Pills */}
       <div className="flex items-center space-x-2 space-x-reverse overflow-x-auto pb-1 text-xs">
