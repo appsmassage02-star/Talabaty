@@ -329,7 +329,7 @@ export const ensureAdminHouseholdAndProvisioning = async (params: {
       const { error: permErr } = await supabase.from("household_permissions").upsert(
         {
           household_id: householdId,
-          allowed_screens: { categories: true, missing: true, purchases: true, budget: false },
+          allowed_screens: { categories: true, missing: true, purchases: true },
           can_add_missing_item: true,
           can_delete_missing_item: false,
           can_edit_item: true,
@@ -589,7 +589,7 @@ export const dbService = {
       const { error: permErr } = await supabase.from("household_permissions").upsert(
         {
           household_id: payload.id,
-          allowed_screens: { categories: true, missing: true, purchases: true, budget: false },
+          allowed_screens: { categories: true, missing: true, purchases: true },
           can_add_missing_item: true,
           can_delete_missing_item: false,
           can_edit_item: true,

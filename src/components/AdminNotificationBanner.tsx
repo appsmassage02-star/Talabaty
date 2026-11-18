@@ -46,7 +46,7 @@ export const AdminNotificationBanner: React.FC = () => {
     } else {
       // Internal navigation
       const cleanRoute = route.replace('/', '') as any;
-      if (['categories', 'missing', 'purchases', 'budget', 'settings', 'profile'].includes(cleanRoute)) {
+      if (['categories', 'missing', 'purchases', 'settings', 'profile'].includes(cleanRoute)) {
         setActiveTab(cleanRoute);
       }
     }

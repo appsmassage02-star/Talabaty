@@ -995,7 +995,7 @@ export const SettingsView: React.FC = () => {
               </h3>
             </div>
             <p className="text-xs text-slate-500">
-              يمكنك حجب شاشات الميزانية أو المشتريات عن هاتف المطبخ/المنزل لحماية الخصوصية
+              يمكنك حجب شاشات المشتريات أو النواقص عن هاتف المطبخ/المنزل لحماية الخصوصية
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
@@ -1068,30 +1068,6 @@ export const SettingsView: React.FC = () => {
                   }`}
                 >
                   {homePermissions.allowedScreens.purchases ? <Check className="w-4 h-4" /> : <Lock className="w-3 h-3" />}
-                </div>
-              </div>
-
-              {/* Budget Screen */}
-              <div
-                onClick={() => handleToggleScreen("budget")}
-                className={`p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
-                  homePermissions.allowedScreens.budget
-                    ? "bg-emerald-50/70 border-emerald-300 text-emerald-950"
-                    : "bg-slate-50 border-slate-200 text-slate-500"
-                }`}
-              >
-                <div>
-                  <span className="text-xs font-bold block">شاشة الميزانية والمصروفات</span>
-                  <span className="text-[11px] text-slate-500">تفاصيل الحد المالي والاستهلاك</span>
-                </div>
-                <div
-                  className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs ${
-                    homePermissions.allowedScreens.budget
-                      ? "bg-emerald-600 text-white"
-                      : "bg-slate-200 text-slate-400"
-                  }`}
-                >
-                  {homePermissions.allowedScreens.budget ? <Check className="w-4 h-4" /> : <Lock className="w-3 h-3" />}
                 </div>
               </div>
             </div>

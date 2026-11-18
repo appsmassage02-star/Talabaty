@@ -109,8 +109,8 @@ interface AppContextType {
   disconnectHousehold: () => Promise<void>;
 
   // View state
-  activeTab: "categories" | "missing" | "purchases" | "budget" | "settings" | "auth" | "profile" | "archive" | "pharmacy" | "food";
-  setActiveTab: (tab: "categories" | "missing" | "purchases" | "budget" | "settings" | "auth" | "profile" | "archive" | "pharmacy" | "food") => void;
+  activeTab: "categories" | "missing" | "purchases" | "settings" | "auth" | "profile" | "archive" | "pharmacy" | "food";
+  setActiveTab: (tab: "categories" | "missing" | "purchases" | "settings" | "auth" | "profile" | "archive" | "pharmacy" | "food") => void;
   selectedCategory: string | null;
   setSelectedCategory: (cat: string | null) => void;
   simulatorMode: "single" | "split";
@@ -289,7 +289,6 @@ const DEFAULT_HOME_PERMISSIONS: HomePermissions = {
     categories: true,
     missing: true,
     purchases: true,
-    budget: false, // Default: budget is protected for admin
   },
   canAddMissingItem: true,
   canDeleteMissingItem: false, // Protected by default
@@ -298,6 +297,12 @@ const DEFAULT_HOME_PERMISSIONS: HomePermissions = {
   canUseAiAssistant: true,
   canSendUrgentAlert: true,
 };
+
+const normalizeAllowedScreens = (raw: any): HomePermissions["allowedScreens"] => ({
+  categories: raw?.categories ?? DEFAULT_HOME_PERMISSIONS.allowedScreens.categories,
+  missing: raw?.missing ?? DEFAULT_HOME_PERMISSIONS.allowedScreens.missing,
+  purchases: raw?.purchases ?? DEFAULT_HOME_PERMISSIONS.allowedScreens.purchases,
+});
 
 const STATIC_CATEGORY_IDS = new Set(CATEGORIES.map((c) => c.id));
 
@@ -357,7 +362,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [householdMembers, setHouseholdMembers] = useState<HouseholdMember[]>([]);
   const [activePairingToken, setActivePairingToken] = useState<PairingToken | null>(null);
   const [activeTab, setActiveTab] = useState<
-    "categories" | "missing" | "purchases" | "budget" | "settings" | "auth" | "profile" | "archive" | "flutter_code" | "pharmacy" | "food"
+    "categories" | "missing" | "purchases" | "settings" | "auth" | "profile" | "archive" | "pharmacy" | "food"
   >("categories");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [simulatorMode, setSimulatorMode] = useState<"single" | "split">("single");
@@ -1826,7 +1831,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           syncManager.registerRealtimeCallback("household_permissions", (_eventType, record) => {
             const perms: HomePermissions = {
-              allowedScreens: record.allowed_screens || DEFAULT_HOME_PERMISSIONS.allowedScreens,
+              allowedScreens: normalizeAllowedScreens(record.allowed_screens),
               canAddMissingItem: record.can_add_missing_item ?? true,
               canDeleteMissingItem: record.can_delete_missing_item ?? false,
               canEditItem: record.can_edit_item ?? true,
@@ -1980,7 +1985,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           if (permData) {
             setHomePermissions({
-              allowedScreens: permData.allowed_screens || DEFAULT_HOME_PERMISSIONS.allowedScreens,
+              allowedScreens: normalizeAllowedScreens(permData.allowed_screens),
               canAddMissingItem: permData.can_add_missing_item ?? true,
               canDeleteMissingItem: permData.can_delete_missing_item ?? false,
               canEditItem: permData.can_edit_item ?? true,
@@ -2631,7 +2636,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const cachedBudget = cacheManager.getHouseholdCache<BudgetConfig>(cachedUserId, cachedLastHhId, "budget");
         if (cachedBudget) setBudgetConfig(cachedBudget);
         const cachedPerms = cacheManager.getHouseholdCache<HomePermissions>(cachedUserId, cachedLastHhId, "permissions");
-        if (cachedPerms) setHomePermissions(cachedPerms);
+        if (cachedPerms) {
+          setHomePermissions({
+            ...cachedPerms,
+            allowedScreens: normalizeAllowedScreens(cachedPerms.allowedScreens),
+          });
+        }
         const globalCached = cacheManager.getGlobalCache<any[]>("global_categories");
         const customCached = cacheManager.getHouseholdCache<CategoryInfo[]>(cachedUserId, cachedLastHhId, "custom_categories");
         if (globalCached && Array.isArray(globalCached) && globalCached.length > 0) {
@@ -4257,7 +4267,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActiveRole("home");
       if (res.permissions) {
         setHomePermissions({
-          allowedScreens: res.permissions.allowed_screens || DEFAULT_HOME_PERMISSIONS.allowedScreens,
+          allowedScreens: normalizeAllowedScreens(res.permissions.allowed_screens),
           canAddMissingItem: res.permissions.can_add_missing_item ?? true,
           canDeleteMissingItem: res.permissions.can_delete_missing_item ?? false,
           canEditItem: res.permissions.can_edit_item ?? true,

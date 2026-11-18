@@ -4,7 +4,6 @@ import { Header } from "./components/Header";
 import { CategoryGridView } from "./components/CategoryGridView";
 import { MissingItemsView } from "./components/MissingItemsView";
 import { PurchasesView } from "./components/PurchasesView";
-import { BudgetView } from "./components/BudgetView";
 import { SettingsView } from "./components/SettingsView";
 import { InvoicesArchiveView } from "./components/InvoicesArchiveView";
 import { QrCodeModal } from "./components/QrCodeModal";
@@ -24,12 +23,12 @@ import { GovernorateSettingsModal } from "./components/GovernorateSettingsModal"
 import { AdminNotificationManagerModal } from "./components/AdminNotificationManagerModal";
 import { PharmacySection } from "./components/pharmacy/PharmacySection";
 import { BiteAndBaitSection } from "./bite-and-bait/BiteAndBaitSection";
+import { useSectionSettings } from "./lib/useSectionSettings";
 
 import {
   LayoutGrid,
   ClipboardList,
   Receipt,
-  PieChart,
   Settings,
   Sparkles,
   ShieldCheck,
@@ -60,6 +59,23 @@ const MainContent: React.FC = () => {
     isEndMonthModalOpen,
     setIsEndMonthModalOpen,
   } = useApp();
+
+  const { settings: sectionSettings } = useSectionSettings();
+  const householdSectionSetting = sectionSettings.household_shortages;
+  // Bottom nav tabs for household_shortages depend strictly on `section_visible` (never `section_enabled` or `delivery_enabled`).
+  // On load failure (`!loaded`), keep tabs consistent with CategoryGridView and never disable the rest of the app.
+  const isHouseholdHidden =
+    householdSectionSetting.loaded && !householdSectionSetting.section_visible;
+
+  React.useEffect(() => {
+    if (!isHouseholdHidden) return;
+    if (activeTab === "missing" || activeTab === "purchases") {
+      setSelectedCategory(null);
+      setActiveTab("categories");
+    } else if (activeTab === "categories" && selectedCategory) {
+      setSelectedCategory(null);
+    }
+  }, [isHouseholdHidden, activeTab, selectedCategory, setActiveTab, setSelectedCategory]);
 
   // 1. Error state handling
   if (authStatus === "ERROR") {
@@ -140,7 +156,7 @@ const MainContent: React.FC = () => {
 
   // Determine allowed tabs based on role and permissions
   const isTabVisible = (
-    tab: "categories" | "missing" | "purchases" | "budget" | "settings"
+    tab: "categories" | "missing" | "purchases" | "settings"
   ) => {
     if (activeRole === "admin") return true;
     if (tab === "settings") return false; // Settings is strictly Admin
@@ -244,21 +260,17 @@ const MainContent: React.FC = () => {
               </button>
             </div>
           )
-        ) : activeTab === "budget" ? (
-          isTabVisible("budget") ? (
-            <div className="space-y-4 animate-in fade-in duration-150">
-              <BudgetView />
-            </div>
-          ) : (
+        ) : activeTab === "purchases" ? (
+          isHouseholdHidden ? (
             <div className="py-16 text-center space-y-3 bg-white rounded-2xl p-6 border border-slate-200 shadow-xs">
               <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mx-auto">
                 <ShieldCheck className="w-6 h-6" />
               </div>
               <h3 className="text-base font-bold text-slate-800">
-                شاشة الميزانية مقيدة من قِبل المسؤول
+                قسم نواقص المنزل مخفي حالياً
               </h3>
               <p className="text-xs text-slate-500 max-w-xs mx-auto">
-                تم حجب تفاصيل الميزانية عن هاتف المنزل للحفاظ على الخصوصية.
+                تم إخفاء قسم نواقص المنزل من الإدارة، ويمكنك متابعة بقية الأقسام بشكل طبيعي.
               </p>
               <button
                 onClick={() => {
@@ -270,9 +282,7 @@ const MainContent: React.FC = () => {
                 العودة للأقسام
               </button>
             </div>
-          )
-        ) : activeTab === "purchases" ? (
-          isTabVisible("purchases") ? (
+          ) : isTabVisible("purchases") ? (
             <div className="space-y-4 animate-in fade-in duration-150">
               <PurchasesView />
             </div>
@@ -299,7 +309,28 @@ const MainContent: React.FC = () => {
             </div>
           )
         ) : activeTab === "missing" ? (
-          isTabVisible("missing") ? (
+          isHouseholdHidden ? (
+            <div className="py-16 text-center space-y-3 bg-white rounded-2xl p-6 border border-slate-200 shadow-xs">
+              <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mx-auto">
+                <ShieldCheck className="w-6 h-6" />
+              </div>
+              <h3 className="text-base font-bold text-slate-800">
+                قسم نواقص المنزل مخفي حالياً
+              </h3>
+              <p className="text-xs text-slate-500 max-w-xs mx-auto">
+                تم إخفاء قسم نواقص المنزل من الإدارة، ويمكنك متابعة بقية الأقسام بشكل طبيعي.
+              </p>
+              <button
+                onClick={() => {
+                  setSelectedCategory(null);
+                  setActiveTab("categories");
+                }}
+                className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold"
+              >
+                العودة للأقسام
+              </button>
+            </div>
+          ) : isTabVisible("missing") ? (
             <div className="space-y-4 animate-in fade-in duration-150">
               <MissingItemsView />
             </div>
@@ -391,8 +422,8 @@ const MainContent: React.FC = () => {
             </button>
           )}
 
-          {/* 2. Missing Items */}
-          {isTabVisible("missing") && (
+          {/* 2. Missing Items (Household Shortages section) */}
+          {isTabVisible("missing") && !isHouseholdHidden && (
             <button
               id="nav-tab-missing"
               onClick={() => {
@@ -417,8 +448,8 @@ const MainContent: React.FC = () => {
             </button>
           )}
 
-          {/* 3. Purchases */}
-          {isTabVisible("purchases") && (
+          {/* 3. Purchases (Household Shortages section) */}
+          {isTabVisible("purchases") && !isHouseholdHidden && (
             <button
               id="nav-tab-purchases"
               onClick={() => {
@@ -433,25 +464,6 @@ const MainContent: React.FC = () => {
             >
               <Receipt className="w-5 h-5" />
               <span className="text-[10px] mt-0.5 font-bold">المشتريات</span>
-            </button>
-          )}
-
-          {/* 4. Budget */}
-          {isTabVisible("budget") && (
-            <button
-              id="nav-tab-budget"
-              onClick={() => {
-                setSelectedCategory(null);
-                setActiveTab("budget");
-              }}
-              className={`flex flex-col items-center py-1 px-3 rounded-xl transition-all cursor-pointer ${
-                activeTab === "budget"
-                  ? "text-emerald-700 font-black scale-105"
-                  : "text-slate-500 hover:text-slate-900"
-              }`}
-            >
-              <PieChart className="w-5 h-5" />
-              <span className="text-[10px] mt-0.5 font-bold">الميزانية</span>
             </button>
           )}
 

@@ -92,7 +92,6 @@ export interface HomePermissions {
     categories: boolean;
     missing: boolean;
     purchases: boolean;
-    budget: boolean;
   };
   canAddMissingItem: boolean;
   canDeleteMissingItem: boolean;
