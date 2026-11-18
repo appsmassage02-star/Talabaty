@@ -394,7 +394,7 @@ export const recurringOrderService = {
           success: false,
           message:
             tariffCheck.reason ||
-            'لا توجد تسعيرة توصيل مفعّلة لهذا العنوان في النظام المركزي (delivery_area_tariffs).',
+            'لا توجد تسعيرة توصيل مفعّلة لهذا العنوان في النظام المركزي.',
         };
       }
 

@@ -20,12 +20,19 @@ import type {
 import {
   checkGpsWithinGeoBoundary,
   detectRestaurantOwnDelivery,
+  isValidUuid,
+  resolveCentralTariff,
   resolveRestaurantDeliveryScopeAndTariff,
   validateGeoHierarchySelection,
   validateGpsCoordinates,
   type DeliveryOwnerType,
+  type FulfillmentRouteType,
+  type QuoteErrorCategory,
 } from '../../lib/geoService';
 import { sectionSettingsService } from '../../lib/sectionSettingsService';
+
+// Tracks in-flight Bite & Bait order submissions keyed by idempotencyKey to guard against concurrent double submits
+const inFlightBiteBaitOrderKeys = new Set<string>();
 
 export interface ServiceResult<T> {
   success: boolean;
@@ -213,16 +220,18 @@ export const biteAndBaitService = {
   },
 
   // --------------------------------------------------------------------------
-  // 1.1 Verify Geographic Service Scope strictly from central `geo_*` + `delivery_area_tariffs` (`ready_food`)
+  // 1.1 Verify Geographic Service Scope strictly via V2 central geo_* & get_delivery_quote (`ready_food`)
   // --------------------------------------------------------------------------
   async verifyGeographicScope(
     address?: FoodCustomerAddress | null,
     providedHouseholdId?: string,
-    providedUserId?: string
+    providedUserId?: string,
+    restaurantId?: string
   ): Promise<GeographicVerificationResult> {
     if (!isSupabaseConfigured() || !supabase) {
       return {
         isServiceable: false,
+        errorCategory: 'rpc_error',
         reason: 'قاعدة بيانات Supabase غير مهيأة للتحقق من النطاق الجغرافي.',
       };
     }
@@ -236,41 +245,82 @@ export const biteAndBaitService = {
         targetAddress = savedAddresses.find((a) => a.isDefault) || savedAddresses[0] || null;
       }
 
-      // Guest / visitor without saved address: check if any active `ready_food` tariff exists in central table
       if (!targetAddress) {
-        const { data: anyReadyFood, error: anyErr } = await supabase
-          .from('delivery_area_tariffs')
-          .select('id')
-          .eq('service_type', 'ready_food')
-          .eq('is_enabled', true)
-          .limit(1);
-
-        if (anyErr) {
-          return {
-            isServiceable: false,
-            reason: `تعذر التحقق من تغطية الأكلات الجاهزة في قاعدة البيانات: ${anyErr.message}`,
-          };
-        }
-
-        if (!anyReadyFood || anyReadyFood.length === 0) {
-          return {
-            isServiceable: false,
-            reason: 'أنت خارج نطاق التوصيل',
-          };
-        }
-
         return {
-          isServiceable: true,
+          isServiceable: false,
+          errorCategory: 'missing_geo_data',
+          reason: 'يرجى تحديد عنوان توصيل مكتمل (المحافظة/المركز/المنطقة + GPS) للتحقق من نطاق التوصيل.',
         };
       }
 
       if (!targetAddress.governorateId || !targetAddress.centerId || !targetAddress.areaId) {
         return {
           isServiceable: false,
+          errorCategory: 'missing_geo_data',
           reason: 'هذا العنوان غير مكتمل في النظام الجغرافي المركزي (يجب تحديد المحافظة والمركز والمنطقة).',
         };
       }
 
+      if (
+        !isValidUuid(targetAddress.governorateId) ||
+        !isValidUuid(targetAddress.centerId) ||
+        !isValidUuid(targetAddress.areaId)
+      ) {
+        return {
+          isServiceable: false,
+          errorCategory: 'invalid_geo_id',
+          reason: 'معرّفات المحافظة أو المركز أو المنطقة غير صالحة (UUID غير صحيح).',
+        };
+      }
+
+      // GPS coordinates are strictly required; never bypass or invent default coords
+      const hasMissingGps =
+        targetAddress.latitude === undefined ||
+        targetAddress.latitude === null ||
+        targetAddress.longitude === undefined ||
+        targetAddress.longitude === null;
+      const gpsCheck = validateGpsCoordinates(targetAddress.latitude, targetAddress.longitude);
+      if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+        return {
+          isServiceable: false,
+          errorCategory: hasMissingGps ? 'missing_gps' : 'invalid_gps',
+          reason: gpsCheck.reason || 'إحداثيات GPS غير صالحة أو مفقودة على العنوان.',
+        };
+      }
+
+      // If a restaurantId is specified, validate via authoritative 7-param V2 get_delivery_quote
+      if (restaurantId !== undefined) {
+        if (!isValidUuid(restaurantId)) {
+          return {
+            isServiceable: false,
+            errorCategory: 'invalid_restaurant',
+            reason: 'معرف المطعم غير صالح.',
+          };
+        }
+
+        const quoteRes = await resolveCentralTariff({
+          serviceType: 'ready_food',
+          governorateId: targetAddress.governorateId,
+          centerId: targetAddress.centerId,
+          areaId: targetAddress.areaId,
+          latitude: gpsCheck.latitude,
+          longitude: gpsCheck.longitude,
+          restaurantId,
+          client: supabase,
+        });
+
+        return {
+          isServiceable: quoteRes.covered,
+          matchedLevel: quoteRes.matchedLevel || undefined,
+          governorateId: targetAddress.governorateId,
+          centerId: targetAddress.centerId,
+          areaId: targetAddress.areaId,
+          errorCategory: quoteRes.errorCategory || null,
+          reason: quoteRes.covered ? undefined : quoteRes.reason,
+        };
+      }
+
+      // Without a specific restaurantId, validate active geo_* hierarchy and GPS boundary cleanly
       const hierarchyCheck = await validateGeoHierarchySelection(
         targetAddress.governorateId,
         targetAddress.centerId,
@@ -280,86 +330,21 @@ export const biteAndBaitService = {
       if (!hierarchyCheck.valid || !hierarchyCheck.governorate || !hierarchyCheck.center || !hierarchyCheck.area) {
         return {
           isServiceable: false,
+          errorCategory: hierarchyCheck.errorCategory || 'outside_coverage',
           reason: hierarchyCheck.reason || 'التسلسل الجغرافي للعنوان غير مفعّل في النظام المركزي.',
         };
       }
 
-      // Check GPS boundary if coordinates are present
-      if (targetAddress.latitude !== undefined && targetAddress.longitude !== undefined) {
-        const gpsCheck = validateGpsCoordinates(targetAddress.latitude, targetAddress.longitude);
-        if (!gpsCheck.valid) {
-          return {
-            isServiceable: false,
-            reason: gpsCheck.reason || 'إحداثيات GPS غير صالحة أو مفقودة على العنوان.',
-          };
-        }
-        const boundaryCheck = checkGpsWithinGeoBoundary(gpsCheck.latitude, gpsCheck.longitude, {
-          area: hierarchyCheck.area,
-          center: hierarchyCheck.center,
-          governorate: hierarchyCheck.governorate,
-        });
-        if (!boundaryCheck.inside) {
-          return {
-            isServiceable: false,
-            reason: boundaryCheck.reason || 'إحداثيات موقعك الجغرافي تقع خارج حدود المنطقة المحددة.',
-            governorateId: hierarchyCheck.governorate.id,
-            centerId: hierarchyCheck.center.id,
-            areaId: hierarchyCheck.area.id,
-          };
-        }
-      }
-
-      // Verify central `delivery_area_tariffs` has at least one enabled `ready_food` tariff covering this location
-      const { data: readyFoodTariffs, error: tariffErr } = await supabase
-        .from('delivery_area_tariffs')
-        .select('id, governorate_id, center_id, area_id, is_enabled')
-        .eq('service_type', 'ready_food')
-        .eq('is_enabled', true);
-
-      if (tariffErr) {
+      const boundaryCheck = checkGpsWithinGeoBoundary(gpsCheck.latitude, gpsCheck.longitude, {
+        area: hierarchyCheck.area,
+        center: hierarchyCheck.center,
+        governorate: hierarchyCheck.governorate,
+      });
+      if (!boundaryCheck.inside) {
         return {
           isServiceable: false,
-          reason: `تعذر التحقق من نطاقات التوصيل المركزية: ${tariffErr.message}`,
-        };
-      }
-
-      const rows = (readyFoodTariffs || []) as Array<{
-        id: string;
-        governorate_id?: string | null;
-        center_id?: string | null;
-        area_id?: string | null;
-        is_enabled: boolean;
-      }>;
-
-      const areaMatch = rows.find((t) => t.area_id === hierarchyCheck.area!.id);
-      if (areaMatch) {
-        return {
-          isServiceable: true,
-          matchedLevel: 'area',
-          governorateId: hierarchyCheck.governorate.id,
-          centerId: hierarchyCheck.center.id,
-          areaId: hierarchyCheck.area.id,
-        };
-      }
-
-      const centerMatch = rows.find((t) => t.center_id === hierarchyCheck.center!.id && !t.area_id);
-      if (centerMatch) {
-        return {
-          isServiceable: true,
-          matchedLevel: 'center',
-          governorateId: hierarchyCheck.governorate.id,
-          centerId: hierarchyCheck.center.id,
-          areaId: hierarchyCheck.area.id,
-        };
-      }
-
-      const govMatch = rows.find(
-        (t) => t.governorate_id === hierarchyCheck.governorate!.id && !t.center_id && !t.area_id
-      );
-      if (govMatch) {
-        return {
-          isServiceable: true,
-          matchedLevel: 'governorate',
+          errorCategory: 'gps_out_of_bounds',
+          reason: boundaryCheck.reason || 'إحداثيات موقعك الجغرافي تقع خارج حدود المنطقة المحددة.',
           governorateId: hierarchyCheck.governorate.id,
           centerId: hierarchyCheck.center.id,
           areaId: hierarchyCheck.area.id,
@@ -367,74 +352,92 @@ export const biteAndBaitService = {
       }
 
       return {
-        isServiceable: false,
-        reason: 'أنت خارج نطاق التوصيل',
+        isServiceable: true,
+        matchedLevel: 'area',
         governorateId: hierarchyCheck.governorate.id,
         centerId: hierarchyCheck.center.id,
         areaId: hierarchyCheck.area.id,
+        errorCategory: null,
       };
     } catch (err: any) {
       return {
         isServiceable: false,
+        errorCategory: 'rpc_error',
         reason: err?.message || 'استثناء أثناء التحقق من النطاق الجغرافي.',
       };
     }
   },
 
   // --------------------------------------------------------------------------
-  // 1.2 Resolve Restaurant Delivery Scope & Central Tariff (`delivery_area_tariffs` for `ready_food`)
+  // 1.2 Resolve Restaurant Delivery Scope & Central V2 Quote (`get_delivery_quote` for `ready_food`)
   // --------------------------------------------------------------------------
   async resolveDeliveryFee(
     restaurantId: string,
     address?: FoodCustomerAddress | null
   ): Promise<{
     fee: number | null;
-    baseFee: number | null;
-    adminCommission: number | null;
-    driverNet: number | null;
+    baseDeliveryFee: number | null;
     isCovered: boolean;
     isFreeDelivery: boolean;
     estimatedDeliveryMinutes: number | null;
     applicableDeliveryOwner: DeliveryOwnerType | null;
+    fulfillmentRoute: FulfillmentRouteType | null;
     tariffId: string | null;
     hasOwnDelivery: boolean;
     inRestaurantScope: boolean;
+    errorCategory?: QuoteErrorCategory | null;
     reason?: string;
   }> {
-    const blocked = (reason: string) => ({
+    const blocked = (reason: string, errorCategory: QuoteErrorCategory) => ({
       fee: null,
-      baseFee: null,
-      adminCommission: null,
-      driverNet: null,
+      baseDeliveryFee: null,
       isCovered: false,
       isFreeDelivery: false,
       estimatedDeliveryMinutes: null,
       applicableDeliveryOwner: null,
+      fulfillmentRoute: null,
       tariffId: null,
       hasOwnDelivery: false,
       inRestaurantScope: false,
+      errorCategory,
       reason,
     });
 
     if (!isSupabaseConfigured() || !supabase) {
-      return blocked('قاعدة بيانات Supabase غير متصلة للتحقق من التغطية والتسعيرة.');
+      return blocked('قاعدة بيانات Supabase غير متصلة للتحقق من التغطية والتسعيرة.', 'rpc_error');
     }
 
-    if (!restaurantId) {
-      return blocked('معرف المطعم غير محدد للتحقق من التغطية.');
+    if (!restaurantId || !isValidUuid(restaurantId)) {
+      return blocked('معرف المطعم غير محدد أو غير صالح للتحقق من التغطية.', 'invalid_restaurant');
     }
 
     if (!address) {
-      return blocked('يرجى تحديد عنوان توصيل مكتمل للتحقق من نطاق تغطية المطعم.');
+      return blocked('يرجى تحديد عنوان توصيل مكتمل للتحقق من نطاق تغطية المطعم.', 'missing_geo_data');
     }
 
     if (!address.governorateId || !address.centerId || !address.areaId) {
-      return blocked('هذا العنوان يفتقد ربط المحافظة/المركز/المنطقة بالنظام الجغرافي المركزي.');
+      return blocked('هذا العنوان يفتقد ربط المحافظة/المركز/المنطقة بالنظام الجغرافي المركزي.', 'missing_geo_data');
     }
 
+    if (
+      !isValidUuid(address.governorateId) ||
+      !isValidUuid(address.centerId) ||
+      !isValidUuid(address.areaId)
+    ) {
+      return blocked('معرّفات المحافظة أو المركز أو المنطقة غير صالحة (UUID غير صحيح).', 'invalid_geo_id');
+    }
+
+    const hasMissingGps =
+      address.latitude === undefined ||
+      address.latitude === null ||
+      address.longitude === undefined ||
+      address.longitude === null;
     const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
-    if (!gpsCheck.valid) {
-      return blocked(gpsCheck.reason || 'إحداثيات GPS غير صالحة أو مفقودة على العنوان.');
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      return blocked(
+        gpsCheck.reason || 'إحداثيات GPS غير صالحة أو مفقودة على العنوان.',
+        hasMissingGps ? 'missing_gps' : 'invalid_gps'
+      );
     }
 
     try {
@@ -444,11 +447,17 @@ export const biteAndBaitService = {
         .eq('id', restaurantId)
         .maybeSingle();
 
-      if (restErr || !restRow) {
+      if (restErr) {
         return blocked(
-          restErr?.message
-            ? `تعذر التحقق من بيانات المطعم: ${restErr.message}`
-            : 'المطعم غير موجود في قاعدة البيانات.'
+          `تعذر التحقق من بيانات المطعم: ${restErr.message}`,
+          'rpc_error'
+        );
+      }
+
+      if (!restRow || restRow.is_active === false) {
+        return blocked(
+          'المطعم غير موجود أو غير متاح حالياً في قاعدة البيانات.',
+          'invalid_restaurant'
         );
       }
 
@@ -464,20 +473,23 @@ export const biteAndBaitService = {
 
       return {
         fee: scopeAndTariff.customerDeliveryFee,
-        baseFee: scopeAndTariff.baseFee,
-        adminCommission: scopeAndTariff.adminCommission,
-        driverNet: scopeAndTariff.driverNet,
+        baseDeliveryFee: scopeAndTariff.baseDeliveryFee,
         isCovered: scopeAndTariff.covered,
         isFreeDelivery: scopeAndTariff.isFreeDelivery,
         estimatedDeliveryMinutes: scopeAndTariff.estimatedDeliveryMinutes,
         applicableDeliveryOwner: scopeAndTariff.applicableDeliveryOwner,
+        fulfillmentRoute: scopeAndTariff.fulfillmentRoute,
         tariffId: scopeAndTariff.tariffId,
         hasOwnDelivery: scopeAndTariff.hasOwnDelivery,
         inRestaurantScope: scopeAndTariff.inRestaurantScope,
+        errorCategory: scopeAndTariff.errorCategory || null,
         reason: scopeAndTariff.reason,
       };
     } catch (err: any) {
-      return blocked(err?.message || 'استثناء غير متوقع أثناء التحقق من تغطية وتسعيرة المطعم.');
+      return blocked(
+        err?.message || 'استثناء غير متوقع أثناء التحقق من تغطية وتسعيرة المطعم.',
+        'rpc_error'
+      );
     }
   },
 
@@ -1528,7 +1540,7 @@ export const biteAndBaitService = {
 
   // --------------------------------------------------------------------------
   // 12. Create Ready-Made Food Order via RPC: public.create_bite_bait_order
-  // Real DB execution connecting checkout to backend logic.
+  // Real DB execution connecting checkout to backend V2 trigger & pricing logic.
   // --------------------------------------------------------------------------
   async createBiteBaitOrder(
     params: CreateBiteBaitOrderParams
@@ -1538,9 +1550,31 @@ export const biteAndBaitService = {
         success: false,
         data: { orderId: '', orderNumber: '' },
         error: 'قاعدة بيانات Supabase غير متصلة. يرجى التحقق من اتصال الإنترنت.',
+        errorCode: 'rpc_error',
         isConfigError: true,
       };
     }
+
+    const idemKey = String(params.idempotencyKey || '').trim();
+    if (!idemKey) {
+      return {
+        success: false,
+        data: { orderId: '', orderNumber: '' },
+        error: 'مفتاح منع التكرار (idempotency key) مفقود.',
+        errorCode: 'MISSING_IDEMPOTENCY_KEY',
+      };
+    }
+
+    if (inFlightBiteBaitOrderKeys.has(idemKey)) {
+      return {
+        success: false,
+        data: { orderId: '', orderNumber: '' },
+        error: 'يوجد طلب قيد التنفيذ بالفعل بنفس المفتاح، يرجى الانتظار لحين اكتماله.',
+        errorCode: 'DUPLICATE_IN_FLIGHT',
+      };
+    }
+
+    inFlightBiteBaitOrderKeys.add(idemKey);
 
     try {
       // 0. Fresh DB verification against `public.app_section_settings` (`ready_food`) before creating order
@@ -1550,32 +1584,50 @@ export const biteAndBaitService = {
           success: false,
           data: { orderId: '', orderNumber: '' },
           error: sectionGuard.reason,
+          errorCode: 'SECTION_OR_DELIVERY_DISABLED',
         };
       }
 
-      // 1. Mandatory Parameters Validation
-      if (!params.householdId) {
+      // 1. Mandatory Parameters & UUID Validation
+      if (!params.householdId || !isValidUuid(params.householdId)) {
         return {
           success: false,
           data: { orderId: '', orderNumber: '' },
           error: 'تعذر تحديد معرف الأسرة للطلب. يلزم أن يكون المستخدم عضواً في أسرة مسجلة.',
+          errorCode: 'INVALID_HOUSEHOLD',
         };
       }
-      if (!params.restaurantId) {
+      if (!params.restaurantId || !isValidUuid(params.restaurantId)) {
         return {
           success: false,
           data: { orderId: '', orderNumber: '' },
-          error: 'معرف المطعم غير محدد.',
+          error: 'معرف المطعم غير محدد أو غير صالح.',
+          errorCode: 'invalid_restaurant',
         };
       }
+      if (params.addressId && !isValidUuid(params.addressId)) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'معرف عنوان التوصيل غير صالح.',
+          errorCode: 'invalid_geo_id',
+        };
+      }
+
+      const hasMissingGps =
+        params.deliveryLatitude === undefined ||
+        params.deliveryLatitude === null ||
+        params.deliveryLongitude === undefined ||
+        params.deliveryLongitude === null;
       const gpsCheck = validateGpsCoordinates(params.deliveryLatitude, params.deliveryLongitude);
-      if (!gpsCheck.valid) {
+      if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
         return {
           success: false,
           data: { orderId: '', orderNumber: '' },
           error:
             gpsCheck.reason ||
             'إحداثيات الموقع الجغرافي (GPS) غير صالحة أو مفقودة. يلزم توفير إحداثيات موقع حقيقية لإرسال الطلب.',
+          errorCode: hasMissingGps ? 'missing_gps' : 'invalid_gps',
         };
       }
       if (!params.items || params.items.length === 0) {
@@ -1583,17 +1635,45 @@ export const biteAndBaitService = {
           success: false,
           data: { orderId: '', orderNumber: '' },
           error: 'سلة الطلب فارغة، لا يمكن إرسال طلب بدون أصناف.',
-        };
-      }
-      if (!params.idempotencyKey) {
-        return {
-          success: false,
-          data: { orderId: '', orderNumber: '' },
-          error: 'مفتاح منع التكرار (idempotency key) مفقود.',
+          errorCode: 'EMPTY_CART',
         };
       }
 
-      // 2. Enforce central `ready_food` geo IDs, coverage & GPS boundary unconditionally before calling create_bite_bait_order RPC
+      // 2. Verify Restaurant is Active & Open before computing quote or submitting RPC
+      const { data: restaurantStatusRow, error: restaurantStatusErr } = await supabase
+        .from('restaurants')
+        .select('id, is_active, is_open')
+        .eq('id', params.restaurantId)
+        .maybeSingle();
+
+      if (restaurantStatusErr) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: `تعذر التحقق من حالة المطعم: ${restaurantStatusErr.message}`,
+          errorCode: 'rpc_error',
+        };
+      }
+
+      if (!restaurantStatusRow || restaurantStatusRow.is_active === false) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'المطعم غير موجود أو غير متاح حالياً.',
+          errorCode: 'invalid_restaurant',
+        };
+      }
+
+      if (restaurantStatusRow.is_open === false) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'المطعم مغلق حالياً ولا يستقبل طلبات جديدة.',
+          errorCode: 'restaurant_closed',
+        };
+      }
+
+      // 3. Enforce central `ready_food` geo IDs, coverage & GPS boundary unconditionally via V2 get_delivery_quote
       let geoGovId = params.governorateId ? String(params.governorateId).trim() : null;
       let geoCenterId = params.centerId ? String(params.centerId).trim() : null;
       let geoAreaId = params.areaId ? String(params.areaId).trim() : null;
@@ -1611,6 +1691,7 @@ export const biteAndBaitService = {
             success: false,
             data: { orderId: '', orderNumber: '' },
             error: `تعذر التحقق من بيانات عنوان التوصيل: ${addrErr.message}`,
+            errorCode: 'rpc_error',
           };
         }
 
@@ -1619,6 +1700,7 @@ export const biteAndBaitService = {
             success: false,
             data: { orderId: '', orderNumber: '' },
             error: 'العنوان المحدد غير موجود أو لا ينتمي للأسرة الحالية.',
+            errorCode: 'missing_geo_data',
           };
         }
 
@@ -1633,6 +1715,16 @@ export const biteAndBaitService = {
           data: { orderId: '', orderNumber: '' },
           error:
             'هذا العنوان غير مكتمل في النظام الجغرافي المركزي (يجب تحديد المحافظة والمركز والمنطقة قبل إرسال الطلب).',
+          errorCode: 'missing_geo_data',
+        };
+      }
+
+      if (!isValidUuid(geoGovId) || !isValidUuid(geoCenterId) || !isValidUuid(geoAreaId)) {
+        return {
+          success: false,
+          data: { orderId: '', orderNumber: '' },
+          error: 'معرّفات المحافظة أو المركز أو المنطقة غير صالحة (UUID غير صحيح).',
+          errorCode: 'invalid_geo_id',
         };
       }
 
@@ -1647,19 +1739,22 @@ export const biteAndBaitService = {
         centerId: geoCenterId,
         areaId: geoAreaId,
         detailedAddress: params.deliveryAddress,
-        latitude: params.deliveryLatitude,
-        longitude: params.deliveryLongitude,
+        latitude: gpsCheck.latitude,
+        longitude: gpsCheck.longitude,
       });
 
       if (!feeCheck.isCovered || feeCheck.fee === null) {
         return {
           success: false,
           data: { orderId: '', orderNumber: '' },
-          error: feeCheck.reason || 'أنت خارج نطاق التوصيل',
+          error: feeCheck.reason || 'تعذر التحقق من تغطية التوصيل لهذا العنوان.',
+          errorCode: feeCheck.errorCategory || 'outside_coverage',
         };
       }
 
-      // 3. Prepare payload with EXACT parameter names as defined in public.create_bite_bait_order
+      // 4. Prepare payload with EXACT parameter names as defined in public.create_bite_bait_order.
+      // DB trigger `private.prepare_restaurant_order_v2` computes final fulfillment_route (restaurant_delivery vs driver_delivery),
+      // delivery fee, admin/restaurant/driver shares, and totals authoritatively.
       const rpcPayload = {
         p_household_id: params.householdId,
         p_restaurant_id: params.restaurantId,
@@ -1667,10 +1762,10 @@ export const biteAndBaitService = {
         p_customer_name: params.customerName.trim(),
         p_customer_phone: params.customerPhone.trim(),
         p_delivery_address: params.deliveryAddress.trim(),
-        p_delivery_latitude: params.deliveryLatitude,
-        p_delivery_longitude: params.deliveryLongitude,
+        p_delivery_latitude: gpsCheck.latitude,
+        p_delivery_longitude: gpsCheck.longitude,
         p_items: params.items,
-        p_idempotency_key: params.idempotencyKey,
+        p_idempotency_key: idemKey,
       };
 
       const { data, error } = await supabase.rpc('create_bite_bait_order', rpcPayload);
@@ -1687,11 +1782,11 @@ export const biteAndBaitService = {
           error: isDuplicateErr
             ? 'تم إرسال هذا الطلب بالفعل مسبقاً بنفس المفتاح. يمكنك مراجعة تفاصيله في سجل طلباتك.'
             : (error.message || 'حدث خطأ أثناء تسجيل الطلب في قاعدة البيانات'),
-          errorCode: error.code,
+          errorCode: error.code || 'order_creation_failed',
         };
       }
 
-      // 3. Parse RPC response safely
+      // 5. Parse RPC response safely
       let parsed: any = data;
       if (typeof data === 'string') {
         try {
@@ -1723,6 +1818,7 @@ export const biteAndBaitService = {
             parsed?.message ||
             parsed?.error ||
             'تعذر استخراج رقم الطلب من استجابة قاعدة البيانات.',
+          errorCode: 'order_creation_failed',
         };
       }
 
@@ -1741,7 +1837,10 @@ export const biteAndBaitService = {
         success: false,
         data: { orderId: '', orderNumber: '' },
         error: err?.message || 'استثناء غير متوقع أثناء استدعاء create_bite_bait_order.',
+        errorCode: 'order_creation_failed',
       };
+    } finally {
+      inFlightBiteBaitOrderKeys.delete(idemKey);
     }
   },
 };

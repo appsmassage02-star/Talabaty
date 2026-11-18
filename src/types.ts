@@ -266,8 +266,6 @@ export interface DeliveryOrder {
   customer_delivery_fee?: number | null;
   delivery_tariff_id?: string | null;
   delivery_base_fee?: number | null;
-  delivery_admin_commission?: number | null;
-  delivery_driver_net?: number | null;
   is_free_delivery?: boolean;
   estimated_delivery_minutes?: number | null;
   tariff_id?: string | null;

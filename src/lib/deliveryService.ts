@@ -3,10 +3,12 @@ import { cacheManager } from './cacheManager';
 import { sectionSettingsService } from './sectionSettingsService';
 import {
   checkGpsWithinGeoBoundary,
+  isValidUuid,
   resolveCentralTariff,
   validateGeoHierarchySelection,
   validateGpsCoordinates,
   type CentralTariffResolution,
+  type QuoteErrorCategory,
 } from './geoService';
 import {
   DeliverySettings,
@@ -16,11 +18,24 @@ import {
   DeliveryOrderStatus,
 } from '../types';
 
+function sanitizeDeliveryOrder(row: any): DeliveryOrder {
+  if (!row || typeof row !== 'object') return row;
+  const {
+    delivery_admin_commission: _omitCommission,
+    delivery_driver_net: _omitDriverNet,
+    ...safeRow
+  } = row;
+  return safeRow as DeliveryOrder;
+}
+
+let inFlightHouseholdCreateOrder = false;
+
 /**
  * Unified Delivery Service for Talabaty Household Client
  * - Central `public.app_section_settings` (`household_shortages`) check
  * - Household Addresses with mandatory `geo_*` hierarchy IDs + valid GPS telemetry
- * - Centralized `delivery_area_tariffs` resolution (NO hardcoded delivery fees)
+ * - Centralized `public.get_delivery_quote` V2 quote estimation
+ * - Database trigger `private.prepare_household_delivery_order_v2` computes authoritative tariff & totals
  */
 export const deliveryService = {
   /**
@@ -362,77 +377,106 @@ export const deliveryService = {
   },
 
   /**
-   * Resolves central household delivery tariff & eligibility from `delivery_area_tariffs`.
-   * Checks global delivery_enabled switch, valid GPS coordinates, and geo hierarchy IDs.
+   * Resolves central household delivery quote strictly via `public.get_delivery_quote` V2.
+   * Excludes internal financial split fields (`admin_commission`, `driver_net`).
    */
   async resolveHouseholdDeliveryTariff(address?: Partial<HouseholdAddress> | null): Promise<{
     allowed: boolean;
     deliveryFee: number | null;
-    baseFee: number | null;
-    adminCommission: number | null;
-    driverNet: number | null;
+    baseDeliveryFee: number | null;
     isFreeDelivery: boolean;
     estimatedDeliveryMinutes: number | null;
     tariffId: string | null;
+    errorCategory?: QuoteErrorCategory | null;
     reason?: string;
     resolution?: CentralTariffResolution;
   }> {
-    const blocked = (reason: string, resolution?: CentralTariffResolution) => ({
+    const blocked = (
+      reason: string,
+      errorCategory: QuoteErrorCategory,
+      resolution?: CentralTariffResolution
+    ) => ({
       allowed: false,
       deliveryFee: null,
-      baseFee: null,
-      adminCommission: null,
-      driverNet: null,
+      baseDeliveryFee: null,
       isFreeDelivery: false,
       estimatedDeliveryMinutes: null,
       tariffId: null,
+      errorCategory,
       reason,
       resolution,
     });
 
-    // Note: Section/delivery enablement (`app_section_settings`) is evaluated independently
-    // from geographic coverage & tariffs so `delivery_enabled = false` is never conflated
-    // with "outside geographic delivery coverage".
-
     if (!address) {
-      return blocked('يرجى اختيار عنوان توصيل صحيح أولاً');
-    }
-
-    const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
-    if (!gpsCheck.valid) {
-      return blocked('هذا العنوان لا يحتوي على موقع GPS صالح. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.');
+      return blocked('يرجى اختيار عنوان توصيل صحيح أولاً', 'missing_geo_data');
     }
 
     if (!address.governorate_id || !address.center_id || !address.area_id) {
-      return blocked('العنوان غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تعديل العنوان واستكماله.');
+      return blocked(
+        'العنوان غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تعديل العنوان واستكماله.',
+        'missing_geo_data'
+      );
+    }
+
+    if (
+      !isValidUuid(address.governorate_id) ||
+      !isValidUuid(address.center_id) ||
+      !isValidUuid(address.area_id)
+    ) {
+      return blocked(
+        'معرّف المحافظة أو المركز أو المنطقة في هذا العنوان غير صالح؛ يرجى تعديل العنوان وإعادة الاختيار.',
+        'invalid_geo_id'
+      );
+    }
+
+    if (
+      address.latitude === null ||
+      address.latitude === undefined ||
+      address.longitude === null ||
+      address.longitude === undefined
+    ) {
+      return blocked(
+        'هذا العنوان يفتقد إحداثيات الموقع الجغرافي (GPS). يرجى تعديل العنوان وتثبيت الموقع على الخريطة.',
+        'missing_gps'
+      );
+    }
+
+    const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      return blocked(
+        gpsCheck.reason ||
+          'إحداثيات GPS على هذا العنوان غير صالحة. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.',
+        'invalid_gps'
+      );
     }
 
     const tariffRes = await resolveCentralTariff({
       serviceType: 'household_shortages',
-      deliveryOwner: 'platform',
       governorateId: address.governorate_id,
       centerId: address.center_id,
       areaId: address.area_id,
       latitude: gpsCheck.latitude,
       longitude: gpsCheck.longitude,
+      restaurantId: null,
     });
 
     return {
       allowed: tariffRes.covered,
       deliveryFee: tariffRes.customerDeliveryFee,
-      baseFee: tariffRes.baseFee,
-      adminCommission: tariffRes.adminCommission,
-      driverNet: tariffRes.driverNet,
+      baseDeliveryFee: tariffRes.baseDeliveryFee,
       isFreeDelivery: tariffRes.isFreeDelivery,
       estimatedDeliveryMinutes: tariffRes.estimatedDeliveryMinutes,
       tariffId: tariffRes.tariffId,
+      errorCategory: tariffRes.errorCategory ?? null,
       reason: tariffRes.reason,
       resolution: tariffRes,
     };
   },
 
   /**
-   * Create a new delivery order validated strictly against centralized geo hierarchy, GPS, and `delivery_area_tariffs`.
+   * Create a new delivery order validated strictly against centralized V2 geo/GPS quote,
+   * while leaving authoritative tariff & commission calculations to DB trigger
+   * `private.prepare_household_delivery_order_v2`.
    */
   async createOrder(params: {
     householdId: string;
@@ -452,6 +496,10 @@ export const deliveryService = {
     userId?: string;
     addressSnapshot?: HouseholdAddress;
   }): Promise<{ success: boolean; order_id?: string; message?: string }> {
+    if (inFlightHouseholdCreateOrder) {
+      return { success: false, message: 'جاري إرسال طلب التوصيل بالفعل، يرجى الانتظار...' };
+    }
+
     // 1. Fresh DB guard against `public.app_section_settings` (`household_shortages`)
     const sectionGuard = await sectionSettingsService.verifyOrderAllowed('household_shortages');
     if (!sectionGuard.allowed) {
@@ -473,10 +521,17 @@ export const deliveryService = {
       };
     }
 
+    inFlightHouseholdCreateOrder = true;
     try {
       // 3. Fetch authoritative address from database whenever addressId is provided
       let addrData: HouseholdAddress | null = null;
       if (params.addressId) {
+        if (!isValidUuid(params.addressId)) {
+          return {
+            success: false,
+            message: 'معرّف عنوان التوصيل المحدد غير صالح.',
+          };
+        }
         const { data: dbAddr, error: dbAddrErr } = await supabase
           .from('household_addresses')
           .select('*')
@@ -498,10 +553,14 @@ export const deliveryService = {
       }
 
       if (!addrData) {
-        return { success: false, message: 'العنوان المحدد غير موجود أو لا يتبع المنزل الحالي، يرجى اختيار أو إضافة عنوان صحيح' };
+        return {
+          success: false,
+          message:
+            'العنوان المحدد غير موجود أو لا يتبع المنزل الحالي، يرجى اختيار أو إضافة عنوان صحيح',
+        };
       }
 
-      // 4. Strictly resolve centralized tariff & GPS validity (NO fallback to hardcoded fees)
+      // 4. Pre-flight V2 quote & GPS verification via public.get_delivery_quote
       const tariffCheck = await this.resolveHouseholdDeliveryTariff(addrData);
       if (!tariffCheck.allowed || tariffCheck.deliveryFee === null) {
         return {
@@ -512,9 +571,7 @@ export const deliveryService = {
         };
       }
 
-      const deliveryFee = tariffCheck.isFreeDelivery ? 0 : Number(tariffCheck.deliveryFee);
       const subtotal = params.items.reduce((acc, item) => acc + (Number(item.total_price) || 0), 0);
-      const totalAmount = subtotal + deliveryFee;
 
       // 5. Check if invoice exists in public.invoices to prevent Foreign Key constraint violation
       let validInvoiceId: string | null = null;
@@ -530,11 +587,13 @@ export const deliveryService = {
         }
       }
 
+      // IMPORTANT: Never send client-calculated delivery fees, tariff IDs, admin commission, or driver net.
+      // DB BEFORE INSERT trigger `private.prepare_household_delivery_order_v2` computes and locks them.
       const orderPayload: Record<string, any> = {
         household_id: params.householdId,
         user_id: params.userId || null,
         invoice_id: validInvoiceId,
-        address_id: params.addressId,
+        address_id: params.addressId || null,
         customer_name: addrData.full_name || 'المنزل',
         customer_phone: addrData.phone || '',
         country: 'مصر',
@@ -547,14 +606,7 @@ export const deliveryService = {
         delivery_center_id: addrData.center_id,
         delivery_area_id: addrData.area_id,
         delivery_area_name: addrData.area_name || null,
-        delivery_tariff_id: tariffCheck.tariffId,
-        delivery_base_fee: tariffCheck.baseFee,
-        delivery_admin_commission: tariffCheck.adminCommission,
-        delivery_driver_net: tariffCheck.driverNet,
-        customer_delivery_fee: deliveryFee,
-        delivery_fee: deliveryFee,
         subtotal,
-        total_amount: totalAmount,
         delivery_notes: params.deliveryNotes || null,
         status: 'pending_review' as DeliveryOrderStatus,
         ...(params.source_recurring_request_id
@@ -651,11 +703,12 @@ export const deliveryService = {
         // non-blocking
       }
 
+      const sanitizedOrder = sanitizeDeliveryOrder(orderData);
       const completeOrder: DeliveryOrder = {
-        ...(orderData as DeliveryOrder),
+        ...sanitizedOrder,
         is_free_delivery: tariffCheck.isFreeDelivery,
         estimated_delivery_minutes: tariffCheck.estimatedDeliveryMinutes,
-        tariff_id: tariffCheck.tariffId,
+        tariff_id: sanitizedOrder.delivery_tariff_id ?? tariffCheck.tariffId,
         items: verifiedItems as DeliveryOrderItem[],
       };
 
@@ -678,6 +731,8 @@ export const deliveryService = {
     } catch (directErr: any) {
       console.error('[deliveryService] Direct insert error:', directErr);
       return { success: false, message: directErr.message || 'فشل إنشاء طلب التوصيل' };
+    } finally {
+      inFlightHouseholdCreateOrder = false;
     }
   },
 
@@ -716,7 +771,7 @@ export const deliveryService = {
         return cachedOrders;
       }
 
-      const fetched = (data as DeliveryOrder[]) || [];
+      const fetched = ((data as any[]) || []).map(sanitizeDeliveryOrder);
 
       // Always fetch latest delivery_order_items directly with order_id to guarantee fresh actual prices and item_status
       const remoteOrderIds = fetched.map((o) => o.id).filter((id) => Boolean(id));

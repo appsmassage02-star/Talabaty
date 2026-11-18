@@ -237,6 +237,7 @@ export interface RestaurantSectionSettings {
 export interface GeographicVerificationResult {
   isServiceable: boolean;
   reason?: string;
+  errorCategory?: import('../../lib/geoService').QuoteErrorCategory | null;
   matchedLevel?: 'area' | 'center' | 'governorate';
   governorateId?: string;
   centerId?: string;

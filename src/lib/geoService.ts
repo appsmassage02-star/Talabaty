@@ -33,39 +33,42 @@ export interface GeoArea {
 
 export type ServiceCategoryType = 'household_shortages' | 'pharmacy' | 'ready_food';
 export type DeliveryOwnerType = 'platform' | 'restaurant';
+export type FulfillmentRouteType = 'restaurant_delivery' | 'driver_delivery';
 
-export interface DeliveryAreaTariff {
-  id: string;
-  service_type: string;
-  delivery_owner?: DeliveryOwnerType | string | null;
-  restaurant_id?: string | null;
-  scope_level?: string | null;
-  governorate_id?: string | null;
-  center_id?: string | null;
-  area_id?: string | null;
-  is_enabled: boolean;
-  is_free_delivery: boolean;
-  customer_delivery_fee: number | null;
-  base_fee?: number | null;
-  admin_commission?: number | null;
-  driver_net?: number | null;
-  driver_net_fee?: number | null;
-  free_delivery_cost_bearer?: string | null;
-  estimated_delivery_minutes?: number | null;
+export type QuoteErrorCategory =
+  | 'missing_geo_data'
+  | 'invalid_geo_id'
+  | 'missing_gps'
+  | 'invalid_gps'
+  | 'gps_out_of_bounds'
+  | 'outside_coverage'
+  | 'no_active_tariff'
+  | 'invalid_restaurant'
+  | 'rpc_error';
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidUuid(value?: string | null): boolean {
+  if (typeof value !== 'string') return false;
+  return UUID_REGEX.test(value.trim());
 }
 
+/**
+ * Sanitized client-facing delivery quote result.
+ * Strictly excludes internal financial split fields (`admin_commission`, `driver_net`, `driver_net_fee`).
+ */
 export interface CentralTariffResolution {
   covered: boolean;
   tariffId: string | null;
   customerDeliveryFee: number | null;
-  baseFee: number | null;
-  adminCommission: number | null;
-  driverNet: number | null;
+  baseDeliveryFee: number | null;
   isFreeDelivery: boolean;
-  freeDeliveryCostBearer: string | null;
   estimatedDeliveryMinutes: number | null;
   matchedLevel: 'area' | 'center' | 'governorate' | null;
   applicableDeliveryOwner: DeliveryOwnerType | null;
+  fulfillmentRoute?: FulfillmentRouteType | null;
+  errorCategory?: QuoteErrorCategory | null;
   boundaryChecked?: boolean;
   boundaryLevel?: 'area' | 'center' | 'governorate' | null;
   boundaryFailed?: boolean;
@@ -814,259 +817,486 @@ export async function validateGeoHierarchySelection(
   };
 }
 
-/**
- * Picks the most specific matching tariff from `delivery_area_tariffs` rows.
- * Specificity precedence (NO `parent_area_id`):
- * 1) area_id match
- * 2) center_id match (with null area_id)
- * 3) governorate_id match (with null center_id & null area_id)
- * Within each level, prefers explicit `restaurant_id` match over generic `restaurant_id IS NULL`.
- */
-function pickMostSpecificTariff(
-  tariffs: DeliveryAreaTariff[],
-  governorateId: string,
-  centerId: string,
-  areaId: string,
-  restaurantId?: string | null,
-  requireExactRestaurantMatch = false
-): { tariff: DeliveryAreaTariff; matchedLevel: 'area' | 'center' | 'governorate' } | null {
-  const rankRestaurantMatch = (t: DeliveryAreaTariff): number => {
-    if (restaurantId && t.restaurant_id === restaurantId) return 2;
-    if (!t.restaurant_id) return 1;
-    return 0;
-  };
+function normalizeQuoteObject(rawData: unknown): Record<string, any> | null {
+  let current: unknown = rawData;
 
-  const eligible = tariffs.filter((t) => {
-    if (t.is_enabled === false) return false;
-    if (requireExactRestaurantMatch) {
-      if (!restaurantId || t.restaurant_id !== restaurantId) return false;
-    } else {
-      if (t.restaurant_id && restaurantId && t.restaurant_id !== restaurantId) return false;
-      if (t.restaurant_id && !restaurantId) return false;
+  if (typeof current === 'string') {
+    const trimmed = current.trim();
+    if (!trimmed) return null;
+    try {
+      current = JSON.parse(trimmed);
+    } catch {
+      return null;
     }
-    if (t.governorate_id && t.governorate_id !== governorateId) return false;
-    if (t.center_id && t.center_id !== centerId) return false;
-    return true;
-  });
-
-  // 1) Area level
-  const areaMatches = eligible
-    .filter((t) => t.area_id === areaId)
-    .sort((a, b) => rankRestaurantMatch(b) - rankRestaurantMatch(a));
-
-  if (areaMatches.length > 0) {
-    return { tariff: areaMatches[0], matchedLevel: 'area' };
   }
 
-  // 2) Center level (center_id matches and area_id is null)
-  const centerMatches = eligible
-    .filter((t) => t.center_id === centerId && !t.area_id)
-    .sort((a, b) => rankRestaurantMatch(b) - rankRestaurantMatch(a));
-
-  if (centerMatches.length > 0) {
-    return { tariff: centerMatches[0], matchedLevel: 'center' };
+  if (Array.isArray(current)) {
+    current = current.length > 0 ? current[0] : null;
   }
 
-  // 3) Governorate level (governorate_id matches and both center_id & area_id are null)
-  const govMatches = eligible
-    .filter((t) => t.governorate_id === governorateId && !t.center_id && !t.area_id)
-    .sort((a, b) => rankRestaurantMatch(b) - rankRestaurantMatch(a));
-
-  if (govMatches.length > 0) {
-    return { tariff: govMatches[0], matchedLevel: 'governorate' };
+  if (!current || typeof current !== 'object' || Array.isArray(current)) {
+    return null;
   }
 
+  return current as Record<string, any>;
+}
+
+function classifyQuoteFailure(
+  rawCode?: string | null,
+  rawMessage?: string | null
+): { category: QuoteErrorCategory; reason: string; boundaryFailed?: boolean; queryFailed?: boolean } {
+  const code = String(rawCode || '').trim().toLowerCase();
+  const msg = String(rawMessage || '').trim();
+  const msgLower = msg.toLowerCase();
+
+  if (
+    code.includes('gps_out') ||
+    code.includes('out_of_bound') ||
+    code.includes('outside_boundary') ||
+    /خارج حدود|outside.*bound|out of.*bound|polygon|boundary/i.test(msgLower)
+  ) {
+    return {
+      category: 'gps_out_of_bounds',
+      reason: msg || 'إحداثيات موقعك الجغرافي (GPS) تقع خارج حدود المنطقة المحددة.',
+      boundaryFailed: true,
+    };
+  }
+
+  if (
+    code.includes('missing_gps') ||
+    /gps.*(missing|required)|إحداثيات.*مفقودة|تحديد الموقع/i.test(msgLower)
+  ) {
+    return {
+      category: 'missing_gps',
+      reason: msg || 'إحداثيات الموقع الجغرافي (GPS) مفقودة؛ يرجى تحديد الموقع على الخريطة.',
+      boundaryFailed: true,
+    };
+  }
+
+  if (
+    code.includes('invalid_gps') ||
+    /invalid.*gps|gps.*invalid|إحداثيات.*غير صالحة/i.test(msgLower)
+  ) {
+    return {
+      category: 'invalid_gps',
+      reason: msg || 'إحداثيات الموقع الجغرافي غير صالحة؛ يرجى إعادة تثبيت الموقع.',
+      boundaryFailed: true,
+    };
+  }
+
+  if (
+    code.includes('missing_geo') ||
+    code.includes('incomplete_geo') ||
+    /بيانات.*جغرافية ناقصة|يجب تحديد المحافظة والمركز والمنطقة/i.test(msgLower)
+  ) {
+    return {
+      category: 'missing_geo_data',
+      reason: msg || 'البيانات الجغرافية غير مكتملة؛ يرجى تحديد المحافظة والمركز والمنطقة.',
+    };
+  }
+
+  if (
+    code === '22p02' ||
+    code.includes('invalid_geo') ||
+    code.includes('geo_mismatch') ||
+    /invalid input syntax for type uuid|معرف جغرافي|لا يتبع المحافظة|لا تتبع المركز|غير مفعّلة في geo_|غير موجودة في geo_/i.test(
+      msgLower
+    )
+  ) {
+    return {
+      category: 'invalid_geo_id',
+      reason: msg || 'معرّف جغرافي غير صالح أو غير متطابق؛ يرجى تصحيح العنوان المختار.',
+    };
+  }
+
+  if (
+    code.includes('invalid_restaurant') ||
+    code.includes('restaurant_not_found') ||
+    code.includes('restaurant_closed') ||
+    code.includes('restaurant_inactive') ||
+    /مطعم غير|المطعم غير|المطعم مغلق|restaurant.*(not found|inactive|closed)/i.test(msgLower)
+  ) {
+    return {
+      category: 'invalid_restaurant',
+      reason: msg || 'المطعم المحدد غير صالح أو غير متاح حالياً.',
+    };
+  }
+
+  if (
+    code.includes('no_tariff') ||
+    code.includes('no_active_tariff') ||
+    code.includes('tariff_not_found') ||
+    code.includes('tariff_disabled') ||
+    /لا توجد تسعيرة|لا توجد تعريفة|غير مسعّرة|tariff.*(missing|disabled|not found)/i.test(msgLower)
+  ) {
+    return {
+      category: 'no_active_tariff',
+      reason: msg || 'لا توجد تسعيرة توصيل مفعّلة لهذه المنطقة حالياً.',
+    };
+  }
+
+  if (
+    code.includes('outside_coverage') ||
+    code.includes('not_covered') ||
+    code.includes('uncovered') ||
+    /خارج نطاق التوصيل|خارج التغطية|غير مغط|not covered|outside coverage/i.test(msgLower)
+  ) {
+    return {
+      category: 'outside_coverage',
+      reason: msg || 'المنطقة المحددة خارج نطاق التوصيل المتاح حالياً.',
+    };
+  }
+
+  if (
+    code === '42883' ||
+    code === 'pgrst202' ||
+    code === '42501' ||
+    code.startsWith('pgrst') ||
+    /network|fetch|timeout|connection|permission denied|function .* does not exist/i.test(msgLower)
+  ) {
+    return {
+      category: 'rpc_error',
+      reason: msg
+        ? `تعذر الاتصال بخدمة التسعير المركزية: ${msg}`
+        : 'تعذر الاتصال بخدمة التسعير المركزية؛ يرجى المحاولة مرة أخرى.',
+      queryFailed: true,
+    };
+  }
+
+  return {
+    category: 'outside_coverage',
+    reason: msg || 'المنطقة المحددة غير مشمولة بالتغطية أو التسعيرة حالياً.',
+  };
+}
+
+function resolveOptionalMatchedLevel(
+  val: unknown
+): 'area' | 'center' | 'governorate' | null {
+  const s = String(val || '').trim().toLowerCase();
+  if (s === 'area' || s === 'center' || s === 'governorate') return s;
+  return null;
+}
+
+function resolveOptionalDeliveryOwner(
+  ownerVal: unknown,
+  routeVal: unknown
+): DeliveryOwnerType | null {
+  const owner = String(ownerVal || '').trim().toLowerCase();
+  if (owner === 'restaurant' || owner === 'platform') return owner;
+  const route = String(routeVal || '').trim().toLowerCase();
+  if (route === 'restaurant_delivery') return 'restaurant';
+  if (route === 'driver_delivery') return 'platform';
+  return null;
+}
+
+function resolveOptionalFulfillmentRoute(
+  routeVal: unknown,
+  ownerVal: unknown
+): FulfillmentRouteType | null {
+  const route = String(routeVal || '').trim().toLowerCase();
+  if (route === 'restaurant_delivery' || route === 'driver_delivery') return route;
+  const owner = String(ownerVal || '').trim().toLowerCase();
+  if (owner === 'restaurant') return 'restaurant_delivery';
+  if (owner === 'platform') return 'driver_delivery';
   return null;
 }
 
 /**
- * Resolves central delivery tariff from `delivery_area_tariffs` using exact `service_type` and `delivery_owner`.
- * Enforces:
- * - Active 3-level `geo_*` hierarchy validation
- * - GPS boundary containment (`geo_areas.boundary` -> `geo_centers.boundary` -> `geo_governorates.boundary`)
- * - Tariff precedence: Area -> Center -> Governorate
- * - Exposes tariff snapshot values (`tariffId`, `baseFee`, `adminCommission`, `driverNet`, `customerDeliveryFee`)
- * - Never falls back to hardcoded fees or legacy tables.
+ * Resolves centralized delivery quote strictly via Supabase V2 RPC:
+ * `public.get_delivery_quote(p_service_type, p_governorate_id, p_center_id, p_area_id, p_latitude, p_longitude, p_restaurant_id)`
+ *
+ * Security & correctness guarantees:
+ * - Never queries `delivery_area_tariffs` directly from the client.
+ * - Passes all 7 parameters in exact V2 order and types (preventing legacy 4-param overload).
+ * - Validates UUIDs and real non-zero GPS coordinates before calling RPC (no fake coords).
+ * - Never forwards internal `admin_commission`, `driver_net`, or `driver_net_fee` to client objects.
+ * - Distinguishes RPC/connection errors from missing geo data, invalid IDs, GPS errors, missing tariffs, and uncovered areas.
  */
 export async function resolveCentralTariff(params: {
   serviceType: ServiceCategoryType;
-  deliveryOwner: DeliveryOwnerType;
-  restaurantId?: string | null;
-  requireExactRestaurantMatch?: boolean;
   governorateId?: string | null;
   centerId?: string | null;
   areaId?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  restaurantId?: string | null;
   client?: SupabaseClient;
 }): Promise<CentralTariffResolution> {
   const {
     serviceType,
-    deliveryOwner,
-    restaurantId,
-    requireExactRestaurantMatch = false,
     governorateId,
     centerId,
     areaId,
     latitude,
     longitude,
+    restaurantId,
     client,
   } = params;
 
   const emptyFailure = (
     reason: string,
+    errorCategory: QuoteErrorCategory,
     extra: Partial<CentralTariffResolution> = {}
   ): CentralTariffResolution => ({
     covered: false,
     tariffId: null,
     customerDeliveryFee: null,
-    baseFee: null,
-    adminCommission: null,
-    driverNet: null,
+    baseDeliveryFee: null,
     isFreeDelivery: false,
-    freeDeliveryCostBearer: null,
     estimatedDeliveryMinutes: null,
     matchedLevel: null,
-    applicableDeliveryOwner: deliveryOwner || null,
+    applicableDeliveryOwner: null,
+    fulfillmentRoute: null,
+    errorCategory,
     reason,
     ...extra,
   });
 
-  if (!governorateId || !centerId || !areaId) {
-    return emptyFailure('يجب تحديد المحافظة والمركز والمنطقة من النظام الجغرافي المعتمد أولاً');
-  }
-
-  const db = getClient(client);
-  const hierarchyCheck = await validateGeoHierarchySelection(governorateId, centerId, areaId, db);
-  if (!hierarchyCheck.valid) {
-    return emptyFailure(
-      hierarchyCheck.reason || 'التسلسل الجغرافي للعنوان غير صحيح أو غير مفعّل',
-      { boundaryFailed: true }
-    );
-  }
-
-  // Enforce GPS boundary check when coordinates are supplied
-  let boundaryCheck: BoundaryCheckResult = { checked: false, inside: true, level: null };
-  const hasCoordArgs = 'latitude' in params || 'longitude' in params;
-  if (hasCoordArgs) {
-    const gpsCheck = validateGpsCoordinates(latitude, longitude);
-    if (!gpsCheck.valid) {
-      return emptyFailure(
-        gpsCheck.reason || 'إحداثيات GPS مطلوبة للتحقق من النطاق الجغرافي.',
-        { boundaryFailed: true }
-      );
-    }
-    boundaryCheck = checkGpsWithinGeoBoundary(gpsCheck.latitude, gpsCheck.longitude, {
-      area: hierarchyCheck.area,
-      center: hierarchyCheck.center,
-      governorate: hierarchyCheck.governorate,
-    });
-    if (!boundaryCheck.inside) {
-      return emptyFailure(
-        boundaryCheck.reason || 'موقعك الجغرافي يقع خارج حدود المنطقة المحددة.',
-        {
-          boundaryChecked: boundaryCheck.checked,
-          boundaryLevel: boundaryCheck.level,
-          boundaryFailed: true,
-        }
-      );
-    }
-  }
-
-  let query = db
-    .from('delivery_area_tariffs')
-    .select('*')
-    .eq('service_type', serviceType)
-    .eq('delivery_owner', deliveryOwner)
-    .eq('is_enabled', true);
-
-  if (requireExactRestaurantMatch && restaurantId) {
-    query = query.eq('restaurant_id', restaurantId);
-  }
-
-  const { data, error } = await query;
-
-  if (error) {
-    return emptyFailure(`تعذر جلب تسعيرة التوصيل المركزية: ${error.message}`, {
-      boundaryChecked: boundaryCheck.checked,
-      boundaryLevel: boundaryCheck.level,
+  if (
+    serviceType !== 'household_shortages' &&
+    serviceType !== 'pharmacy' &&
+    serviceType !== 'ready_food'
+  ) {
+    return emptyFailure('نوع القسم المطلوب للتسعير غير معتمد.', 'rpc_error', {
       queryFailed: true,
     });
   }
 
-  const rows = ((data || []) as DeliveryAreaTariff[]).filter(
-    (r) => r.service_type === serviceType && r.delivery_owner === deliveryOwner && r.is_enabled !== false
-  );
-
-  const picked = pickMostSpecificTariff(
-    rows,
-    governorateId,
-    centerId,
-    areaId,
-    restaurantId,
-    requireExactRestaurantMatch
-  );
-
-  if (!picked) {
-    return emptyFailure('لا توجد تسعيرة توصيل مفعّلة لهذا النطاق الجغرافي حالياً', {
-      boundaryChecked: boundaryCheck.checked,
-      boundaryLevel: boundaryCheck.level,
-    });
+  if (!governorateId?.trim() || !centerId?.trim() || !areaId?.trim()) {
+    return emptyFailure(
+      'البيانات الجغرافية للعنوان غير مكتملة؛ يرجى تحديد المحافظة والمركز والمنطقة أولاً.',
+      'missing_geo_data'
+    );
   }
 
-  const tariff = picked.tariff;
-  const isFree = Boolean(tariff.is_free_delivery);
-  const fee = isFree
-    ? 0
-    : tariff.customer_delivery_fee !== null && tariff.customer_delivery_fee !== undefined
-    ? Number(tariff.customer_delivery_fee)
-    : null;
-
-  const baseFeeRaw = tariff.base_fee !== null && tariff.base_fee !== undefined ? Number(tariff.base_fee) : null;
-  const adminCommissionRaw =
-    tariff.admin_commission !== null && tariff.admin_commission !== undefined
-      ? Number(tariff.admin_commission)
-      : null;
-  const driverNetRaw =
-    tariff.driver_net !== null && tariff.driver_net !== undefined
-      ? Number(tariff.driver_net)
-      : tariff.driver_net_fee !== null && tariff.driver_net_fee !== undefined
-      ? Number(tariff.driver_net_fee)
-      : null;
-
-  if (!isFree && (fee === null || !Number.isFinite(fee) || fee < 0)) {
-    return emptyFailure('تسعيرة التوصيل لهذه المنطقة غير مكتملة في النظام المركزي', {
-      tariffId: tariff.id,
-      matchedLevel: picked.matchedLevel,
-      boundaryChecked: boundaryCheck.checked,
-      boundaryLevel: boundaryCheck.level,
-      applicableDeliveryOwner: (tariff.delivery_owner as DeliveryOwnerType) || deliveryOwner,
-    });
+  if (
+    !isValidUuid(governorateId) ||
+    !isValidUuid(centerId) ||
+    !isValidUuid(areaId)
+  ) {
+    return emptyFailure(
+      'معرّف المحافظة أو المركز أو المنطقة غير صالح؛ يرجى تعديل العنوان وإعادة الاختيار من القوائم المعتمدة.',
+      'invalid_geo_id'
+    );
   }
 
-  return {
-    covered: true,
-    tariffId: tariff.id,
-    customerDeliveryFee: fee,
-    baseFee: baseFeeRaw !== null && Number.isFinite(baseFeeRaw) ? baseFeeRaw : fee,
-    adminCommission:
-      adminCommissionRaw !== null && Number.isFinite(adminCommissionRaw) ? adminCommissionRaw : 0,
-    driverNet: driverNetRaw !== null && Number.isFinite(driverNetRaw) ? driverNetRaw : null,
-    isFreeDelivery: isFree,
-    freeDeliveryCostBearer: tariff.free_delivery_cost_bearer || null,
-    estimatedDeliveryMinutes:
-      tariff.estimated_delivery_minutes !== null && tariff.estimated_delivery_minutes !== undefined
-        ? Number(tariff.estimated_delivery_minutes)
-        : null,
-    matchedLevel: picked.matchedLevel,
-    applicableDeliveryOwner: (tariff.delivery_owner as DeliveryOwnerType) || deliveryOwner,
-    boundaryChecked: boundaryCheck.checked,
-    boundaryLevel: boundaryCheck.level,
-  };
+  let normalizedRestaurantId: string | null = null;
+  if (serviceType === 'ready_food') {
+    if (!restaurantId?.trim() || !isValidUuid(restaurantId)) {
+      return emptyFailure(
+        'معرّف المطعم غير صالح أو مفقود للتحقق من التغطية والتسعيرة.',
+        'invalid_restaurant'
+      );
+    }
+    normalizedRestaurantId = restaurantId.trim();
+  }
+
+  if (
+    latitude === null ||
+    latitude === undefined ||
+    longitude === null ||
+    longitude === undefined
+  ) {
+    return emptyFailure(
+      'إحداثيات الموقع الجغرافي (GPS) مفقودة؛ يرجى تحديد الموقع على الخريطة أو تفعيل GPS.',
+      'missing_gps',
+      { boundaryFailed: true }
+    );
+  }
+
+  const gpsCheck = validateGpsCoordinates(latitude, longitude);
+  if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+    return emptyFailure(
+      gpsCheck.reason || 'إحداثيات GPS غير صالحة؛ يرجى إعادة تحديد الموقع بدقة.',
+      'invalid_gps',
+      { boundaryFailed: true }
+    );
+  }
+
+  let db: SupabaseClient;
+  try {
+    db = getClient(client);
+  } catch (err: any) {
+    return emptyFailure(
+      err?.message || 'اتصال قاعدة البيانات غير متاح للتحقق من التسعيرة.',
+      'rpc_error',
+      { queryFailed: true }
+    );
+  }
+
+  try {
+    const rpcPayload = {
+      p_service_type: serviceType,
+      p_governorate_id: governorateId.trim(),
+      p_center_id: centerId.trim(),
+      p_area_id: areaId.trim(),
+      p_latitude: Number(gpsCheck.latitude),
+      p_longitude: Number(gpsCheck.longitude),
+      p_restaurant_id: normalizedRestaurantId,
+    };
+
+    const { data: rawData, error: rpcError } = await db.rpc(
+      'get_delivery_quote',
+      rpcPayload
+    );
+
+    if (rpcError) {
+      const classified = classifyQuoteFailure(rpcError.code, rpcError.message);
+      const isActualQueryFailure =
+        classified.category === 'rpc_error' ||
+        (!classified.boundaryFailed &&
+          classified.category !== 'invalid_geo_id' &&
+          classified.category !== 'invalid_restaurant' &&
+          classified.category !== 'no_active_tariff' &&
+          classified.category !== 'outside_coverage');
+
+      return emptyFailure(
+        classified.category === 'rpc_error' || isActualQueryFailure
+          ? `تعذر الاتصال بخدمة التسعير المركزية: ${rpcError.message}`
+          : classified.reason,
+        isActualQueryFailure ? 'rpc_error' : classified.category,
+        {
+          boundaryFailed: Boolean(classified.boundaryFailed),
+          queryFailed: isActualQueryFailure || Boolean(classified.queryFailed),
+        }
+      );
+    }
+
+    const quoteObj = normalizeQuoteObject(rawData);
+    if (!quoteObj) {
+      return emptyFailure(
+        'تعذر قراءة استجابة خدمة التسعير المركزية (صيغة غير صالحة).',
+        'rpc_error',
+        { queryFailed: true }
+      );
+    }
+
+    // Determine coverage status strictly from returned JSONB boolean flags
+    let isCovered = false;
+    if (typeof quoteObj.covered === 'boolean') {
+      isCovered = quoteObj.covered;
+    } else if (typeof quoteObj.is_covered === 'boolean') {
+      isCovered = quoteObj.is_covered;
+    } else if (typeof quoteObj.allowed === 'boolean') {
+      isCovered = quoteObj.allowed;
+    } else if (typeof quoteObj.is_allowed === 'boolean') {
+      isCovered = quoteObj.is_allowed;
+    } else if (typeof quoteObj.serviceable === 'boolean') {
+      isCovered = quoteObj.serviceable;
+    } else if (typeof quoteObj.is_serviceable === 'boolean') {
+      isCovered = quoteObj.is_serviceable;
+    } else if (typeof quoteObj.ok === 'boolean') {
+      isCovered = quoteObj.ok;
+    } else if (typeof quoteObj.success === 'boolean') {
+      isCovered = quoteObj.success;
+    }
+
+    const matchedLevel = resolveOptionalMatchedLevel(
+      quoteObj.matched_level ?? quoteObj.scope_level ?? quoteObj.level
+    );
+    const applicableDeliveryOwner = resolveOptionalDeliveryOwner(
+      quoteObj.delivery_owner ?? quoteObj.applicable_delivery_owner ?? quoteObj.owner,
+      quoteObj.fulfillment_route
+    );
+    const fulfillmentRoute = resolveOptionalFulfillmentRoute(
+      quoteObj.fulfillment_route,
+      quoteObj.delivery_owner ?? quoteObj.applicable_delivery_owner
+    );
+
+    if (!isCovered) {
+      const rawErrCode =
+        quoteObj.error_code ?? quoteObj.code ?? quoteObj.reason_code ?? quoteObj.status;
+      const rawErrMsg =
+        quoteObj.reason ??
+        quoteObj.message ??
+        quoteObj.error ??
+        quoteObj.error_message;
+      const classified = classifyQuoteFailure(
+        rawErrCode ? String(rawErrCode) : null,
+        rawErrMsg ? String(rawErrMsg) : null
+      );
+
+      return emptyFailure(classified.reason, classified.category, {
+        matchedLevel,
+        applicableDeliveryOwner,
+        fulfillmentRoute,
+        boundaryChecked:
+          typeof quoteObj.boundary_checked === 'boolean'
+            ? quoteObj.boundary_checked
+            : undefined,
+        boundaryLevel: resolveOptionalMatchedLevel(quoteObj.boundary_level),
+        boundaryFailed: Boolean(classified.boundaryFailed),
+        queryFailed: Boolean(classified.queryFailed),
+      });
+    }
+
+    const isFree = Boolean(quoteObj.is_free_delivery ?? quoteObj.free_delivery ?? false);
+    const rawCustomerFee =
+      quoteObj.customer_delivery_fee ?? quoteObj.delivery_fee ?? quoteObj.fee;
+    const customerFee = isFree
+      ? 0
+      : rawCustomerFee !== null && rawCustomerFee !== undefined
+      ? Number(rawCustomerFee)
+      : null;
+
+    if (customerFee === null || !Number.isFinite(customerFee) || customerFee < 0) {
+      return emptyFailure(
+        'تسعيرة التوصيل لهذه المنطقة غير مكتملة في النظام المركزي.',
+        'no_active_tariff',
+        {
+          tariffId: quoteObj.tariff_id ? String(quoteObj.tariff_id) : null,
+          matchedLevel,
+          applicableDeliveryOwner,
+          fulfillmentRoute,
+        }
+      );
+    }
+
+    // Use actual V2 field name `base_delivery_fee`; never read or expose `admin_commission` or `driver_net`.
+    const rawBaseDeliveryFee = quoteObj.base_delivery_fee;
+    const baseDeliveryFee =
+      rawBaseDeliveryFee !== null &&
+      rawBaseDeliveryFee !== undefined &&
+      Number.isFinite(Number(rawBaseDeliveryFee))
+        ? Number(rawBaseDeliveryFee)
+        : customerFee;
+
+    const rawEstMinutes = quoteObj.estimated_delivery_minutes;
+    const estimatedDeliveryMinutes =
+      rawEstMinutes !== null &&
+      rawEstMinutes !== undefined &&
+      Number.isFinite(Number(rawEstMinutes))
+        ? Number(rawEstMinutes)
+        : null;
+
+    return {
+      covered: true,
+      tariffId: quoteObj.tariff_id ? String(quoteObj.tariff_id) : null,
+      customerDeliveryFee: customerFee,
+      baseDeliveryFee,
+      isFreeDelivery: isFree,
+      estimatedDeliveryMinutes,
+      matchedLevel,
+      applicableDeliveryOwner,
+      fulfillmentRoute,
+      errorCategory: null,
+      boundaryChecked:
+        typeof quoteObj.boundary_checked === 'boolean'
+          ? quoteObj.boundary_checked
+          : true,
+      boundaryLevel: resolveOptionalMatchedLevel(quoteObj.boundary_level),
+    };
+  } catch (err: any) {
+    return emptyFailure(
+      err?.message || 'حدث خطأ أثناء الاتصال بخدمة التسعير المركزية.',
+      'rpc_error',
+      { queryFailed: true }
+    );
+  }
 }
 
 /**
- * Inspects restaurant record flags for UI display only (tariff resolution always queries `delivery_area_tariffs` directly).
+ * Inspects restaurant record flags for UI display only (DB V2 RPC/triggers own actual routing).
  */
 export function detectRestaurantOwnDelivery(restaurantRow: Record<string, any> | null | undefined): boolean {
   if (!restaurantRow || typeof restaurantRow !== 'object') return false;
@@ -1103,14 +1333,9 @@ export function detectRestaurantOwnDelivery(restaurantRow: Record<string, any> |
 }
 
 /**
- * Resolves ready-made food (`service_type = "ready_food"`) coverage & central tariff strictly from `delivery_area_tariffs`:
- * 1) Check restaurant tariff: `service_type = "ready_food"`, `delivery_owner = "restaurant"`, `restaurant_id = restaurant.id`.
- *    - If covered -> use restaurant tariff.
- * 2) Otherwise check platform tariff: `service_type = "ready_food"`, `delivery_owner = "platform"`.
- *    - If covered -> use platform tariff.
- * 3) If in neither -> block order and return "أنت خارج نطاق التوصيل".
- *
- * Forbidden: Never reads `restaurant_service_areas`, `restaurant_section_service_areas`, or `restaurant_area_delivery_fees`.
+ * Resolves ready-made food (`p_service_type = "ready_food"`) coverage & central quote strictly via
+ * `public.get_delivery_quote` V2 (passing `p_restaurant_id`).
+ * Database triggers & RPC remain the sole final authority on `restaurant_delivery` vs `driver_delivery`.
  */
 export async function resolveRestaurantDeliveryScopeAndTariff(params: {
   restaurant: Record<string, any>;
@@ -1122,118 +1347,58 @@ export async function resolveRestaurantDeliveryScopeAndTariff(params: {
   client?: SupabaseClient;
 }): Promise<RestaurantScopeAndTariffResult> {
   const { restaurant, governorateId, centerId, areaId, latitude, longitude, client } = params;
-  const restaurantId = String(restaurant?.id || '');
+  const restaurantId = String(restaurant?.id || '').trim();
   const hasOwnDeliveryFlag =
     typeof restaurant?.hasOwnDelivery === 'boolean'
       ? restaurant.hasOwnDelivery
       : detectRestaurantOwnDelivery(restaurant);
 
-  const blocked = (
-    reason: string,
-    extra: Partial<RestaurantScopeAndTariffResult> = {}
-  ): RestaurantScopeAndTariffResult => ({
-    covered: false,
-    hasOwnDelivery: hasOwnDeliveryFlag,
-    inRestaurantScope: false,
-    tariffId: null,
-    customerDeliveryFee: null,
-    baseFee: null,
-    adminCommission: null,
-    driverNet: null,
-    isFreeDelivery: false,
-    freeDeliveryCostBearer: null,
-    estimatedDeliveryMinutes: null,
-    matchedLevel: null,
-    applicableDeliveryOwner: null,
-    reason,
-    ...extra,
-  });
-
-  if (!restaurantId) {
-    return blocked('بيانات المطعم غير مكتملة');
-  }
-
-  if (!governorateId || !centerId || !areaId) {
-    return blocked('يرجى تحديد عنوان يحتوي على المحافظة والمركز والمنطقة للتحقق من نطاق التوصيل والتسعيرة');
-  }
-
-  const db = getClient(client);
-  const coordProps =
-    'latitude' in params || 'longitude' in params
-      ? { latitude, longitude }
-      : {};
-
-  // Step 1: Check restaurant-owned tariff in `delivery_area_tariffs`
-  const restaurantTariff = await resolveCentralTariff({
-    serviceType: 'ready_food',
-    deliveryOwner: 'restaurant',
-    restaurantId,
-    requireExactRestaurantMatch: true,
-    governorateId,
-    centerId,
-    areaId,
-    ...coordProps,
-    client: db,
-  });
-
-  if (restaurantTariff.boundaryFailed || restaurantTariff.queryFailed) {
+  if (!restaurantId || !isValidUuid(restaurantId)) {
     return {
-      ...restaurantTariff,
       covered: false,
       hasOwnDelivery: hasOwnDeliveryFlag,
       inRestaurantScope: false,
+      tariffId: null,
+      customerDeliveryFee: null,
+      baseDeliveryFee: null,
+      isFreeDelivery: false,
+      estimatedDeliveryMinutes: null,
+      matchedLevel: null,
       applicableDeliveryOwner: null,
+      fulfillmentRoute: null,
+      errorCategory: 'invalid_restaurant',
+      reason: 'بيانات المطعم غير مكتملة أو غير صالحة.',
     };
   }
 
-  if (restaurantTariff.covered) {
-    return {
-      ...restaurantTariff,
-      hasOwnDelivery: true,
-      inRestaurantScope: true,
-      applicableDeliveryOwner: 'restaurant',
-    };
-  }
-
-  // Step 2: Check platform-owned tariff in `delivery_area_tariffs`
-  const platformTariff = await resolveCentralTariff({
+  const quote = await resolveCentralTariff({
     serviceType: 'ready_food',
-    deliveryOwner: 'platform',
-    restaurantId,
-    requireExactRestaurantMatch: false,
     governorateId,
     centerId,
     areaId,
-    ...coordProps,
-    client: db,
+    latitude,
+    longitude,
+    restaurantId,
+    client,
   });
 
-  if (platformTariff.boundaryFailed || platformTariff.queryFailed) {
+  if (!quote.covered) {
     return {
-      ...platformTariff,
+      ...quote,
       covered: false,
       hasOwnDelivery: hasOwnDeliveryFlag,
       inRestaurantScope: false,
-      applicableDeliveryOwner: null,
     };
   }
 
-  if (platformTariff.covered) {
-    return {
-      ...platformTariff,
-      hasOwnDelivery: hasOwnDeliveryFlag,
-      inRestaurantScope: false,
-      applicableDeliveryOwner: 'platform',
-    };
-  }
+  const inRestaurantScope =
+    quote.applicableDeliveryOwner === 'restaurant' ||
+    quote.fulfillmentRoute === 'restaurant_delivery';
 
-  // Step 3: Covered by neither restaurant nor platform
   return {
-    ...platformTariff,
-    covered: false,
-    hasOwnDelivery: hasOwnDeliveryFlag,
-    inRestaurantScope: false,
-    applicableDeliveryOwner: null,
-    reason: 'أنت خارج نطاق التوصيل',
+    ...quote,
+    hasOwnDelivery: inRestaurantScope || hasOwnDeliveryFlag,
+    inRestaurantScope,
   };
 }
+

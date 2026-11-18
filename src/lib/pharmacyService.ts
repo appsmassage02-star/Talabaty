@@ -3,9 +3,11 @@ import { cacheManager } from "./cacheManager";
 import { processDocumentImage } from "./imageUtils";
 import { sectionSettingsService } from "./sectionSettingsService";
 import {
+  isValidUuid,
   resolveCentralTariff,
   validateGpsCoordinates,
   type CentralTariffResolution,
+  type QuoteErrorCategory,
 } from "./geoService";
 import type { HouseholdAddress } from "../types";
 import {
@@ -1039,70 +1041,97 @@ class PharmacyService {
   }
 
   /**
-   * Resolves central delivery tariff & coverage for Pharmacy service on a household address
+   * Resolves central delivery quote & coverage for Pharmacy service strictly via
+   * `public.get_delivery_quote` V2 (`p_service_type = 'pharmacy'`).
    */
   async resolvePharmacyDeliveryTariff(address?: Partial<HouseholdAddress> | null): Promise<{
     allowed: boolean;
     deliveryFee: number | null;
+    baseDeliveryFee: number | null;
     isFreeDelivery: boolean;
     estimatedDeliveryMinutes: number | null;
     tariffId: string | null;
+    errorCategory?: QuoteErrorCategory | null;
     reason?: string;
     resolution?: CentralTariffResolution;
   }> {
-    if (!address) {
-      return {
-        allowed: false,
-        deliveryFee: null,
-        isFreeDelivery: false,
-        estimatedDeliveryMinutes: null,
-        tariffId: null,
-        reason: "يرجى اختيار عنوان توصيل أولاً",
-      };
-    }
+    const blocked = (
+      reason: string,
+      errorCategory: QuoteErrorCategory,
+      resolution?: CentralTariffResolution
+    ) => ({
+      allowed: false,
+      deliveryFee: null,
+      baseDeliveryFee: null,
+      isFreeDelivery: false,
+      estimatedDeliveryMinutes: null,
+      tariffId: null,
+      errorCategory,
+      reason,
+      resolution,
+    });
 
-    const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
-    if (!gpsCheck.valid) {
-      return {
-        allowed: false,
-        deliveryFee: null,
-        isFreeDelivery: false,
-        estimatedDeliveryMinutes: null,
-        tariffId: null,
-        reason:
-          gpsCheck.reason ||
-          "هذا العنوان لا يحتوي على موقع GPS صالح. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.",
-      };
+    if (!address) {
+      return blocked("يرجى اختيار عنوان توصيل أولاً", "missing_geo_data");
     }
 
     if (!address.governorate_id || !address.center_id || !address.area_id) {
-      return {
-        allowed: false,
-        deliveryFee: null,
-        isFreeDelivery: false,
-        estimatedDeliveryMinutes: null,
-        tariffId: null,
-        reason:
-          "العنوان المحدد غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تحديث العنوان أو إضافة عنوان جديد.",
-      };
+      return blocked(
+        "العنوان المحدد غير مربوط بالنظام الجغرافي المركزي (المحافظة / المركز / المنطقة). يرجى تحديث العنوان أو إضافة عنوان جديد.",
+        "missing_geo_data"
+      );
+    }
+
+    if (
+      !isValidUuid(address.governorate_id) ||
+      !isValidUuid(address.center_id) ||
+      !isValidUuid(address.area_id)
+    ) {
+      return blocked(
+        "معرّف المحافظة أو المركز أو المنطقة في هذا العنوان غير صالح؛ يرجى تعديل العنوان وإعادة الاختيار.",
+        "invalid_geo_id"
+      );
+    }
+
+    if (
+      address.latitude === null ||
+      address.latitude === undefined ||
+      address.longitude === null ||
+      address.longitude === undefined
+    ) {
+      return blocked(
+        "هذا العنوان يفتقد إحداثيات الموقع الجغرافي (GPS). يرجى تعديل العنوان وتثبيت الموقع على الخريطة.",
+        "missing_gps"
+      );
+    }
+
+    const gpsCheck = validateGpsCoordinates(address.latitude, address.longitude);
+    if (!gpsCheck.valid || gpsCheck.latitude === null || gpsCheck.longitude === null) {
+      return blocked(
+        gpsCheck.reason ||
+          "هذا العنوان لا يحتوي على موقع GPS صالح. يرجى تعديل العنوان وتثبيت الموقع على الخريطة.",
+        "invalid_gps"
+      );
     }
 
     const tariffRes = await resolveCentralTariff({
       serviceType: "pharmacy",
-      deliveryOwner: "platform",
       governorateId: address.governorate_id,
       centerId: address.center_id,
       areaId: address.area_id,
       latitude: gpsCheck.latitude,
       longitude: gpsCheck.longitude,
+      restaurantId: null,
     });
 
     return {
       allowed: tariffRes.covered,
       deliveryFee: tariffRes.customerDeliveryFee,
+      baseDeliveryFee: tariffRes.baseDeliveryFee,
       isFreeDelivery: tariffRes.isFreeDelivery,
       estimatedDeliveryMinutes: tariffRes.estimatedDeliveryMinutes,
       tariffId: tariffRes.tariffId,
+      errorCategory: tariffRes.errorCategory ?? null,
       reason: tariffRes.reason,
       resolution: tariffRes,
     };
@@ -1431,17 +1460,16 @@ class PharmacyService {
 
       const maxAttempts = 2;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const attemptOrderId = attempt === 1 ? orderId : crypto.randomUUID();
         const res = await supabase.rpc("pharmacy_create_order", {
           ...rpcPayload,
-          p_order_id: attemptOrderId,
+          p_order_id: orderId,
         });
 
         rpcData = res.data;
         rpcErr = res.error;
 
         if (!rpcErr) {
-          finalOrderId = attemptOrderId;
+          finalOrderId = orderId;
           break;
         }
 
