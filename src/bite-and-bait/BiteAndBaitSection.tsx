@@ -846,20 +846,23 @@ export const BiteAndBaitSection: React.FC<BiteAndBaitSectionProps> = ({
     try {
       // 1. Authoritative Household ID Resolution
       // Rule 3: Do NOT query profiles.household_id as it does not exist in the database.
-      // Extract household from household_members using current user, falling back to households.admin_id.
+      // Extract household strictly from household_members (user_id) or households (admin_id).
       const currentUserId = supabaseUser?.id || (supabaseProfile as any)?.id || '';
-      let resolvedHouseholdId = household?.id || '';
+      const hhRes = await biteAndBaitService.resolveUserHouseholdId(currentUserId);
 
-      if (currentUserId) {
-        const dbHhId = await biteAndBaitService.getUserHouseholdId(currentUserId);
-        if (dbHhId) {
-          resolvedHouseholdId = dbHhId;
-        }
+      if (!hhRes.success) {
+        setIsSubmittingOrder(false);
+        const err =
+          hhRes.error || 'تعذر التحقق من بيانات الأسرة في قاعدة البيانات. يرجى المحاولة مرة أخرى.';
+        triggerNotification(`⚠️ ${err}`);
+        return { success: false, message: err };
       }
+
+      const resolvedHouseholdId = typeof hhRes.data === 'string' ? hhRes.data.trim() : '';
 
       if (!resolvedHouseholdId) {
         setIsSubmittingOrder(false);
-        const err = 'تعذر تحديد الأسرة المرتبطة بحسابك في النظام. يلزم أن يكون المستخدم عضواً في أسرة صالحة لتسجيل الطلب.';
+        const err = 'تعذر تحديد معرف الأسرة للطلب. يلزم أن يكون المستخدم عضواً في أسرة مسجلة.';
         triggerNotification(`⚠️ ${err}`);
         return { success: false, message: err };
       }

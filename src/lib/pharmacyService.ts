@@ -1865,6 +1865,7 @@ class PharmacyService {
   ): () => void {
     let isDisposed = false;
     let activeChannel: any = null;
+    const cleanedChannels = new WeakSet<object>();
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
     let hasSubscribedOnce = false;
@@ -1876,14 +1877,18 @@ class PharmacyService {
       }
     };
 
-    const cleanupActiveChannel = () => {
-      if (activeChannel) {
-        try {
-          supabase.removeChannel(activeChannel);
-        } catch {
-          // ignore cleanup failures
-        }
+    const cleanupChannel = (targetChannel?: any) => {
+      const ch = targetChannel || activeChannel;
+      if (!ch) return;
+      if (activeChannel === ch) {
         activeChannel = null;
+      }
+      if (cleanedChannels.has(ch)) return;
+      cleanedChannels.add(ch);
+      try {
+        supabase.removeChannel(ch);
+      } catch {
+        // ignore cleanup failures
       }
     };
 
@@ -1901,7 +1906,9 @@ class PharmacyService {
 
     const setupChannel = () => {
       if (isDisposed) return;
-      cleanupActiveChannel();
+      if (activeChannel) {
+        cleanupChannel(activeChannel);
+      }
 
       const channelName = `pharmacy_live_sync_${++this.realtimeSeq}_${Date.now()}`;
       const channel = supabase
@@ -1960,7 +1967,9 @@ class PharmacyService {
       activeChannel = channel;
 
       channel.subscribe((status: string) => {
-        if (isDisposed) return;
+        if (isDisposed || channel !== activeChannel || cleanedChannels.has(channel)) {
+          return;
+        }
         if (status === "SUBSCRIBED") {
           clearReconnectTimer();
           reconnectAttempt = 0;
@@ -1973,7 +1982,14 @@ class PharmacyService {
           status === "TIMED_OUT" ||
           status === "CLOSED"
         ) {
-          cleanupActiveChannel();
+          // Detach activeChannel BEFORE removing so synchronous CLOSED events from removeChannel cannot recurse
+          if (activeChannel === channel) {
+            activeChannel = null;
+          }
+          // Defer removeChannel outside Supabase/Phoenix's synchronous trigger stack
+          setTimeout(() => {
+            cleanupChannel(channel);
+          }, 0);
           scheduleReconnect();
         }
       });
@@ -2013,7 +2029,7 @@ class PharmacyService {
     return () => {
       isDisposed = true;
       clearReconnectTimer();
-      cleanupActiveChannel();
+      cleanupChannel();
       if (typeof window !== "undefined") {
         window.removeEventListener("online", handleOnline);
       }

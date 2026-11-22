@@ -1157,19 +1157,63 @@ export const biteAndBaitService = {
   },
 
   // --------------------------------------------------------------------------
-  // 8. Helper to resolve user's authoritative Household ID
+  // 8. Helper to resolve user's authoritative Household ID (TEXT, NOT UUID)
   // Rule 3: Do NOT query profiles.household_id as it does not exist in the database.
-  // Extract household strictly from household_members, falling back to households.admin_id.
+  // Extract household strictly from household_members (user_id), falling back to households (admin_id).
+  // Preserves DB query errors so failures are never misrepresented as missing membership.
   // --------------------------------------------------------------------------
-  async getUserHouseholdId(userId: string): Promise<string | null> {
-    if (!isSupabaseConfigured() || !supabase || !userId) return null;
+  async resolveUserHouseholdId(providedUserId?: string): Promise<ServiceResult<string | null>> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return {
+        success: false,
+        data: null,
+        error: 'قاعدة بيانات Supabase غير متصلة للتحقق من عضوية الأسرة.',
+        errorCode: 'rpc_error',
+        isConfigError: true,
+      };
+    }
+
+    const normalizeTextHouseholdId = (val: unknown): string | null => {
+      if (typeof val !== 'string') return null;
+      const trimmed = val.trim();
+      if (!trimmed) return null;
+      const lower = trimmed.toLowerCase();
+      if (lower === 'null' || lower === 'undefined') return null;
+      return trimmed;
+    };
 
     try {
-      // 1. Primary: Check authoritative household_members table
+      let cleanUserId = typeof providedUserId === 'string' ? providedUserId.trim() : '';
+      if (!cleanUserId) {
+        const {
+          data: { session },
+          error: sessionErr,
+        } = await supabase.auth.getSession();
+        if (sessionErr) {
+          return {
+            success: false,
+            data: null,
+            error: `تعذر التحقق من جلسة المستخدم الحالية: ${sessionErr.message}`,
+            errorCode: 'SESSION_ERROR',
+          };
+        }
+        cleanUserId = session?.user?.id ? String(session.user.id).trim() : '';
+      }
+
+      if (!cleanUserId) {
+        return {
+          success: false,
+          data: null,
+          error: 'يجب تسجيل الدخول بحساب مرتبط بأسرة مسجلة لإتمام الطلب.',
+          errorCode: 'UNAUTHENTICATED',
+        };
+      }
+
+      // 1. Primary: Check authoritative household_members table by user_id
       const { data: member, error: memErr } = await supabase
         .from('household_members')
         .select('household_id')
-        .eq('user_id', userId)
+        .eq('user_id', cleanUserId)
         .order('joined_at', { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -1178,15 +1222,19 @@ export const biteAndBaitService = {
         console.warn('[biteAndBaitService] household_members query error:', memErr);
       }
 
-      if (member?.household_id) {
-        return member.household_id;
+      const memberHhId = normalizeTextHouseholdId(member?.household_id);
+      if (memberHhId) {
+        return {
+          success: true,
+          data: memberHhId,
+        };
       }
 
       // 2. Secondary fallback: Check households where the user is admin_id
       const { data: hh, error: hhErr } = await supabase
         .from('households')
         .select('id')
-        .eq('admin_id', userId)
+        .eq('admin_id', cleanUserId)
         .limit(1)
         .maybeSingle();
 
@@ -1194,15 +1242,48 @@ export const biteAndBaitService = {
         console.warn('[biteAndBaitService] households admin query error:', hhErr);
       }
 
-      if (hh?.id) {
-        return hh.id;
+      const adminHhId = normalizeTextHouseholdId(hh?.id);
+      if (adminHhId) {
+        return {
+          success: true,
+          data: adminHhId,
+        };
       }
 
-      return null;
-    } catch (err) {
+      // 3. Never mask DB errors as non-membership
+      if (memErr || hhErr) {
+        const details = [
+          memErr ? `household_members: ${memErr.message}` : null,
+          hhErr ? `households: ${hhErr.message}` : null,
+        ]
+          .filter(Boolean)
+          .join(' | ');
+        return {
+          success: false,
+          data: null,
+          error: `تعذر التحقق من عضوية الأسرة في قاعدة البيانات (${details}).`,
+          errorCode: memErr?.code || hhErr?.code || 'HOUSEHOLD_QUERY_ERROR',
+        };
+      }
+
+      return {
+        success: true,
+        data: null,
+      };
+    } catch (err: any) {
       console.warn('[biteAndBaitService] Exception resolving household ID:', err);
-      return null;
+      return {
+        success: false,
+        data: null,
+        error: err?.message || 'حدث استثناء غير متوقع أثناء التحقق من عضوية الأسرة.',
+        errorCode: 'HOUSEHOLD_QUERY_ERROR',
+      };
     }
+  },
+
+  async getUserHouseholdId(userId: string): Promise<string | null> {
+    const res = await this.resolveUserHouseholdId(userId);
+    return res.success ? res.data : null;
   },
 
   // --------------------------------------------------------------------------
@@ -1225,7 +1306,27 @@ export const biteAndBaitService = {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const userId = providedUserId || session?.user?.id;
-      const householdId = providedHouseholdId || (userId ? await this.getUserHouseholdId(userId) : null);
+      const trimmedProvidedHhId =
+        typeof providedHouseholdId === 'string' &&
+        providedHouseholdId.trim() &&
+        providedHouseholdId.trim().toLowerCase() !== 'null' &&
+        providedHouseholdId.trim().toLowerCase() !== 'undefined'
+          ? providedHouseholdId.trim()
+          : null;
+
+      let householdId = trimmedProvidedHhId;
+      if (!householdId && userId) {
+        const hhRes = await this.resolveUserHouseholdId(userId);
+        if (!hhRes.success) {
+          return {
+            success: false,
+            data: [],
+            error: hhRes.error || 'تعذر التحقق من عضوية الأسرة لجلب العناوين.',
+            errorCode: hhRes.errorCode,
+          };
+        }
+        householdId = hhRes.data;
+      }
 
       if (!householdId) {
         return {
@@ -1588,8 +1689,16 @@ export const biteAndBaitService = {
         };
       }
 
-      // 1. Mandatory Parameters & UUID Validation
-      if (!params.householdId || !isValidUuid(params.householdId)) {
+      // 1. Mandatory Parameters & Validation
+      // Note: public.households.id and public.household_members.household_id are TEXT in DB (never UUID-only).
+      const validHouseholdId =
+        typeof params.householdId === 'string' &&
+        params.householdId.trim() !== '' &&
+        params.householdId.trim().toLowerCase() !== 'null' &&
+        params.householdId.trim().toLowerCase() !== 'undefined'
+          ? params.householdId.trim()
+          : '';
+      if (!validHouseholdId) {
         return {
           success: false,
           data: { orderId: '', orderNumber: '' },
@@ -1683,7 +1792,7 @@ export const biteAndBaitService = {
           .from('household_addresses')
           .select('id, household_id, governorate_id, center_id, area_id')
           .eq('id', params.addressId)
-          .eq('household_id', params.householdId)
+          .eq('household_id', validHouseholdId)
           .maybeSingle();
 
         if (addrErr) {
@@ -1756,7 +1865,7 @@ export const biteAndBaitService = {
       // DB trigger `private.prepare_restaurant_order_v2` computes final fulfillment_route (restaurant_delivery vs driver_delivery),
       // delivery fee, admin/restaurant/driver shares, and totals authoritatively.
       const rpcPayload = {
-        p_household_id: params.householdId,
+        p_household_id: validHouseholdId,
         p_restaurant_id: params.restaurantId,
         p_address_id: params.addressId || null,
         p_customer_name: params.customerName.trim(),
