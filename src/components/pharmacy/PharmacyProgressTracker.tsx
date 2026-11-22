@@ -14,8 +14,22 @@ export const PharmacyProgressTracker: React.FC<PharmacyProgressTrackerProps> = (
           <XCircle className="w-5 h-5" />
         </div>
         <div>
-          <h4 className="text-xs font-bold text-rose-800">تم إلغاء الطلب</h4>
+          <h4 className="text-xs font-bold text-rose-800">تم الإلغاء</h4>
           <p className="text-[11px] text-rose-600 mt-0.5">تم إلغاء هذا الطلب ولا يتم تنفيذه حالياً.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === "cancellation_requested") {
+    return (
+      <div className="bg-orange-50 border border-orange-200 rounded-2xl p-3.5 text-right flex items-center space-x-2.5 space-x-reverse">
+        <div className="w-8 h-8 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center shrink-0">
+          <Clock className="w-5 h-5" />
+        </div>
+        <div>
+          <h4 className="text-xs font-bold text-orange-900">طلب إلغاء</h4>
+          <p className="text-[11px] text-orange-700 mt-0.5">تم إرسال طلب إلغاء الطلب وجاري مراجعته.</p>
         </div>
       </div>
     );
@@ -35,40 +49,60 @@ export const PharmacyProgressTracker: React.FC<PharmacyProgressTrackerProps> = (
     );
   }
 
-  // 4 Main Steps defined in Requirement 9:
-  // 1: قيد المراجعة (pending_review)
-  // 2: تم القبول وجاري التجهيز (accepted, shopping)
-  // 3: تم التجهيز وجاري التوصيل (ready_for_delivery)
-  // 4: تم التوصيل (completed)
-
   const steps = [
     { key: "pending_review", label: "قيد المراجعة", icon: Clock },
-    { key: "in_progress", label: "تم القبول وجاري التجهيز", icon: ShoppingBag },
-    { key: "ready_for_delivery", label: "تم التجهيز وجاري التوصيل", icon: Truck },
+    { key: "accepted", label: "تم القبول", icon: Check },
+    { key: "shopping", label: "جاري التجهيز", icon: ShoppingBag },
+    { key: "ready_for_delivery", label: "جاري التوصيل", icon: Truck },
     { key: "completed", label: "تم التوصيل", icon: CheckCircle2 },
   ];
 
-  const getStepState = (stepIndex: number) => {
-    let currentStepIndex = 0;
-    if (status === "pending_review") currentStepIndex = 0;
-    else if (status === "accepted" || status === "shopping") currentStepIndex = 1;
-    else if (status === "ready_for_delivery") currentStepIndex = 2;
-    else if (status === "completed") currentStepIndex = 3;
+  const getStepIndex = (s: PharmacyOrderStatus): number => {
+    switch (s) {
+      case "pending_review":
+        return 0;
+      case "accepted":
+        return 1;
+      case "shopping":
+        return 2;
+      case "ready_for_delivery":
+        return 3;
+      case "completed":
+        return 4;
+      default:
+        return 0;
+    }
+  };
 
+  const currentStepIndex = getStepIndex(status);
+
+  const getStepState = (stepIndex: number) => {
     if (stepIndex < currentStepIndex) return "completed";
-    if (stepIndex === currentStepIndex) return "current";
+    if (stepIndex === currentStepIndex) return status === "completed" ? "completed" : "current";
     return "upcoming";
   };
+
+  const progressWidth =
+    status === "pending_review"
+      ? "10%"
+      : status === "accepted"
+      ? "30%"
+      : status === "shopping"
+      ? "55%"
+      : status === "ready_for_delivery"
+      ? "80%"
+      : "100%";
 
   return (
     <div className="bg-white border border-slate-200 rounded-2xl p-3.5 sm:p-4 shadow-2xs text-right">
       <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 mb-3">
         <span>مراحل تجهيز وتوصيل الروشتة</span>
         <span className="text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-          {status === "pending_review" && "مراجعة الصيدلية"}
-          {(status === "accepted" || status === "shopping") && "جاري الشراء والتجهيز"}
-          {status === "ready_for_delivery" && "في الطريق إليك"}
-          {status === "completed" && "تم الاستلام"}
+          {status === "pending_review" && "قيد المراجعة"}
+          {status === "accepted" && "تم القبول"}
+          {status === "shopping" && "جاري التجهيز"}
+          {status === "ready_for_delivery" && "جاري التوصيل"}
+          {status === "completed" && "تم التوصيل"}
         </span>
       </div>
 
@@ -77,16 +111,7 @@ export const PharmacyProgressTracker: React.FC<PharmacyProgressTrackerProps> = (
         <div className="absolute top-1/2 left-4 right-4 -translate-y-1/2 h-1 bg-slate-100 -z-0">
           <div
             className="h-full bg-emerald-600 transition-all duration-500"
-            style={{
-              width:
-                status === "pending_review"
-                  ? "12%"
-                  : status === "accepted" || status === "shopping"
-                  ? "45%"
-                  : status === "ready_for_delivery"
-                  ? "78%"
-                  : "100%",
-            }}
+            style={{ width: progressWidth }}
           />
         </div>
 
@@ -112,7 +137,7 @@ export const PharmacyProgressTracker: React.FC<PharmacyProgressTrackerProps> = (
                 )}
               </div>
               <span
-                className={`text-[9px] sm:text-[10px] font-bold mt-1.5 text-center max-w-[70px] sm:max-w-[85px] leading-tight ${
+                className={`text-[9px] sm:text-[10px] font-bold mt-1.5 text-center max-w-[60px] sm:max-w-[78px] leading-tight ${
                   state === "completed" || state === "current"
                     ? "text-emerald-900"
                     : "text-slate-400"

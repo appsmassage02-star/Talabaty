@@ -167,6 +167,13 @@ interface AppContextType {
   // Notifications & Urgent Ring Alerts
   notifications: AppNotification[];
   unreadCount: number;
+  addAppNotification: (
+    notif: Omit<AppNotification, "id" | "timestamp" | "read"> & {
+      id?: string;
+      timestamp?: string;
+      read?: boolean;
+    }
+  ) => void;
   markNotificationsAsRead: () => void;
   clearNotifications: () => void;
   deleteNotification: (id: string) => void;
@@ -445,6 +452,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     month: "الشهر الحالي",
   });
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const dispatchedNotifIdsRef = useRef<Set<string>>(new Set());
 
   // App Theme Mode and Font Size Preferences (Scoped to Device)
   const [themeMode, setThemeMode] = useState<AppThemeMode>(() =>
@@ -4933,6 +4941,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const addAppNotification = useCallback(
+    (
+      notif: Omit<AppNotification, "id" | "timestamp" | "read"> & {
+        id?: string;
+        timestamp?: string;
+        read?: boolean;
+      }
+    ) => {
+      const id = notif.id || `notif-${Date.now()}`;
+      if (dispatchedNotifIdsRef.current.has(id)) {
+        return;
+      }
+      dispatchedNotifIdsRef.current.add(id);
+
+      const finalNotif: AppNotification = {
+        id,
+        title: notif.title,
+        message: notif.message,
+        type: notif.type,
+        timestamp: notif.timestamp || new Date().toISOString(),
+        targetRole: notif.targetRole,
+        read: Boolean(notif.read),
+        meta: notif.meta,
+      };
+
+      let added = false;
+      setNotifications((prev) => {
+        if (prev.some((p) => p.id === finalNotif.id)) {
+          return prev;
+        }
+        added = true;
+        const updated = [finalNotif, ...prev];
+        if (supabaseUser?.id && household?.id) {
+          cacheManager.setHouseholdCache(supabaseUser.id, household.id, "notifications", updated);
+        }
+        return updated;
+      });
+
+      if (household && supabaseUser && (added || !notifications.some((p) => p.id === finalNotif.id))) {
+        syncManager.enqueueMutation(
+          "notifications",
+          "INSERT",
+          finalNotif.id,
+          {
+            id: finalNotif.id,
+            household_id: household.id,
+            title: finalNotif.title,
+            message: finalNotif.message,
+            type: finalNotif.type,
+            target_role: finalNotif.targetRole,
+            read: finalNotif.read,
+            created_at: finalNotif.timestamp,
+          },
+          supabaseUser.id,
+          household.id
+        );
+      }
+    },
+    [household, supabaseUser, notifications]
+  );
+
   const getRecordSyncStatus = (
     entity: SyncEntity,
     recordId: string
@@ -5020,6 +5089,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         householdOrders,
         notifications,
         unreadCount,
+        addAppNotification,
         markNotificationsAsRead,
         clearNotifications,
         deleteNotification,

@@ -15,6 +15,7 @@ import {
   PharmacyPrescriptionItem,
   PharmacyPrescriptionImage,
   PharmacyOrder,
+  PharmacyOrderItem,
   PharmacyOrderStatus,
   PharmacyDriver,
   PharmacyUnit,
@@ -201,8 +202,223 @@ async function uploadPharmacyFile(
   };
 }
 
+const PHARMACY_ORDER_SELECT = `
+  id,
+  order_number,
+  user_id,
+  household_id,
+  created_at,
+  updated_at,
+  saved_prescription_id,
+  status,
+  prescription_title,
+  customer_notes,
+  requested_pharmacy_name,
+  address_text,
+  delivery_fee,
+  grand_total,
+  medicines_total,
+  accepted_at,
+  cancelled_at,
+  completed_at,
+  archived_at,
+  ready_for_delivery_at,
+  shopping_started_at,
+  items:pharmacy_order_items(
+    id,
+    item_name,
+    unit,
+    requested_quantity,
+    purchased_quantity,
+    sort_order,
+    driver_note
+  ),
+  files:pharmacy_order_files(
+    id,
+    storage_path,
+    mime_type,
+    file_type,
+    display_order,
+    driver_note
+  ),
+  delivery:pharmacy_delivery_orders(
+    id,
+    assigned_driver_id,
+    accepted_at,
+    completed_at,
+    shopping_started_at,
+    cancellation_reason,
+    cancellation_requested_at,
+    driver:delivery_drivers(
+      id,
+      full_name,
+      phone,
+      status,
+      vehicle_type
+    )
+  )
+`;
+
+export function mapDbOrderToPharmacyOrder(
+  o: any,
+  cachedMatch?: PharmacyOrder
+): PharmacyOrder {
+  const sortedItems = [...(o.items || [])].sort(
+    (a: any, b: any) => (a.sort_order || 0) - (b.sort_order || 0)
+  );
+
+  // Separate prescription images from receipt image cleanly without duplicates
+  const seenFileKeys = new Set<string>();
+  const prescriptionFiles = [...(o.files || [])]
+    .filter((f: any) => f.file_type !== "receipt")
+    .sort((a: any, b: any) => (a.display_order || 0) - (b.display_order || 0))
+    .filter((f: any) => {
+      const key = String(f.id || f.storage_path || "");
+      if (!key || seenFileKeys.has(key)) return false;
+      seenFileKeys.add(key);
+      return true;
+    });
+
+  const receiptFile = (o.files || []).find(
+    (f: any) => f.file_type === "receipt"
+  );
+
+  // Pick latest / active delivery record strictly from live DB (never stale cached driver)
+  const deliveryList: any[] = Array.isArray(o.delivery)
+    ? [...o.delivery].sort((a: any, b: any) => {
+        const tA = a?.accepted_at ? new Date(a.accepted_at).getTime() : 0;
+        const tB = b?.accepted_at ? new Date(b.accepted_at).getTime() : 0;
+        return tB - tA;
+      })
+    : o.delivery
+    ? [o.delivery]
+    : [];
+
+  const deliveryRecord =
+    deliveryList.find((d) => Boolean(d?.assigned_driver_id && d?.driver)) ||
+    deliveryList[0] ||
+    null;
+
+  let driverObj: PharmacyDriver | undefined = undefined;
+  if (deliveryRecord?.assigned_driver_id && deliveryRecord?.driver) {
+    const d = Array.isArray(deliveryRecord.driver)
+      ? deliveryRecord.driver[0]
+      : deliveryRecord.driver;
+    if (d) {
+      driverObj = {
+        id: d.id,
+        name: d.full_name || "مندوب التوصيل",
+        phone: d.phone || "",
+        vehicleInfo: d.vehicle_type || "دراجة نارية",
+      };
+    }
+  }
+
+  const rawStatus = (o.status || "pending_review") as string;
+  const resolvedStatus: PharmacyOrderStatus =
+    rawStatus === "cancellation_requested" ||
+    (Boolean(deliveryRecord?.cancellation_requested_at) &&
+      rawStatus !== "cancelled" &&
+      rawStatus !== "completed" &&
+      rawStatus !== "unable_to_fulfill")
+      ? "cancellation_requested"
+      : (rawStatus as PharmacyOrderStatus);
+
+  const isArchived = Boolean(o.archived_at);
+  const cancellationReason =
+    deliveryRecord?.cancellation_reason || undefined;
+
+  const shortNum = o.id
+    ? String(o.id).replace(/-/g, "").substring(0, 4).toUpperCase()
+    : "0000";
+  const orderNumber = o.order_number || `PH-${shortNum}`;
+
+  let resolvedItems: PharmacyOrderItem[] = sortedItems.map((it: any): PharmacyOrderItem => ({
+    id: it.id,
+    name: it.item_name,
+    quantity: Number(it.requested_quantity) || 1,
+    purchasedQuantity:
+      it.purchased_quantity !== null && it.purchased_quantity !== undefined
+        ? Number(it.purchased_quantity)
+        : undefined,
+    unit: (it.unit || "علبة") as PharmacyUnit,
+    notes: it.driver_note || undefined,
+    isAvailable:
+      it.purchased_quantity !== null && it.purchased_quantity !== undefined
+        ? Number(it.purchased_quantity) > 0
+        : undefined,
+  }));
+
+  if (
+    resolvedItems.length === 0 &&
+    cachedMatch?.items &&
+    cachedMatch.items.length > 0
+  ) {
+    resolvedItems = cachedMatch.items;
+  }
+
+  let resolvedImages: PharmacyPrescriptionImage[] = prescriptionFiles.map(
+    (f: any): PharmacyPrescriptionImage => ({
+      id: f.id,
+      url: resolvePrescriptionImageUrl(f.storage_path),
+      note: f.driver_note || undefined,
+    })
+  );
+
+  if (
+    resolvedImages.length === 0 &&
+    cachedMatch?.images &&
+    cachedMatch.images.length > 0
+  ) {
+    resolvedImages = cachedMatch.images.map((im) => ({
+      ...im,
+      url: resolvePrescriptionImageUrl(im.url),
+    }));
+  }
+
+  const rawNotes =
+    typeof o.customer_notes === "string"
+      ? o.customer_notes.trim() || undefined
+      : cachedMatch?.customerNotes?.trim() || undefined;
+
+  return {
+    id: o.id,
+    orderNumber,
+    prescriptionId: o.saved_prescription_id || undefined,
+    title: o.prescription_title || "طلب أدوية صيدلية",
+    pharmacyName:
+      o.requested_pharmacy_name || cachedMatch?.pharmacyName || undefined,
+    status: resolvedStatus,
+    createdAt: o.created_at,
+    deliveryAddress: o.address_text || "العنوان المسجل بالتطبيق",
+    customerNotes: rawNotes,
+    items: resolvedItems,
+    images: resolvedImages,
+    driver: driverObj,
+    driverNotes: undefined,
+    receiptImageUrl:
+      resolvePrescriptionImageUrl(receiptFile?.storage_path) || undefined,
+    itemsTotal:
+      o.medicines_total !== null && o.medicines_total !== undefined
+        ? Number(o.medicines_total)
+        : 0,
+    deliveryFee:
+      o.delivery_fee !== null && o.delivery_fee !== undefined
+        ? Number(o.delivery_fee)
+        : 0,
+    finalTotal:
+      o.grand_total !== null && o.grand_total !== undefined
+        ? Number(o.grand_total)
+        : 0,
+    paymentMethod: "الدفع عند الاستلام",
+    isArchived,
+    cancellationReason,
+  };
+}
+
 class PharmacyService {
   private inFlightCreateOrder = false;
+  private realtimeSeq = 0;
 
   /**
    * Helper: verify Supabase client is configured and authenticated
@@ -830,198 +1046,39 @@ class PharmacyService {
     const user = await this.getAuthUser();
     if (!user) return [];
 
-    try {
-      // Pre-load cached orders for this user/household so locally created orders and item details appear seamlessly
-      let cachedOrders: PharmacyOrder[] = [];
-      try {
-        const targetHouseholdId =
-          householdId ||
-          cacheManager.getUserCache<string>(user.id, "last_household_id");
-        if (targetHouseholdId) {
-          cachedOrders =
-            cacheManager.getHouseholdCache<PharmacyOrder[]>(
-              user.id,
-              targetHouseholdId,
-              "pharmacy_orders"
-            ) || [];
-        }
-      } catch {
-        // ignore cache read issues
-      }
+    const targetHouseholdId =
+      householdId ||
+      cacheManager.getUserCache<string>(user.id, "last_household_id");
 
+    let cachedOrders: PharmacyOrder[] = [];
+    try {
+      if (targetHouseholdId) {
+        cachedOrders =
+          cacheManager.getHouseholdCache<PharmacyOrder[]>(
+            user.id,
+            targetHouseholdId,
+            "pharmacy_orders"
+          ) || [];
+      }
+    } catch {
+      // ignore cache read issues
+    }
+
+    try {
       const { data, error } = await supabase
         .from("pharmacy_orders")
-        .select(`
-          id,
-          order_number,
-          user_id,
-          household_id,
-          created_at,
-          updated_at,
-          saved_prescription_id,
-          status,
-          prescription_title,
-          customer_notes,
-          requested_pharmacy_name,
-          address_text,
-          delivery_fee,
-          grand_total,
-          medicines_total,
-          accepted_at,
-          cancelled_at,
-          completed_at,
-          archived_at,
-          ready_for_delivery_at,
-          shopping_started_at,
-          items:pharmacy_order_items(
-            id,
-            item_name,
-            unit,
-            requested_quantity,
-            purchased_quantity,
-            sort_order,
-            driver_note
-          ),
-          files:pharmacy_order_files(
-            id,
-            storage_path,
-            mime_type,
-            file_type,
-            display_order,
-            driver_note
-          ),
-          delivery:pharmacy_delivery_orders(
-            id,
-            assigned_driver_id,
-            accepted_at,
-            completed_at,
-            shopping_started_at,
-            cancellation_reason,
-            cancellation_requested_at,
-            driver:delivery_drivers(
-              id,
-              full_name,
-              phone,
-              status,
-              vehicle_type
-            )
-          )
-        `)
+        .select(PHARMACY_ORDER_SELECT)
         .order("created_at", { ascending: false });
 
-      let dbOrders: PharmacyOrder[] = [];
       if (error) {
         console.warn("[PharmacyService] getOrders query notice:", error.message);
-      } else if (data) {
-        dbOrders = (data || []).map((o: any): PharmacyOrder => {
-          const cachedMatch = cachedOrders.find((c) => c.id === o.id);
-          const sortedItems = (o.items || []).sort(
-            (a: any, b: any) => (a.sort_order || 0) - (b.sort_order || 0)
-          );
-
-          // Separate prescription images from receipt image
-          const prescriptionFiles = (o.files || [])
-            .filter((f: any) => f.file_type !== "receipt")
-            .sort((a: any, b: any) => (a.display_order || 0) - (b.display_order || 0));
-
-          const receiptFile = (o.files || []).find(
-            (f: any) => f.file_type === "receipt"
-          );
-
-          // Map driver if assigned
-          let driverObj: PharmacyDriver | undefined = undefined;
-          const deliveryRecord = Array.isArray(o.delivery)
-            ? o.delivery[0]
-            : o.delivery;
-
-          if (deliveryRecord?.driver) {
-            const d = deliveryRecord.driver;
-            driverObj = {
-              id: d.id,
-              name: d.full_name || "مندوب التوصيل",
-              phone: d.phone || "",
-              vehicleInfo: d.vehicle_type || "دراجة نارية",
-            };
-          }
-
-          const isArchived = Boolean(o.archived_at);
-          const cancellationReason =
-            deliveryRecord?.cancellation_reason || undefined;
-
-          // Generate friendly order number
-          const shortNum = o.id
-            ? o.id.replace(/-/g, "").substring(0, 4).toUpperCase()
-            : "0000";
-          const orderNumber = o.order_number || `PH-${shortNum}`;
-
-          let resolvedItems = sortedItems.map((it: any) => ({
-            id: it.id,
-            name: it.item_name,
-            quantity: Number(it.requested_quantity) || 1,
-            purchasedQuantity:
-              it.purchased_quantity !== null
-                ? Number(it.purchased_quantity)
-                : undefined,
-            unit: (it.unit || "علبة") as PharmacyUnit,
-            notes: it.driver_note || undefined,
-            isAvailable:
-              it.purchased_quantity !== null
-                ? Number(it.purchased_quantity) > 0
-                : undefined,
-          }));
-
-          // If db items table had 0 items (e.g. digital prescription workflow), recover items from cached order
-          if (resolvedItems.length === 0 && cachedMatch?.items && cachedMatch.items.length > 0) {
-            resolvedItems = cachedMatch.items;
-          }
-
-          let resolvedImages = prescriptionFiles.map((f: any) => ({
-            id: f.id,
-            url: resolvePrescriptionImageUrl(f.storage_path),
-            note: f.driver_note || undefined,
-          }));
-
-          // If db files table returned 0 images, recover images from cached order
-          if (resolvedImages.length === 0 && cachedMatch?.images && cachedMatch.images.length > 0) {
-            resolvedImages = cachedMatch.images.map((im) => ({
-              ...im,
-              url: resolvePrescriptionImageUrl(im.url),
-            }));
-          }
-
-          return {
-            id: o.id,
-            orderNumber,
-            prescriptionId: o.saved_prescription_id || undefined,
-            title: o.prescription_title || "طلب أدوية صيدلية",
-            pharmacyName: o.requested_pharmacy_name || cachedMatch?.pharmacyName || undefined,
-            status: (o.status || "pending_review") as PharmacyOrderStatus,
-            createdAt: o.created_at,
-            deliveryAddress: o.address_text || "العنوان المسجل بالتطبيق",
-            customerNotes: o.customer_notes || cachedMatch?.customerNotes || undefined,
-            items: resolvedItems,
-            images: resolvedImages,
-            driver: driverObj,
-            driverNotes: undefined,
-            receiptImageUrl: resolvePrescriptionImageUrl(receiptFile?.storage_path) || undefined,
-            itemsTotal:
-              o.medicines_total !== null && o.medicines_total !== undefined
-                ? Number(o.medicines_total)
-                : 0,
-            deliveryFee:
-              o.delivery_fee !== null && o.delivery_fee !== undefined
-                ? Number(o.delivery_fee)
-                : 0,
-            finalTotal:
-              o.grand_total !== null && o.grand_total !== undefined
-                ? Number(o.grand_total)
-                : 0,
-            paymentMethod: "الدفع عند الاستلام",
-            isArchived,
-            cancellationReason,
-          };
-        });
+        return cachedOrders;
       }
+
+      const dbOrders: PharmacyOrder[] = (data || []).map((o: any) => {
+        const cachedMatch = cachedOrders.find((c) => c.id === o.id);
+        return mapDbOrderToPharmacyOrder(o, cachedMatch);
+      });
 
       const dbOrderIds = new Set(dbOrders.map((o) => o.id));
       const combined = [...dbOrders];
@@ -1031,12 +1088,90 @@ class PharmacyService {
         }
       }
 
-      return combined.sort(
+      const sortedCombined = combined.sort(
         (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       );
+
+      if (targetHouseholdId) {
+        cacheManager.setHouseholdCache(
+          user.id,
+          targetHouseholdId,
+          "pharmacy_orders",
+          sortedCombined
+        );
+      }
+
+      return sortedCombined;
     } catch (err: any) {
       console.warn("[PharmacyService] getOrders exception:", err);
-      return [];
+      return cachedOrders;
+    }
+  }
+
+  /**
+   * Fetch a single authoritative pharmacy order directly from DB (used when opening details & on Realtime updates)
+   */
+  async getOrderById(
+    orderId: string,
+    householdId?: string
+  ): Promise<PharmacyOrder | null> {
+    if (!orderId) return null;
+    const user = await this.getAuthUser();
+    if (!user) return null;
+
+    const targetHouseholdId =
+      householdId ||
+      cacheManager.getUserCache<string>(user.id, "last_household_id");
+
+    let cachedOrders: PharmacyOrder[] = [];
+    try {
+      if (targetHouseholdId) {
+        cachedOrders =
+          cacheManager.getHouseholdCache<PharmacyOrder[]>(
+            user.id,
+            targetHouseholdId,
+            "pharmacy_orders"
+          ) || [];
+      }
+    } catch {
+      // ignore cache read issues
+    }
+
+    const cachedMatch = cachedOrders.find((c) => c.id === orderId);
+
+    try {
+      const { data, error } = await supabase
+        .from("pharmacy_orders")
+        .select(PHARMACY_ORDER_SELECT)
+        .eq("id", orderId)
+        .maybeSingle();
+
+      if (error || !data) {
+        if (error) {
+          console.warn("[PharmacyService] getOrderById query notice:", error.message);
+        }
+        return cachedMatch || null;
+      }
+
+      const freshOrder = mapDbOrderToPharmacyOrder(data, cachedMatch);
+
+      if (targetHouseholdId) {
+        const existsInCache = cachedOrders.some((c) => c.id === freshOrder.id);
+        const updatedCache = existsInCache
+          ? cachedOrders.map((c) => (c.id === freshOrder.id ? freshOrder : c))
+          : [freshOrder, ...cachedOrders];
+        cacheManager.setHouseholdCache(
+          user.id,
+          targetHouseholdId,
+          "pharmacy_orders",
+          updatedCache
+        );
+      }
+
+      return freshOrder;
+    } catch (err: any) {
+      console.warn("[PharmacyService] getOrderById exception:", err);
+      return cachedMatch || null;
     }
   }
 
@@ -1397,6 +1532,7 @@ class PharmacyService {
         status: "pending_review",
         createdAt: new Date().toISOString(),
         deliveryAddress: finalDeliveryAddress,
+        customerNotes: params.customerNotes?.trim() || undefined,
         items: itemsList.map((it, idx) => ({
           id: `item_${orderId}_${idx}`,
           name: it.name,
@@ -1717,44 +1853,173 @@ class PharmacyService {
   }
 
   // =========================================================================
-  // 4. REALTIME SUBSCRIPTIONS
+  // 4. REALTIME SUBSCRIPTIONS (Unique channel + Auto-reconnect + No duplicates)
   // =========================================================================
 
   /**
-   * Subscribe to live Realtime updates on all pharmacy tables
+   * Subscribe to live Realtime updates on all pharmacy tables with automatic reconnect
+   * and foreground/network resume synchronization.
    */
-  subscribeToPharmacyUpdates(onUpdate: () => void): () => void {
-    const channel = supabase
-      .channel("pharmacy_live_sync")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "pharmacy_orders" },
-        () => onUpdate()
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "pharmacy_order_items" },
-        () => onUpdate()
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "pharmacy_order_files" },
-        () => onUpdate()
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "pharmacy_delivery_orders" },
-        () => onUpdate()
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "pharmacy_saved_prescriptions" },
-        () => onUpdate()
-      )
-      .subscribe();
+  subscribeToPharmacyUpdates(
+    onUpdate: (event?: { table: string; eventType: string; record?: any }) => void
+  ): () => void {
+    let isDisposed = false;
+    let activeChannel: any = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    let hasSubscribedOnce = false;
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const cleanupActiveChannel = () => {
+      if (activeChannel) {
+        try {
+          supabase.removeChannel(activeChannel);
+        } catch {
+          // ignore cleanup failures
+        }
+        activeChannel = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (isDisposed || reconnectTimer) return;
+      const delayMs = Math.min(15000, 1500 * Math.pow(2, reconnectAttempt));
+      reconnectAttempt = Math.min(reconnectAttempt + 1, 4);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!isDisposed) {
+          setupChannel();
+        }
+      }, delayMs);
+    };
+
+    const setupChannel = () => {
+      if (isDisposed) return;
+      cleanupActiveChannel();
+
+      const channelName = `pharmacy_live_sync_${++this.realtimeSeq}_${Date.now()}`;
+      const channel = supabase
+        .channel(channelName)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "pharmacy_orders" },
+          (payload: any) =>
+            onUpdate({
+              table: "pharmacy_orders",
+              eventType: payload?.eventType || "UPDATE",
+              record: payload?.new || payload?.old,
+            })
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "pharmacy_order_items" },
+          (payload: any) =>
+            onUpdate({
+              table: "pharmacy_order_items",
+              eventType: payload?.eventType || "UPDATE",
+              record: payload?.new || payload?.old,
+            })
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "pharmacy_order_files" },
+          (payload: any) =>
+            onUpdate({
+              table: "pharmacy_order_files",
+              eventType: payload?.eventType || "UPDATE",
+              record: payload?.new || payload?.old,
+            })
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "pharmacy_delivery_orders" },
+          (payload: any) =>
+            onUpdate({
+              table: "pharmacy_delivery_orders",
+              eventType: payload?.eventType || "UPDATE",
+              record: payload?.new || payload?.old,
+            })
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "pharmacy_saved_prescriptions" },
+          (payload: any) =>
+            onUpdate({
+              table: "pharmacy_saved_prescriptions",
+              eventType: payload?.eventType || "UPDATE",
+              record: payload?.new || payload?.old,
+            })
+        );
+
+      activeChannel = channel;
+
+      channel.subscribe((status: string) => {
+        if (isDisposed) return;
+        if (status === "SUBSCRIBED") {
+          clearReconnectTimer();
+          reconnectAttempt = 0;
+          if (hasSubscribedOnce) {
+            onUpdate({ table: "reconnect", eventType: "SYNC" });
+          }
+          hasSubscribedOnce = true;
+        } else if (
+          status === "CHANNEL_ERROR" ||
+          status === "TIMED_OUT" ||
+          status === "CLOSED"
+        ) {
+          cleanupActiveChannel();
+          scheduleReconnect();
+        }
+      });
+    };
+
+    setupChannel();
+
+    const handleOnline = () => {
+      if (isDisposed) return;
+      onUpdate({ table: "network_online", eventType: "SYNC" });
+      if (!activeChannel) {
+        clearReconnectTimer();
+        reconnectAttempt = 0;
+        setupChannel();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (isDisposed || typeof document === "undefined") return;
+      if (document.visibilityState === "visible") {
+        onUpdate({ table: "visibility_resume", eventType: "SYNC" });
+        if (!activeChannel) {
+          clearReconnectTimer();
+          reconnectAttempt = 0;
+          setupChannel();
+        }
+      }
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", handleOnline);
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      isDisposed = true;
+      clearReconnectTimer();
+      cleanupActiveChannel();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("online", handleOnline);
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
     };
   }
 }

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { PharmacyOrder } from "../../types/pharmacy";
 import { PharmacyProgressTracker } from "./PharmacyProgressTracker";
 import { resolvePrescriptionImageUrl } from "../../lib/pharmacyService";
@@ -20,6 +20,7 @@ import {
   Edit2,
   Check,
   ChevronRight,
+  MessageSquare,
 } from "lucide-react";
 
 interface PharmacyOrderDetailModalProps {
@@ -28,6 +29,7 @@ interface PharmacyOrderDetailModalProps {
   onCancelOrder: (orderId: string, reason?: string) => Promise<void>;
   onArchiveOrder: (orderId: string) => Promise<void>;
   onUpdatePharmacy: (orderId: string, newPharmacy: string) => Promise<void>;
+  onRefreshOrder?: (orderId: string) => Promise<PharmacyOrder | null | void>;
   pharmaciesList: string[];
 }
 
@@ -39,6 +41,7 @@ export const PharmacyOrderDetailModal: React.FC<
   onCancelOrder,
   onArchiveOrder,
   onUpdatePharmacy,
+  onRefreshOrder,
   pharmaciesList,
 }) => {
   // Pharmacy editing state (only allowed in pending_review)
@@ -59,6 +62,17 @@ export const PharmacyOrderDetailModal: React.FC<
   const [activePreviewImage, setActivePreviewImage] = useState<string | null>(
     null
   );
+
+  // Always fetch fresh authoritative state from DB when opening detail modal
+  useEffect(() => {
+    onRefreshOrder?.(order.id);
+  }, [order.id, onRefreshOrder]);
+
+  useEffect(() => {
+    if (!isEditingPharmacy) {
+      setSelectedPharmacyInput(order.pharmacyName || "");
+    }
+  }, [order.pharmacyName, isEditingPharmacy]);
 
   const canCancel = order.status === "pending_review";
   const canArchive =
@@ -148,6 +162,21 @@ export const PharmacyOrderDetailModal: React.FC<
             </div>
           )}
 
+          {/* Cancellation Requested Notice */}
+          {order.status === "cancellation_requested" && (
+            <div className="bg-orange-50 border border-orange-200 rounded-2xl p-3.5 text-xs text-orange-900 space-y-1">
+              <div className="font-bold flex items-center space-x-1.5 space-x-reverse">
+                <AlertCircle className="w-4 h-4 text-orange-600" />
+                <span>طلب إلغاء قيد المراجعة</span>
+              </div>
+              {order.cancellationReason && (
+                <p className="text-[11px] text-orange-700">
+                  السبب: {order.cancellationReason}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Unable to fulfill Alert */}
           {order.status === "unable_to_fulfill" && (
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-xs text-amber-900 space-y-1">
@@ -162,62 +191,68 @@ export const PharmacyOrderDetailModal: React.FC<
             </div>
           )}
 
-          {/* 11 — Mock Driver Info (Visible when accepted or shopping) */}
-          {(order.status === "accepted" ||
-            order.status === "shopping" ||
-            order.status === "ready_for_delivery") &&
-            order.driver && (
-              <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-4 shadow-2xs space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-900 flex items-center space-x-1.5 space-x-reverse">
-                    <Truck className="w-4 h-4 text-emerald-600" />
-                    <span>مندوب التوصيل المعتمد</span>
-                  </span>
-                  <span className="text-[10px] bg-emerald-600 text-white font-bold px-2 py-0.5 rounded-full">
-                    نشط ومكلف بالطلب
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2.5 space-x-reverse">
-                    <div className="w-10 h-10 rounded-full bg-emerald-200/80 text-emerald-800 flex items-center justify-center font-bold text-sm">
-                      <User className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-900">
-                        {order.driver.name}
-                      </h4>
-                      <p className="text-[10px] text-slate-500 font-mono">
-                        {order.driver.phone}
-                      </p>
-                      {order.driver.vehicleInfo && (
-                        <p className="text-[10px] text-emerald-700">
-                          {order.driver.vehicleInfo}
-                        </p>
-                      )}
-                    </div>
+          {/* Assigned Driver Info (Visible strictly when a driver is assigned; auto-updates via Realtime) */}
+          {order.driver &&
+            (order.driver.name || order.driver.phone) &&
+            order.status !== "cancelled" && (() => {
+              const sanitizedDriverPhone = (order.driver.phone || "").replace(/[^\d+]/g, "");
+              return (
+                <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-2xl p-4 shadow-2xs space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-900 flex items-center space-x-1.5 space-x-reverse">
+                      <Truck className="w-4 h-4 text-emerald-600" />
+                      <span>مندوب التوصيل المكلف بالطلب</span>
+                    </span>
+                    <span className="text-[10px] bg-emerald-600 text-white font-bold px-2 py-0.5 rounded-full">
+                      {order.status === "completed" ? "أتم التوصيل" : "نشط ومكلف بالطلب"}
+                    </span>
                   </div>
 
-                  {/* Call Button */}
-                  <a
-                    href={`tel:${order.driver.phone}`}
-                    className="flex items-center space-x-1.5 space-x-reverse px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors"
-                  >
-                    <Phone className="w-3.5 h-3.5" />
-                    <span>اتصال</span>
-                  </a>
-                </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center space-x-2.5 space-x-reverse">
+                      <div className="w-10 h-10 rounded-full bg-emerald-200/80 text-emerald-800 flex items-center justify-center font-bold text-sm shrink-0">
+                        <User className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-900">
+                          {order.driver.name}
+                        </h4>
+                        {order.driver.phone && (
+                          <p className="text-[11px] text-slate-600 font-mono" dir="ltr">
+                            {order.driver.phone}
+                          </p>
+                        )}
+                        {order.driver.vehicleInfo && (
+                          <p className="text-[10px] text-emerald-700">
+                            {order.driver.vehicleInfo}
+                          </p>
+                        )}
+                      </div>
+                    </div>
 
-                {order.driverNotes && (
-                  <div className="bg-white/80 p-2.5 rounded-xl border border-emerald-100 text-[11px] text-slate-700">
-                    <strong className="text-emerald-800 block mb-0.5">
-                      ملاحظة من المندوب:
-                    </strong>
-                    {order.driverNotes}
+                    {/* Direct Call Button */}
+                    {sanitizedDriverPhone && (
+                      <a
+                        href={`tel:${sanitizedDriverPhone}`}
+                        className="flex items-center space-x-1.5 space-x-reverse px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors shrink-0"
+                      >
+                        <Phone className="w-3.5 h-3.5" />
+                        <span>اتصال بالسائق</span>
+                      </a>
+                    )}
                   </div>
-                )}
-              </div>
-            )}
+
+                  {order.driverNotes && (
+                    <div className="bg-white/80 p-2.5 rounded-xl border border-emerald-100 text-[11px] text-slate-700">
+                      <strong className="text-emerald-800 block mb-0.5">
+                        ملاحظة من المندوب:
+                      </strong>
+                      {order.driverNotes}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
           {/* Delivery Address & Pharmacy info */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -290,6 +325,19 @@ export const PharmacyOrderDetailModal: React.FC<
               )}
             </div>
           </div>
+
+          {/* Customer Notes (Preserved from creation) */}
+          {order.customerNotes && (
+            <div className="bg-amber-50/60 border border-amber-200/80 rounded-2xl p-3 space-y-1">
+              <span className="text-[10px] font-bold text-amber-800 flex items-center space-x-1 space-x-reverse">
+                <MessageSquare className="w-3.5 h-3.5 text-amber-600" />
+                <span>تعليمات وملاحظات العميل</span>
+              </span>
+              <p className="text-xs font-medium text-slate-800 leading-relaxed">
+                {order.customerNotes}
+              </p>
+            </div>
+          )}
 
           {/* Requested Items List */}
           {order.items && order.items.length > 0 && (

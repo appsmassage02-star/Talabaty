@@ -39,6 +39,7 @@ export const PharmacySection: React.FC<PharmacySectionProps> = ({
     setActiveSubTab,
     selectedOrderForDetail,
     setSelectedOrderForDetail,
+    refreshOrder,
     draftPrescription,
     setDraftPrescription,
     startReorderPrescription,
@@ -296,18 +297,17 @@ export const PharmacySection: React.FC<PharmacySectionProps> = ({
             const saved = await savePrescription(data);
             return saved;
           }}
+          onUpdatePrescription={async (id, updates) => {
+            const updated = await updatePrescription(id, updates);
+            return updated;
+          }}
           onCreateOrder={async (data) => {
             const isUuid = (val?: string) =>
-              Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val));
+              Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
-            const realPrescriptionId =
-              (isUuid(data.prescriptionId) ? data.prescriptionId : undefined) ||
-              (isUuid(draftPrescription?.sourcePrescriptionId)
-                ? draftPrescription?.sourcePrescriptionId
-                : undefined) ||
-              (isUuid(draftPrescription?.id)
-                ? draftPrescription?.id
-                : undefined);
+            const realPrescriptionId = isUuid(data.prescriptionId)
+              ? data.prescriptionId
+              : undefined;
 
             const created = await createOrder({
               title: data.title,
@@ -381,6 +381,7 @@ export const PharmacySection: React.FC<PharmacySectionProps> = ({
           onUpdatePharmacy={async (id, newPh) => {
             await updateOrderPharmacy(id, newPh);
           }}
+          onRefreshOrder={refreshOrder}
           pharmaciesList={pharmacies}
         />
       )}

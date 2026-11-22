@@ -40,6 +40,10 @@ interface PharmacyNewOrderViewProps {
   onSavePrescription: (
     prescription: Omit<PharmacyPrescription, "id" | "createdAt">
   ) => Promise<any>;
+  onUpdatePrescription?: (
+    id: string,
+    updates: Partial<PharmacyPrescription>
+  ) => Promise<any>;
   onCreateOrder: (params: {
     title: string;
     pharmacyName?: string;
@@ -57,6 +61,49 @@ interface PharmacyNewOrderViewProps {
   deliveryEnabled?: boolean;
 }
 
+export interface PrescriptionSnapshot {
+  title: string;
+  pharmacyName?: string;
+  items: PharmacyPrescriptionItem[];
+  images: PharmacyPrescriptionImage[];
+}
+
+export function arePrescriptionSnapshotsEqual(
+  a: PrescriptionSnapshot,
+  b: PrescriptionSnapshot
+): boolean {
+  if ((a.title || "").trim() !== (b.title || "").trim()) return false;
+  if ((a.pharmacyName || "").trim() !== (b.pharmacyName || "").trim()) return false;
+  if (a.items.length !== b.items.length) return false;
+  if (a.images.length !== b.images.length) return false;
+
+  for (let i = 0; i < a.items.length; i++) {
+    const x = a.items[i];
+    const y = b.items[i];
+    if (
+      (x.name || "").trim() !== (y.name || "").trim() ||
+      Number(x.quantity || 1) !== Number(y.quantity || 1) ||
+      x.unit !== y.unit ||
+      (x.notes || "").trim() !== (y.notes || "").trim()
+    ) {
+      return false;
+    }
+  }
+
+  for (let i = 0; i < a.images.length; i++) {
+    const x = a.images[i];
+    const y = b.images[i];
+    if (
+      (x.url || "").trim() !== (y.url || "").trim() ||
+      (x.note || "").trim() !== (y.note || "").trim()
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 const PHARMACY_UNITS: PharmacyUnit[] = ["علبة", "شريط", "قطعة", "أمبول"];
 
 // Sample mock medical images for quick one-click testing in browser
@@ -67,10 +114,20 @@ const SAMPLE_MOCK_RX_IMAGES = [
   "https://images.unsplash.com/photo-1576602976047-174e57a47881?auto=format&fit=crop&w=600&q=80",
 ];
 
+const resolveSourcePrescriptionId = (
+  rx?: PharmacyPrescription | null
+): string | undefined => {
+  if (!rx) return undefined;
+  if (rx.sourcePrescriptionId) return rx.sourcePrescriptionId;
+  if (rx.id && !rx.id.startsWith("draft_")) return rx.id;
+  return undefined;
+};
+
 export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
   initialPrescription,
   pharmaciesList,
   onSavePrescription,
+  onUpdatePrescription,
   onCreateOrder,
   onCancel,
   onAddPharmacy,
@@ -78,6 +135,21 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
   sectionEnabled = true,
   deliveryEnabled = true,
 }) => {
+  // Saved prescription identity + clean baseline snapshot (supports Edit vs Direct Reorder)
+  const [savedPrescriptionId, setSavedPrescriptionId] = useState<string | undefined>(
+    () => resolveSourcePrescriptionId(initialPrescription)
+  );
+  const [baselineSnapshot, setBaselineSnapshot] = useState<PrescriptionSnapshot | null>(() =>
+    resolveSourcePrescriptionId(initialPrescription) && initialPrescription
+      ? {
+          title: initialPrescription.title || "",
+          pharmacyName: initialPrescription.pharmacyName || "",
+          items: initialPrescription.items || [],
+          images: initialPrescription.images || [],
+        }
+      : null
+  );
+
   // Title
   const [title, setTitle] = useState(initialPrescription?.title || "");
 
@@ -342,16 +414,46 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
   const galleryInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
-  // Pre-fill if editing/reordering
+  // Pre-fill when editing/reordering a saved prescription (or clearing back to new)
   useEffect(() => {
     if (initialPrescription) {
+      const nextSourceId = resolveSourcePrescriptionId(initialPrescription);
+      setSavedPrescriptionId(nextSourceId);
       setTitle(initialPrescription.title || "");
       setSelectedPharmacy(initialPrescription.pharmacyName || "");
       setItems(initialPrescription.items || []);
       setImages(initialPrescription.images || []);
       setIsChangingPharmacy(!initialPrescription.pharmacyName);
+      setBaselineSnapshot(
+        nextSourceId
+          ? {
+              title: initialPrescription.title || "",
+              pharmacyName: initialPrescription.pharmacyName || "",
+              items: initialPrescription.items || [],
+              images: initialPrescription.images || [],
+            }
+          : null
+      );
+    } else {
+      setSavedPrescriptionId(undefined);
+      setBaselineSnapshot(null);
     }
   }, [initialPrescription]);
+
+  const isSavedPrescription = Boolean(savedPrescriptionId);
+  const hasSavedEdits = Boolean(
+    isSavedPrescription &&
+      baselineSnapshot &&
+      !arePrescriptionSnapshotsEqual(
+        {
+          title,
+          pharmacyName: selectedPharmacy || undefined,
+          items,
+          images,
+        },
+        baselineSnapshot
+      )
+  );
 
   // Handle adding an item to the list
   const handleAddItem = (e?: React.FormEvent) => {
@@ -492,22 +594,30 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
     return true;
   };
 
-  // 1. Save locally as saved prescription
+  // 1. Save a brand-new prescription (when not already saved)
   const handleSaveOnly = async () => {
     if (!validate()) return;
     setIsSubmitting(true);
+    setErrorMessage(null);
     try {
       const finalTitle = title.trim() || `روشتة ${selectedPharmacy || "علاج"} (${new Date().toLocaleDateString("ar-EG")})`;
-      await onSavePrescription({
+      const saved = await onSavePrescription({
         title: finalTitle,
         pharmacyName: selectedPharmacy || undefined,
         items,
         images,
       });
+      if (saved?.id) {
+        setSavedPrescriptionId(saved.id);
+        setBaselineSnapshot({
+          title: saved.title || finalTitle,
+          pharmacyName: saved.pharmacyName || selectedPharmacy || undefined,
+          items: saved.items?.length ? saved.items : items,
+          images: saved.images?.length ? saved.images : images,
+        });
+        setTitle(saved.title || finalTitle);
+      }
       setSuccessToast("تم حفظ الروشتة بنجاح في الروشتات المحفوظة");
-      setTimeout(() => {
-        onCancel();
-      }, 900);
     } catch (err: any) {
       setErrorMessage(err?.message || "فشل حفظ الروشتة");
     } finally {
@@ -515,8 +625,51 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
     }
   };
 
-  // 2. Save & Send to Driver (Create Order)
-  const handleSaveAndSendToDriver = async () => {
+  // 2. Save edits in place to an existing saved prescription ONLY (does NOT create an order)
+  const handleSaveEditsOnly = async () => {
+    if (!savedPrescriptionId) {
+      await handleSaveOnly();
+      return;
+    }
+    if (!validate()) return;
+    setIsSubmitting(true);
+    setErrorMessage(null);
+    try {
+      const finalTitle = title.trim() || `روشتة ${selectedPharmacy || "علاج"}`;
+      const updated = onUpdatePrescription
+        ? await onUpdatePrescription(savedPrescriptionId, {
+            title: finalTitle,
+            pharmacyName: selectedPharmacy || undefined,
+            items,
+            images,
+          })
+        : null;
+
+      const nextItems = updated?.items || items;
+      const nextImages = updated?.images || images;
+      const nextPharmacy = updated ? updated.pharmacyName : selectedPharmacy || undefined;
+      const nextTitle = updated?.title || finalTitle;
+
+      setTitle(nextTitle);
+      setItems(nextItems);
+      setImages(nextImages);
+      setSelectedPharmacy(nextPharmacy || "");
+      setBaselineSnapshot({
+        title: nextTitle,
+        pharmacyName: nextPharmacy,
+        items: nextItems,
+        images: nextImages,
+      });
+      setSuccessToast("تم حفظ التعديلات على الروشتة المحفوظة بنجاح");
+    } catch (err: any) {
+      setErrorMessage(err?.message || "فشل حفظ التعديلات على الروشتة");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // 3. Send Order directly (NEVER duplicates saved prescriptions, NEVER auto-saves unsaved edits)
+  const handleSendOrder = async () => {
     if (!settingsLoaded || !sectionEnabled) {
       setErrorMessage(
         !settingsLoaded
@@ -561,44 +714,28 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
     }
 
     setIsSubmitting(true);
+    setErrorMessage(null);
     try {
       const finalTitle = title.trim() || `طلب روشتة ${selectedPharmacy || "علاج عاجل"}`;
       const deliveryAddressText = customDeliveryAddress.trim() ||
         `${chosenAddr.governorate_name || ""} - ${chosenAddr.markaz_name ? chosenAddr.markaz_name + " - " : ""}${chosenAddr.detailed_address || ""}`.trim();
 
-      // 1. Auto-save prescription to user's saved prescriptions so images and medicines are saved in DB
-      let savedPrescriptionId: string | undefined = undefined;
-      let orderImages = images;
+      // If ordering from an unmodified (or already-saved) prescription, link to it directly without duplicating.
+      // If user edited a saved prescription WITHOUT clicking "حفظ التعديلات", send as an independent order without linking or modifying the saved record.
+      const linkedPrescriptionId =
+        isSavedPrescription && !hasSavedEdits ? savedPrescriptionId : undefined;
 
-      try {
-        const savedRx = await onSavePrescription({
-          title: finalTitle,
-          pharmacyName: selectedPharmacy || undefined,
-          items,
-          images,
-        });
-        if (savedRx?.id) {
-          savedPrescriptionId = savedRx.id;
-          if (savedRx.images && savedRx.images.length > 0) {
-            orderImages = savedRx.images;
-          }
-        }
-      } catch (saveErr) {
-        console.warn("[PharmacyNewOrderView] Auto-save prescription warning:", saveErr);
-      }
-
-      // 2. Create the delivery order and send to driver
       await onCreateOrder({
         title: finalTitle,
         pharmacyName: selectedPharmacy || undefined,
         items,
-        images: orderImages,
+        images,
         addressId: chosenAddr.id,
         deliveryAddress: deliveryAddressText,
         customerNotes: customerNotes.trim() || undefined,
-        prescriptionId: savedPrescriptionId,
+        prescriptionId: linkedPrescriptionId,
       });
-      setSuccessToast("تم حفظ الروشتة وإنشاء طلب الصيدلية وإرساله للسائق بنجاح!");
+      setSuccessToast("تم إرسال طلب الصيدلية بنجاح وجاري متابعة حالته!");
     } catch (err: any) {
       const isTimeout =
         err?.code === "57014" ||
@@ -1316,53 +1453,76 @@ export const PharmacyNewOrderView: React.FC<PharmacyNewOrderViewProps> = ({
         </div>
       </div>
 
-      {/* 5 — Bottom Action Buttons: حفظ / حفظ وإرسال للسائق / إلغاء */}
-      <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-2.5">
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={isSubmitting}
-          className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer text-center"
-        >
-          إلغاء
-        </button>
+      {/* 5 — Bottom Action Buttons */}
+      <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-2xs space-y-2.5">
+        {isSavedPrescription && hasSavedEdits && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-900 px-3 py-2 rounded-xl text-[11px] font-bold flex items-center justify-between gap-2">
+            <span>قمت بتعديل هذه الروشتة المحفوظة — يمكنك حفظ التعديلات أو إرسال الطلب مباشرة بالبيانات المعدلة دون تغيير النسخة المحفوظة.</span>
+          </div>
+        )}
 
-        <div className="w-full sm:w-auto flex items-center space-x-2 space-x-reverse">
-          {/* حفظ في الروشتات المحفوظة */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5">
           <button
             type="button"
-            onClick={handleSaveOnly}
+            onClick={onCancel}
             disabled={isSubmitting}
-            className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold shadow-2xs hover:shadow-xs transition-all cursor-pointer"
+            className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer text-center"
           >
-            <Save className="w-4 h-4 text-slate-600" />
-            <span>حفظ</span>
+            إلغاء
           </button>
 
-          {/* حفظ وإرسال للسائق */}
-          <button
-            type="button"
-            onClick={handleSaveAndSendToDriver}
-            disabled={
-              isSubmitting ||
-              !settingsLoaded ||
-              !sectionEnabled ||
-              !deliveryEnabled ||
-              pharmacyTariff.loading ||
-              !pharmacyTariff.allowed ||
-              pharmacyTariff.deliveryFee === null
-            }
-            className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-sm hover:shadow transition-all cursor-pointer"
-          >
-            <Send className="w-4 h-4" />
-            <span>
-              {settingsLoaded && sectionEnabled && !deliveryEnabled
-                ? "خدمة التوصيل متوقفة مؤقتًا"
-                : !settingsLoaded || !sectionEnabled
-                ? "الخدمة غير متاحة"
-                : "حفظ وإرسال للسائق"}
-            </span>
-          </button>
+          <div className="w-full sm:w-auto flex items-center space-x-2 space-x-reverse">
+            {/* Brand-new prescription -> Save to Saved Prescriptions */}
+            {!isSavedPrescription && (
+              <button
+                type="button"
+                onClick={handleSaveOnly}
+                disabled={isSubmitting}
+                className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold shadow-2xs hover:shadow-xs transition-all cursor-pointer"
+              >
+                <Save className="w-4 h-4 text-slate-600" />
+                <span>حفظ</span>
+              </button>
+            )}
+
+            {/* Saved prescription with unsaved edits -> Independent "حفظ التعديلات" button */}
+            {isSavedPrescription && hasSavedEdits && (
+              <button
+                type="button"
+                onClick={handleSaveEditsOnly}
+                disabled={isSubmitting}
+                className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-4 py-2.5 bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold shadow-2xs hover:shadow-xs transition-all cursor-pointer"
+              >
+                <Save className="w-4 h-4 text-emerald-600" />
+                <span>حفظ التعديلات</span>
+              </button>
+            )}
+
+            {/* Send Order button (sends directly without saving edits or creating duplicates) */}
+            <button
+              type="button"
+              onClick={handleSendOrder}
+              disabled={
+                isSubmitting ||
+                !settingsLoaded ||
+                !sectionEnabled ||
+                !deliveryEnabled ||
+                pharmacyTariff.loading ||
+                !pharmacyTariff.allowed ||
+                pharmacyTariff.deliveryFee === null
+              }
+              className="flex-1 sm:flex-none flex items-center justify-center space-x-1.5 space-x-reverse px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-sm hover:shadow transition-all cursor-pointer"
+            >
+              <Send className="w-4 h-4" />
+              <span>
+                {settingsLoaded && sectionEnabled && !deliveryEnabled
+                  ? "خدمة التوصيل متوقفة مؤقتًا"
+                  : !settingsLoaded || !sectionEnabled
+                  ? "الخدمة غير متاحة"
+                  : "إرسال الطلب"}
+              </span>
+            </button>
+          </div>
         </div>
       </div>
 

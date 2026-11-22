@@ -49,17 +49,28 @@ export const PharmacyOrdersView: React.FC<PharmacyOrdersViewProps> = ({
           icon: Clock,
         };
       case "accepted":
+        return {
+          label: "تم القبول",
+          className: "bg-sky-100 text-sky-800 border-sky-200",
+          icon: CheckCircle2,
+        };
       case "shopping":
         return {
-          label: "تم القبول وجاري التجهيز",
+          label: "جاري التجهيز",
           className: "bg-blue-100 text-blue-800 border-blue-200",
           icon: Clock,
         };
       case "ready_for_delivery":
         return {
-          label: "تم التجهيز وجاري التوصيل",
+          label: "جاري التوصيل",
           className: "bg-teal-100 text-teal-800 border-teal-200",
           icon: Truck,
+        };
+      case "cancellation_requested":
+        return {
+          label: "طلب إلغاء",
+          className: "bg-orange-100 text-orange-800 border-orange-200",
+          icon: Clock,
         };
       case "completed":
         return {
@@ -230,30 +241,36 @@ export const PharmacyOrdersView: React.FC<PharmacyOrdersViewProps> = ({
                   </div>
                 )}
 
-                {/* Driver quick preview if accepted or shopping */}
-                {(order.status === "accepted" ||
-                  order.status === "shopping" ||
-                  order.status === "ready_for_delivery") &&
-                  order.driver && (
-                    <div className="bg-emerald-50/70 border border-emerald-100 rounded-xl p-2.5 flex items-center justify-between text-xs">
-                      <div className="flex items-center space-x-2 space-x-reverse">
-                        <Truck className="w-4 h-4 text-emerald-600" />
-                        <span className="font-bold text-emerald-950">
-                          المندوب: {order.driver.name}
-                        </span>
-                        <span className="text-[10px] text-slate-500 font-mono">
-                          ({order.driver.phone})
-                        </span>
+                {/* Driver quick preview whenever a driver is assigned */}
+                {order.driver &&
+                  (order.driver.name || order.driver.phone) &&
+                  order.status !== "cancelled" && (() => {
+                    const cleanPhone = (order.driver.phone || "").replace(/[^\d+]/g, "");
+                    return (
+                      <div className="bg-emerald-50/70 border border-emerald-100 rounded-xl p-2.5 flex items-center justify-between text-xs">
+                        <div className="flex items-center space-x-2 space-x-reverse">
+                          <Truck className="w-4 h-4 text-emerald-600" />
+                          <span className="font-bold text-emerald-950">
+                            المندوب: {order.driver.name}
+                          </span>
+                          {order.driver.phone && (
+                            <span className="text-[10px] text-slate-500 font-mono" dir="ltr">
+                              ({order.driver.phone})
+                            </span>
+                          )}
+                        </div>
+                        {cleanPhone && (
+                          <a
+                            href={`tel:${cleanPhone}`}
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold flex items-center space-x-1 space-x-reverse"
+                          >
+                            <Phone className="w-3 h-3" />
+                            <span>اتصال</span>
+                          </a>
+                        )}
                       </div>
-                      <a
-                        href={`tel:${order.driver.phone}`}
-                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold flex items-center space-x-1 space-x-reverse"
-                      >
-                        <Phone className="w-3 h-3" />
-                        <span>اتصال</span>
-                      </a>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                 {/* Card Action Buttons */}
                 <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">

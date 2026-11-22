@@ -31,7 +31,14 @@ export type HouseholdCacheKey =
   | "delivery_governorate_settings"
   | "pharmacy_orders";
 
-export type UserCacheKey = "profile" | "preferences" | "last_household_id" | "last_role" | "session" | "pharmacy_saved_prescriptions";
+export type UserCacheKey =
+  | "profile"
+  | "preferences"
+  | "last_household_id"
+  | "last_role"
+  | "session"
+  | "pharmacy_saved_prescriptions"
+  | "pharmacy_completed_notified_ids";
 
 export type DevicePreferenceKey = "theme_mode" | "font_size" | "simulator_mode";
 

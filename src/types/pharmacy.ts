@@ -18,6 +18,7 @@ export type PharmacyOrderStatus =
   | "accepted"
   | "shopping"
   | "ready_for_delivery"
+  | "cancellation_requested"
   | "completed"
   | "cancelled"
   | "unable_to_fulfill";

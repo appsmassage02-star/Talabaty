@@ -7,6 +7,7 @@ import {
 } from "../types/pharmacy";
 import { pharmacyService } from "./pharmacyService";
 import { sectionSettingsService } from "./sectionSettingsService";
+import { cacheManager } from "./cacheManager";
 import { useApp } from "../context/AppContext";
 
 export type PharmacySectionTab =
@@ -15,8 +16,39 @@ export type PharmacySectionTab =
   | "saved_prescriptions"
   | "past_orders";
 
+export function evaluatePharmacyCompletionNotifications(params: {
+  orders: PharmacyOrder[];
+  previousStatuses: Map<string, PharmacyOrderStatus>;
+  alreadyNotifiedIds: Set<string>;
+  isInitialHydration: boolean;
+}): {
+  notificationsToEmit: PharmacyOrder[];
+  newlyMarkedSilentIds: string[];
+} {
+  const notificationsToEmit: PharmacyOrder[] = [];
+  const newlyMarkedSilentIds: string[] = [];
+
+  for (const order of params.orders) {
+    const prevStatus = params.previousStatuses.get(order.id);
+    if (order.status === "completed") {
+      if (!params.alreadyNotifiedIds.has(order.id)) {
+        if (prevStatus !== undefined && prevStatus !== "completed") {
+          notificationsToEmit.push(order);
+        } else if (!params.isInitialHydration && prevStatus === undefined) {
+          notificationsToEmit.push(order);
+        } else {
+          newlyMarkedSilentIds.push(order.id);
+        }
+      }
+    }
+    params.previousStatuses.set(order.id, order.status);
+  }
+
+  return { notificationsToEmit, newlyMarkedSilentIds };
+}
+
 export function usePharmacy() {
-  const { household, supabaseUser } = useApp();
+  const { household, supabaseUser, addAppNotification } = useApp();
 
   const [prescriptions, setPrescriptions] = useState<PharmacyPrescription[]>([]);
   const [orders, setOrders] = useState<PharmacyOrder[]>([]);
@@ -26,8 +58,13 @@ export function usePharmacy() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeSubTab, setActiveSubTab] =
     useState<PharmacySectionTab>("active_orders");
-  const [selectedOrderForDetail, setSelectedOrderForDetail] =
+
+  // Authoritative detail modal tracking via ID so Realtime/refresh never leaves stale snapshots
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [selectedOrderFallback, setSelectedOrderFallback] =
     useState<PharmacyOrder | null>(null);
+  const selectedOrderIdRef = useRef<string | null>(null);
+
   const [serviceSettings, setServiceSettings] = useState<
     PharmacyConfig & {
       serviceEnabled: boolean;
@@ -52,9 +89,12 @@ export function usePharmacy() {
   const [draftPrescription, setDraftPrescription] =
     useState<PharmacyPrescription | null>(null);
 
-  // Prevent race conditions and duplicate calls
+  // Refs for lifecycle, duplicate prevention, and completion-notification deduplication
   const isMountedRef = useRef(true);
   const isSubmittingRef = useRef(false);
+  const hasHydratedOrdersRef = useRef(false);
+  const orderStatusMapRef = useRef<Map<string, PharmacyOrderStatus>>(new Map());
+  const notifiedCompletedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -63,42 +103,161 @@ export function usePharmacy() {
     };
   }, []);
 
-  // Load all initial authoritative data from Supabase
-  const loadData = useCallback(async (silent = false) => {
-    if (!silent) setIsLoading(true);
-    setErrorMessage(null);
-    try {
-      const [pRes, oRes, phRes, sRes] = await Promise.allSettled([
-        pharmacyService.getPrescriptions(),
-        pharmacyService.getOrders(),
-        pharmacyService.getPharmaciesList(),
-        pharmacyService.getSettings(),
-      ]);
+  // Hydrate persisted notified-order IDs and prior cached order statuses per user/household
+  useEffect(() => {
+    if (!supabaseUser?.id) return;
+    const savedNotifiedIds =
+      cacheManager.getUserCache<string[]>(
+        supabaseUser.id,
+        "pharmacy_completed_notified_ids"
+      ) || [];
+    notifiedCompletedIdsRef.current = new Set(savedNotifiedIds);
 
-      if (!isMountedRef.current) return;
-
-      if (pRes.status === "fulfilled") setPrescriptions(pRes.value);
-      if (oRes.status === "fulfilled") setOrders(oRes.value);
-      if (phRes.status === "fulfilled") setPharmacies(phRes.value);
-      if (sRes.status === "fulfilled") setServiceSettings(sRes.value);
-    } catch (err: any) {
-      if (!isMountedRef.current) return;
-      console.error("[usePharmacy] Failed to load data:", err);
-      setErrorMessage(err.message || "فشل تحميل بيانات الصيدلية والروشتات");
-    } finally {
-      if (isMountedRef.current && !silent) {
-        setIsLoading(false);
-      }
+    const targetHouseholdId =
+      household?.id ||
+      cacheManager.getUserCache<string>(supabaseUser.id, "last_household_id");
+    if (targetHouseholdId) {
+      const cachedOrders =
+        cacheManager.getHouseholdCache<PharmacyOrder[]>(
+          supabaseUser.id,
+          targetHouseholdId,
+          "pharmacy_orders"
+        ) || [];
+      cachedOrders.forEach((o) => {
+        if (!orderStatusMapRef.current.has(o.id)) {
+          orderStatusMapRef.current.set(o.id, o.status);
+        }
+      });
     }
-  }, []);
+  }, [supabaseUser?.id, household?.id]);
+
+  const processOrderStatusNotifications = useCallback(
+    (incomingOrders: PharmacyOrder[], isInitialHydration: boolean) => {
+      const { notificationsToEmit, newlyMarkedSilentIds } =
+        evaluatePharmacyCompletionNotifications({
+          orders: incomingOrders,
+          previousStatuses: orderStatusMapRef.current,
+          alreadyNotifiedIds: notifiedCompletedIdsRef.current,
+          isInitialHydration,
+        });
+
+      let dirtyCache = false;
+      for (const id of newlyMarkedSilentIds) {
+        if (!notifiedCompletedIdsRef.current.has(id)) {
+          notifiedCompletedIdsRef.current.add(id);
+          dirtyCache = true;
+        }
+      }
+
+      for (const order of notificationsToEmit) {
+        if (notifiedCompletedIdsRef.current.has(order.id)) continue;
+        notifiedCompletedIdsRef.current.add(order.id);
+        dirtyCache = true;
+
+        addAppNotification({
+          id: `pharmacy_completed_${order.id}`,
+          title: "تم توصيل طلب الصيدلية بنجاح",
+          message: `تم توصيل طلبك رقم ${order.orderNumber} (${order.title}) بنجاح.`,
+          type: "purchase_made",
+          targetRole: "all",
+          meta: {
+            category: "pharmacy",
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            status: "completed",
+          },
+        });
+      }
+
+      if (dirtyCache && supabaseUser?.id) {
+        cacheManager.setUserCache(
+          supabaseUser.id,
+          "pharmacy_completed_notified_ids",
+          Array.from(notifiedCompletedIdsRef.current)
+        );
+      }
+    },
+    [addAppNotification, supabaseUser?.id]
+  );
+
+  // Load all initial authoritative data from Supabase
+  const loadData = useCallback(
+    async (silent = false) => {
+      if (!silent) setIsLoading(true);
+      setErrorMessage(null);
+      try {
+        const [pRes, oRes, phRes, sRes] = await Promise.allSettled([
+          pharmacyService.getPrescriptions(),
+          pharmacyService.getOrders(household?.id),
+          pharmacyService.getPharmaciesList(),
+          pharmacyService.getSettings(),
+        ]);
+
+        if (!isMountedRef.current) return;
+
+        if (pRes.status === "fulfilled") setPrescriptions(pRes.value);
+        if (oRes.status === "fulfilled") {
+          const isInitial = !hasHydratedOrdersRef.current;
+          hasHydratedOrdersRef.current = true;
+          processOrderStatusNotifications(oRes.value, isInitial);
+          setOrders(oRes.value);
+        }
+        if (phRes.status === "fulfilled") setPharmacies(phRes.value);
+        if (sRes.status === "fulfilled") setServiceSettings(sRes.value);
+      } catch (err: any) {
+        if (!isMountedRef.current) return;
+        console.error("[usePharmacy] Failed to load data:", err);
+        setErrorMessage(err.message || "فشل تحميل بيانات الصيدلية والروشتات");
+      } finally {
+        if (isMountedRef.current && !silent) {
+          setIsLoading(false);
+        }
+      }
+    },
+    [household?.id, processOrderStatusNotifications]
+  );
+
+  // Fresh single-order DB fetch (called on modal open and live updates)
+  const refreshOrder = useCallback(
+    async (orderId: string): Promise<PharmacyOrder | null> => {
+      if (!orderId) return null;
+      try {
+        const fresh = await pharmacyService.getOrderById(orderId, household?.id);
+        if (!isMountedRef.current || !fresh) return fresh;
+
+        processOrderStatusNotifications([fresh], false);
+
+        setOrders((prev) => {
+          const exists = prev.some((o) => o.id === fresh.id);
+          if (!exists) return [fresh, ...prev];
+          return prev.map((o) => (o.id === fresh.id ? fresh : o));
+        });
+
+        if (selectedOrderIdRef.current === fresh.id) {
+          setSelectedOrderFallback(fresh);
+        }
+        return fresh;
+      } catch (err) {
+        console.warn("[usePharmacy] refreshOrder note:", err);
+        return null;
+      }
+    },
+    [household?.id, processOrderStatusNotifications]
+  );
 
   useEffect(() => {
     loadData();
 
-    // Subscribe to Realtime updates on all pharmacy tables
-    const unsubscribe = pharmacyService.subscribeToPharmacyUpdates(() => {
-      console.log("[usePharmacy] Realtime update event received, refreshing data...");
+    // Subscribe to Realtime updates on all pharmacy tables (with auto-reconnect)
+    const unsubscribe = pharmacyService.subscribeToPharmacyUpdates((event) => {
+      console.log(
+        "[usePharmacy] Realtime update event received, refreshing data...",
+        event?.table || "sync"
+      );
       loadData(true);
+      if (selectedOrderIdRef.current) {
+        refreshOrder(selectedOrderIdRef.current);
+      }
     });
 
     // Subscribe to centralized `public.app_section_settings` (Realtime + foreground resume)
@@ -131,7 +290,7 @@ export function usePharmacy() {
       unsubscribe();
       unsubscribeSection();
     };
-  }, [loadData]);
+  }, [loadData, refreshOrder]);
 
   // Derived active orders vs past/archived orders
   const activeOrders = useMemo(() => {
@@ -141,7 +300,8 @@ export function usePharmacy() {
         (o.status === "pending_review" ||
           o.status === "accepted" ||
           o.status === "shopping" ||
-          o.status === "ready_for_delivery")
+          o.status === "ready_for_delivery" ||
+          o.status === "cancellation_requested")
     );
   }, [orders]);
 
@@ -155,15 +315,29 @@ export function usePharmacy() {
     );
   }, [orders]);
 
-  // Keep selected order modal in sync with live order updates
-  useEffect(() => {
-    if (selectedOrderForDetail) {
-      const live = orders.find((o) => o.id === selectedOrderForDetail.id);
-      if (live) {
-        setSelectedOrderForDetail(live);
+  // Derive live selectedOrderForDetail cleanly from `orders` + fallback
+  const selectedOrderForDetail = useMemo(() => {
+    if (!selectedOrderId) return null;
+    return (
+      orders.find((o) => o.id === selectedOrderId) || selectedOrderFallback
+    );
+  }, [selectedOrderId, orders, selectedOrderFallback]);
+
+  const setSelectedOrderForDetail = useCallback(
+    (order: PharmacyOrder | null) => {
+      if (!order) {
+        selectedOrderIdRef.current = null;
+        setSelectedOrderId(null);
+        setSelectedOrderFallback(null);
+        return;
       }
-    }
-  }, [orders, selectedOrderForDetail]);
+      selectedOrderIdRef.current = order.id;
+      setSelectedOrderId(order.id);
+      setSelectedOrderFallback(order);
+      refreshOrder(order.id);
+    },
+    [refreshOrder]
+  );
 
   // =========================================================================
   // ACTIONS
@@ -254,6 +428,7 @@ export function usePharmacy() {
           userId: supabaseUser?.id,
         });
 
+        orderStatusMapRef.current.set(created.id, created.status);
         setOrders((prev) => [
           created,
           ...prev.filter((o) => o.id !== created.id),
@@ -294,6 +469,7 @@ export function usePharmacy() {
       setErrorMessage(null);
       try {
         await pharmacyService.cancelOrder(orderId, reason);
+        orderStatusMapRef.current.set(orderId, "cancelled");
         setOrders((prev) =>
           prev.map((o) =>
             o.id === orderId
@@ -305,8 +481,8 @@ export function usePharmacy() {
               : o
           )
         );
-        if (selectedOrderForDetail?.id === orderId) {
-          setSelectedOrderForDetail((prev) =>
+        if (selectedOrderIdRef.current === orderId) {
+          setSelectedOrderFallback((prev) =>
             prev
               ? {
                   ...prev,
@@ -324,33 +500,30 @@ export function usePharmacy() {
         setIsSubmitting(false);
       }
     },
-    [selectedOrderForDetail]
+    []
   );
 
-  const handleArchiveOrder = useCallback(
-    async (orderId: string) => {
-      setIsSubmitting(true);
-      setErrorMessage(null);
-      try {
-        await pharmacyService.archiveOrder(orderId);
-        setOrders((prev) =>
-          prev.map((o) => (o.id === orderId ? { ...o, isArchived: true } : o))
+  const handleArchiveOrder = useCallback(async (orderId: string) => {
+    setIsSubmitting(true);
+    setErrorMessage(null);
+    try {
+      await pharmacyService.archiveOrder(orderId);
+      setOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? { ...o, isArchived: true } : o))
+      );
+      if (selectedOrderIdRef.current === orderId) {
+        setSelectedOrderFallback((prev) =>
+          prev ? { ...prev, isArchived: true } : null
         );
-        if (selectedOrderForDetail?.id === orderId) {
-          setSelectedOrderForDetail((prev) =>
-            prev ? { ...prev, isArchived: true } : null
-          );
-        }
-      } catch (err: any) {
-        console.error("[usePharmacy] Error archiving order:", err);
-        setErrorMessage(err.message || "فشل أرشفة الطلب");
-        throw err;
-      } finally {
-        setIsSubmitting(false);
       }
-    },
-    [selectedOrderForDetail]
-  );
+    } catch (err: any) {
+      console.error("[usePharmacy] Error archiving order:", err);
+      setErrorMessage(err.message || "فشل أرشفة الطلب");
+      throw err;
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, []);
 
   const handleUpdateOrderPharmacy = useCallback(
     async (orderId: string, newPharmacy: string, pharmacyId?: string) => {
@@ -369,8 +542,8 @@ export function usePharmacy() {
               : o
           )
         );
-        if (selectedOrderForDetail?.id === orderId) {
-          setSelectedOrderForDetail((prev) =>
+        if (selectedOrderIdRef.current === orderId) {
+          setSelectedOrderFallback((prev) =>
             prev
               ? { ...prev, pharmacyName: newPharmacy.trim() || undefined }
               : null
@@ -388,7 +561,7 @@ export function usePharmacy() {
         setIsSubmitting(false);
       }
     },
-    [selectedOrderForDetail]
+    []
   );
 
   const handleAddPharmacy = useCallback(async (name: string) => {
@@ -397,7 +570,7 @@ export function usePharmacy() {
     return list;
   }, []);
 
-  // Requirement 10: Deep clone prescription for re-ordering ensuring order is completely independent
+  // Deep clone prescription for re-ordering/editing independently without mutating original saved Rx
   const startReorderPrescription = useCallback(
     (prescription: PharmacyPrescription) => {
       const clone: PharmacyPrescription = {
@@ -436,6 +609,7 @@ export function usePharmacy() {
     setActiveSubTab,
     selectedOrderForDetail,
     setSelectedOrderForDetail,
+    refreshOrder,
     draftPrescription,
     setDraftPrescription,
     startReorderPrescription,

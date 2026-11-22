@@ -178,12 +178,15 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
           ) : (
             filteredNotifications.map((notif) => {
               const isUrgent = notif.type === "urgent_alert" || notif.type === "budget_warning";
+              const isPharmacy = notif.meta?.category === "pharmacy" || notif.id?.startsWith("pharmacy_completed_");
               return (
                 <div
                   key={notif.id}
                   className={`p-4 rounded-2xl border transition-all ${
                     isUrgent
                       ? "bg-rose-50 border-rose-200 shadow-xs"
+                      : isPharmacy
+                      ? "bg-teal-50/70 border-teal-200"
                       : notif.type === "item_added"
                       ? "bg-emerald-50/70 border-emerald-200"
                       : notif.type === "purchase_made"
@@ -197,12 +200,14 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                         className={`w-7 h-7 rounded-xl flex items-center justify-center text-xs font-bold ${
                           isUrgent
                             ? "bg-rose-600 text-white animate-bounce"
+                            : isPharmacy
+                            ? "bg-teal-600 text-white"
                             : notif.type === "item_added"
                             ? "bg-emerald-600 text-white"
                             : "bg-blue-600 text-white"
                         }`}
                       >
-                        {isUrgent ? "🚨" : notif.type === "item_added" ? "📦" : "🛒"}
+                        {isUrgent ? "🚨" : isPharmacy ? "💊" : notif.type === "item_added" ? "📦" : "🛒"}
                       </div>
                       <h4 className="text-xs sm:text-sm font-bold text-slate-900">
                         {notif.title}
